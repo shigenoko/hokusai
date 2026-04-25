@@ -53,6 +53,29 @@ It transforms ad-hoc AI usage into a repeatable and controlled process where:
 - Knowledge and processes are standardized
 - Every step is traceable and auditable
 
+## Architecture
+
+HOKUSAI's architecture is built on a simple human-AI collaboration loop:
+
+- **Draft**: AI generates initial output based on specifications
+- **Review**: Human evaluates correctness, risk, and intent
+- **Fix**: AI refines output based on feedback
+- **Approve**: Human makes final decision
+- **Deploy**: Output is released or executed
+
+This workflow ensures both speed and control.
+
+```mermaid
+graph TD
+    A[Specification] --> B[AI Draft]
+    B --> C[Human Review]
+    C --> D[AI Fix]
+    D --> E[Human Approval]
+    E --> F[Deployment]
+
+    C -->|Feedback Loop| B
+```
+
 ## Workflow
 
 HOKUSAI is built around a simple but powerful workflow:
