@@ -22,7 +22,7 @@ jobs:
         run: uv sync --extra dev
 
       - name: Run ruff
-        run: uv run ruff check hokusai/
+        run: uv run ruff check hokusai/ scripts/
 
   tests:
     runs-on: ubuntu-latest

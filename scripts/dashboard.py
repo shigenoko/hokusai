@@ -20,8 +20,8 @@ import uuid
 import webbrowser
 from datetime import datetime
 from http.server import HTTPServer, SimpleHTTPRequestHandler
-from socketserver import ThreadingMixIn
 from pathlib import Path
+from socketserver import ThreadingMixIn
 from urllib.parse import parse_qs, urlparse
 
 import yaml
@@ -33,7 +33,6 @@ from hokusai.constants import PHASE_SHORT_NAMES
 from hokusai.persistence.sqlite_store import SQLiteStore
 from hokusai.utils.phase_page_templates import (
     PHASE_PAGE_DECISION_DEFAULT,
-    PHASE_PAGE_DOCUMENT_STATE_KEYS,
     get_phase_page_context,
     initialize_phase_page_state,
 )
@@ -731,8 +730,8 @@ def render_pr_progress(state: dict, workflow_id: str | None = None, bg_running: 
     if is_review_status and workflow_id:
         if bg_running:
             finish_btn = (
-                f'<button type="button" class="phase-run-btn" disabled>'
-                f'実行中...</button>'
+                '<button type="button" class="phase-run-btn" disabled>'
+                '実行中...</button>'
             )
         else:
             disabled = "" if all_confirmed else "disabled"
@@ -760,8 +759,8 @@ def render_pr_progress(state: dict, workflow_id: str | None = None, bg_running: 
     if is_review_status and workflow_id:
         if bg_running:
             detail_btn = (
-                f'<button type="button" class="phase9-detail-btn" disabled '
-                f'style="opacity:0.5;cursor:not-allowed;">実行中...</button>'
+                '<button type="button" class="phase9-detail-btn" disabled '
+                'style="opacity:0.5;cursor:not-allowed;">実行中...</button>'
             )
         else:
             detail_btn = (
@@ -1022,7 +1021,7 @@ def phase6_failure_summary(state: dict) -> list[dict]:
     """Phase 6 の全 verification_errors を分類して返す。"""
     errors = state.get("verification_errors", [])
     return [
-        classify_verification_error(e) for e in errors if not e.get("success", True) is True
+        classify_verification_error(e) for e in errors if e.get("success", True) is not True
     ]
 
 
@@ -1573,8 +1572,8 @@ def apply_cross_review_fixes(workflow_id: str, phase: int) -> dict:
         if config_path:
             set_config(create_config_from_env_and_file(str(config_path)))
 
-    from hokusai.integrations.claude_code import ClaudeCodeClient
     from hokusai.config import get_config
+    from hokusai.integrations.claude_code import ClaudeCodeClient
     llm_timeout = get_config().skill_timeout
     claude = ClaudeCodeClient()
     try:
@@ -1649,7 +1648,7 @@ def rerun_cross_review_for_phase(workflow_id: str, phase: int) -> dict:
         state["waiting_for_human"] = False
         state["human_input_request"] = ""
         # フェーズステータスを completed に復元（completed_at / current_phase も更新）
-        from hokusai.state import update_phase_status, PhaseStatus
+        from hokusai.state import PhaseStatus, update_phase_status
         phases = state.get("phases", {})
         phase_data = phases.get(phase) or phases.get(str(phase))
         if phase_data and phase_data.get("status") == "failed":
@@ -1693,7 +1692,7 @@ def continue_ignoring_cross_review(workflow_id: str, phase: int) -> dict:
     state["waiting_for_human"] = False
     state["human_input_request"] = ""
     # フェーズステータスを completed に復元（completed_at / current_phase も更新）
-    from hokusai.state import update_phase_status, PhaseStatus
+    from hokusai.state import PhaseStatus, update_phase_status
     phases = state.get("phases", {})
     phase_data = phases.get(phase) or phases.get(str(phase))
     if phase_data and phase_data.get("status") == "failed":
@@ -1976,6 +1975,26 @@ def render_detail_page(state: dict, bg_running: bool = False) -> str:
             repos.add(f"{owner}/{repo}")
     repos_html = ", ".join(f"<code>{r}</code>" for r in sorted(repos)) if repos else "-"
 
+    # バックグラウンド実行中のポーリングスクリプト（外側 f-string とネストすると Python 3.11 で構文エラーになるため変数化）
+    bg_polling_script = ""
+    if bg_running:
+        bg_polling_script = f'''
+    <div data-bg-running="1" style="display:none;"></div>
+    <script>
+    setInterval(async () => {{
+        try {{
+            const resp = await fetch('/api/workflow/progress?id={workflow_id}');
+            const data = await resp.json();
+            if (!data.running) {{ sessionStorage.removeItem('_hokusai_banner'); location.reload(); return; }}
+            const el = document.getElementById('substep-progress');
+            if (el && data.substep) {{
+                el.textContent = data.substep.replace(new RegExp('📋 Phase ' + '\\\\d+ '), '');
+            }}
+        }} catch(e) {{}}
+    }}, 3000);
+    </script>
+    '''
+
     return f"""
     <a href="/" class="back-link">&larr; 一覧に戻る</a>
     <h1 class="page-title">{task_title}</h1>
@@ -2035,22 +2054,7 @@ def render_detail_page(state: dict, bg_running: bool = False) -> str:
         <button type="button" class="delete-btn" {"disabled" if bg_running else ""} onclick="deleteWorkflow('{workflow_id}')">このワークフローを削除</button>
     </div>
 
-    {"" if not bg_running else f'''
-    <div data-bg-running="1" style="display:none;"></div>
-    <script>
-    setInterval(async () => {{
-        try {{
-            const resp = await fetch('/api/workflow/progress?id={workflow_id}');
-            const data = await resp.json();
-            if (!data.running) {{ sessionStorage.removeItem('_hokusai_banner'); location.reload(); return; }}
-            const el = document.getElementById('substep-progress');
-            if (el && data.substep) {{
-                el.textContent = data.substep.replace(/📋 Phase \\d+ /, '');
-            }}
-        }} catch(e) {{}}
-    }}, 3000);
-    </script>
-    '''}
+    {bg_polling_script}
     """
 
 
@@ -2971,7 +2975,7 @@ review_checklist:
 
 def render_prompts_page() -> str:
     """LLM指示文管理ページをHTMLにレンダリング"""
-    return f"""\
+    return """\
     <a href="/" class="back-link">&larr; ダッシュボードに戻る</a>
     <h1 class="page-title">LLM指示文</h1>
     <div style="display:flex;gap:20px;min-height:600px;">
@@ -3004,7 +3008,7 @@ def render_prompts_page() -> str:
     let _selectedId = null;
     let _originalContent = '';
 
-    async function loadPromptList() {{
+    async function loadPromptList() {
         const res = await fetch('/api/prompts');
         const data = await res.json();
         if (!data.success) return;
@@ -3012,26 +3016,26 @@ def render_prompts_page() -> str:
         const container = document.getElementById('promptListItems');
         let html = '';
         let currentPhase = '';
-        for (const p of _prompts) {{
+        for (const p of _prompts) {
             const phase = p.id.split('.')[0];
-            if (phase !== currentPhase) {{
+            if (phase !== currentPhase) {
                 currentPhase = phase;
                 const label = phase.replace('_', ' ').replace(/\\b\\w/g, c => c.toUpperCase());
                 html += '<div style="padding:8px 16px 4px;font-size:11px;text-transform:uppercase;letter-spacing:1px;color:var(--text-muted);background:var(--bg-secondary);">' + label + '</div>';
-            }}
+            }
             html += '<div class="prompt-item" data-id="' + p.id + '" onclick="selectPrompt(\\'' + p.id + '\\')" style="padding:8px 16px;cursor:pointer;border-bottom:1px solid var(--border-color);font-size:13px;">';
             html += '<div style="font-weight:500;">' + p.title + '</div>';
             html += '<div style="font-size:11px;color:var(--text-muted);margin-top:2px;">' + p.id + '</div>';
             html += '</div>';
-        }}
+        }
         container.innerHTML = html;
-    }}
+    }
 
-    async function selectPrompt(id) {{
+    async function selectPrompt(id) {
         _selectedId = id;
-        document.querySelectorAll('.prompt-item').forEach(el => {{
+        document.querySelectorAll('.prompt-item').forEach(el => {
             el.style.background = el.dataset.id === id ? 'var(--bg-secondary)' : '';
-        }});
+        });
         const entry = _prompts.find(p => p.id === id);
         if (!entry) return;
         const res = await fetch('/api/prompts/' + encodeURIComponent(id));
@@ -3039,7 +3043,7 @@ def render_prompts_page() -> str:
         if (!data.success) return;
         _originalContent = data.data.content;
         const mtime = entry.mtime ? new Date(entry.mtime * 1000).toLocaleString('ja-JP') : '-';
-        const vars = (entry.variables || []).length > 0 ? entry.variables.map(v => '{{' + v + '}}').join(', ') : 'なし';
+        const vars = (entry.variables || []).length > 0 ? entry.variables.map(v => '{' + v + '}').join(', ') : 'なし';
         document.getElementById('promptMeta').innerHTML =
             '<div style="margin-bottom:12px;">' +
             '<h3 style="margin:0 0 8px;">' + entry.title + '</h3>' +
@@ -3052,35 +3056,35 @@ def render_prompts_page() -> str:
         document.getElementById('promptContent').value = data.data.content;
         document.getElementById('promptEditArea').style.display = '';
         document.getElementById('promptSaveResult').textContent = '';
-    }}
+    }
 
-    async function savePrompt() {{
+    async function savePrompt() {
         if (!_selectedId) return;
         const content = document.getElementById('promptContent').value;
-        const res = await fetch('/api/prompts/' + encodeURIComponent(_selectedId), {{
+        const res = await fetch('/api/prompts/' + encodeURIComponent(_selectedId), {
             method: 'POST',
-            headers: {{'Content-Type': 'application/json'}},
-            body: JSON.stringify({{content: content}})
-        }});
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({content: content})
+        });
         const data = await res.json();
         const el = document.getElementById('promptSaveResult');
-        if (data.success) {{
+        if (data.success) {
             el.style.color = 'var(--status-completed)';
             el.textContent = '\\u2705 保存しました';
             _originalContent = content;
             loadPromptList();
-        }} else {{
+        } else {
             el.style.color = 'var(--status-failed)';
             el.textContent = '\\u274c ' + (data.errors || []).join(', ');
-        }}
-    }}
+        }
+    }
 
-    function resetPrompt() {{
-        if (_originalContent !== undefined) {{
+    function resetPrompt() {
+        if (_originalContent !== undefined) {
             document.getElementById('promptContent').value = _originalContent;
             document.getElementById('promptSaveResult').textContent = '';
-        }}
-    }}
+        }
+    }
 
     loadPromptList();
     </script>
@@ -6306,7 +6310,7 @@ def main():
         init_db()
 
     url = f"http://localhost:{PORT}"
-    print(f"HOKUS AI Dashboard を起動中...")
+    print("HOKUS AI Dashboard を起動中...")
     print(f"URL: {url}")
     print("終了するには Ctrl+C を押してください")
 
