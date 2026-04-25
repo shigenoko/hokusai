@@ -1,0 +1,36 @@
+{
+  "type": "object",
+  "properties": {
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "category": {
+            "type": "string",
+            "enum": ["completeness", "accuracy", "feasibility", "consistency", "risk"]
+          },
+          "severity": {
+            "type": "string",
+            "enum": ["critical", "major", "minor", "info"]
+          },
+          "title": { "type": "string" },
+          "description": { "type": "string" },
+          "suggestion": { "type": "string" }
+        },
+        "required": ["category", "severity", "title", "description", "suggestion"],
+        "additionalProperties": false
+      }
+    },
+    "overall_assessment": {
+      "type": "string",
+      "enum": ["approve", "request_changes", "needs_discussion"]
+    },
+    "summary": { "type": "string" },
+    "confidence_score": {
+      "type": "number"
+    }
+  },
+  "required": ["findings", "overall_assessment", "summary", "confidence_score"],
+  "additionalProperties": false
+}

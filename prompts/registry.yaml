@@ -1,0 +1,108 @@
+- id: phase2.task_research
+  title: "Phase 2 事前調査"
+  file: phase2/task_research.md
+  kind: prompt
+  variables:
+    - task_url
+
+- id: phase2.task_research_retry
+  title: "Phase 2 事前調査リトライ"
+  file: phase2/task_research_retry.md
+  kind: prompt
+  variables:
+    - task_url
+    - previous_output
+    - validation_error
+
+- id: phase3.design_check
+  title: "Phase 3 設計チェック"
+  file: phase3/design_check.md
+  kind: prompt
+  variables:
+    - task_url
+    - research_result
+    - cross_review_section
+
+- id: phase3.design_check_retry
+  title: "Phase 3 設計チェックリトライ"
+  file: phase3/design_check_retry.md
+  kind: prompt
+  variables:
+    - task_url
+    - research_result
+    - previous_output
+    - validation_error
+    - cross_review_section
+
+- id: phase4.dev_plan_retry
+  title: "Phase 4 開発計画リトライ"
+  file: phase4/dev_plan_retry.md
+  kind: prompt
+  variables:
+    - task_url
+    - research_result
+    - previous_output
+    - cross_review_section
+
+- id: phase4.append_system_prompt
+  title: "Phase 4 システムプロンプト追加"
+  file: phase4/append_system_prompt.md
+  kind: system_prompt
+  variables: []
+
+- id: phase5.implementation
+  title: "Phase 5 実装"
+  file: phase5/implementation.md
+  kind: prompt
+  variables:
+    - repo_section
+    - coding_rules_section
+    - task_url
+    - work_plan_section
+    - expected_files_section
+
+- id: phase5.retry_fix
+  title: "Phase 5 リトライ修正"
+  file: phase5/retry_fix.md
+  kind: prompt
+  variables:
+    - repo_section
+    - coding_rules_section
+    - recurring_warning_section
+    - verification_errors_section
+    - review_issues_section
+    - recurring_guidance_section
+
+- id: phase7.final_review
+  title: "Phase 7 最終レビュー"
+  file: phase7/final_review.md
+  kind: prompt
+  variables:
+    - builtin_checklist
+    - project_checklist_section
+
+- id: phase8.review_fix
+  title: "Phase 8 レビュー修正"
+  file: phase8/review_fix.md
+  kind: prompt
+  variables:
+    - pr_number
+    - comments_section
+
+- id: cross_review.phase2
+  title: "Cross Review Phase 2"
+  file: cross_review/phase2.md
+  kind: review_prompt
+  variables: []
+
+- id: cross_review.phase3
+  title: "Cross Review Phase 3"
+  file: cross_review/phase3.md
+  kind: review_prompt
+  variables: []
+
+- id: cross_review.phase4
+  title: "Cross Review Phase 4"
+  file: cross_review/phase4.md
+  kind: review_prompt
+  variables: []

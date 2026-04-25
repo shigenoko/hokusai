@@ -1,0 +1,25 @@
+# GitHub Issue を使用するプロジェクトの設定例
+# Usage: workflow -c configs/example-github-issue.yaml start <issue_url>
+
+project_root: ~/path/to/your/project
+base_branch: main
+
+# Build commands
+build_command: npm run build
+test_command: npm run test
+lint_command: npm run lint
+
+# Task backend: GitHub Issue
+task_backend:
+  type: github_issue
+  # repo: owner/repo  # 省略時は現在のリポジトリを使用
+
+# Git hosting: GitHub (default)
+git_hosting:
+  type: github
+
+# Status mapping (GitHub Issue ではラベルとして使用)
+status_mapping:
+  in_progress: "in-progress"
+  reviewing: "reviewing"
+  done: "done"

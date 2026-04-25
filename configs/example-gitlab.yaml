@@ -1,0 +1,31 @@
+# GitLab を使用するプロジェクトの設定例
+# Usage: workflow -c configs/example-gitlab.yaml start <task_url>
+#
+# 前提条件:
+# - glab CLI がインストールされていること
+# - glab auth login で認証済みであること
+
+project_root: ~/path/to/your/project
+base_branch: main
+
+# Build commands
+build_command: make build
+test_command: make test
+lint_command: make lint
+
+# Task backend: Notion (MCP経由)
+# GitLab Issue を使う場合は github_issue と同様の実装が必要
+task_backend:
+  type: notion
+
+# Git hosting: GitLab
+git_hosting:
+  type: gitlab
+  base_url: https://gitlab.com  # 自己ホストの場合は URL を変更
+  # project_path: group/project  # 省略時は git remote から取得
+
+# Status mapping
+status_mapping:
+  in_progress: "進行中"
+  reviewing: "対応待ち/レビュー中"
+  done: "完了"
