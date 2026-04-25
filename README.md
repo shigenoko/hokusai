@@ -1,4 +1,6 @@
-# Hokusai
+# HOKUSAI
+
+**HOKUSAI** = **H**uman-**O**rchestrated **K**nowledge & **U**nified **S**ystem for **A**I **I**ntegration
 
 LangGraph-based AI development workflow automation with Claude Code integration.
 
@@ -6,9 +8,9 @@ LangGraph-based AI development workflow automation with Claude Code integration.
 
 ## Overview
 
-Hokusai orchestrates a 10-phase development workflow that automates research, planning, implementation, verification, review, and pull-request management. It is built on [LangGraph](https://github.com/langchain-ai/langgraph) and integrates tightly with [Claude Code](https://claude.com/claude-code) and the GitHub CLI (`gh`).
+HOKUSAI orchestrates a 10-phase development workflow that automates research, planning, implementation, verification, review, and pull-request management. It is built on [LangGraph](https://github.com/langchain-ai/langgraph) and integrates tightly with [Claude Code](https://claude.com/claude-code) and the GitHub CLI (`gh`).
 
-The workflow is designed for **Human-in-the-Loop (HITL)** development: each phase can pause for review, and the unified review loop in Phase 8 handles Copilot and human review comments in any order.
+The name reflects the design philosophy: **humans orchestrate** decisions and review, while a **unified system** integrates AI tooling for the heavy lifting. Each phase can pause for human input, and the unified review loop in Phase 8 handles Copilot and human review comments in any order — making the workflow safe and predictable for **Human-in-the-Loop (HITL)** development.
 
 ## Features
 

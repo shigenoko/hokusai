@@ -1,4 +1,6 @@
-# Hokusai
+# HOKUSAI
+
+**HOKUSAI** = **H**uman-**O**rchestrated **K**nowledge & **U**nified **S**ystem for **A**I **I**ntegration
 
 LangGraph をベースにした AI 開発ワークフロー自動化ツール。Claude Code と統合されている。
 
@@ -6,9 +8,9 @@ LangGraph をベースにした AI 開発ワークフロー自動化ツール。
 
 ## 概要
 
-Hokusai は調査・計画・実装・検証・レビュー・プルリクエスト管理を自動化する 10 フェーズの開発ワークフローをオーケストレーションする。[LangGraph](https://github.com/langchain-ai/langgraph) 上に構築され、[Claude Code](https://claude.com/claude-code) および GitHub CLI (`gh`) と密に統合されている。
+HOKUSAI は調査・計画・実装・検証・レビュー・プルリクエスト管理を自動化する 10 フェーズの開発ワークフローをオーケストレーションする。[LangGraph](https://github.com/langchain-ai/langgraph) 上に構築され、[Claude Code](https://claude.com/claude-code) および GitHub CLI (`gh`) と密に統合されている。
 
-このワークフローは **Human-in-the-Loop (HITL)** 開発を前提としている。各フェーズはレビュー時に一時停止でき、Phase 8 の統合レビューループは Copilot と人間のレビューコメントを順不同で処理する。
+名前は設計思想を反映している。意思決定とレビューは **人間がオーケストレーション** し、AI ツール群を **統合システム** が連携させて実装・検証を担う。各フェーズは人間の判断を待つために一時停止可能で、Phase 8 の統合レビューループは Copilot と人間のレビューコメントを順不同で処理する。これにより **Human-in-the-Loop (HITL)** な開発を安全かつ予測可能に進められる。
 
 ## 機能
 

@@ -126,7 +126,7 @@ class PullRequestInfo(TypedDict):
     url: str  # PR URL
     number: int  # PR番号
     # 拡張フィールド（複数PR対応）
-    status: Optional[str]  # PRStatus value（Hokusai内部ステータス）
+    status: Optional[str]  # PRStatus value（HOKUSAI内部ステータス）
     github_status: Optional[str]  # GitHubステータス（open/closed/merged/draft）
     owner: Optional[str]  # リポジトリオーナー（例: "my-org"）
     repo: Optional[str]  # リポジトリ名（例: "my-backend"）
