@@ -14,6 +14,14 @@ The name reflects the design philosophy: **humans orchestrate** decisions and re
 
 ## Why HOKUSAI?
 
+**AI alone is not enough.**
+
+To use AI in real-world systems — especially in regulated industries — you need:
+
+- **Control**
+- **Accountability**
+- **Repeatability**
+
 HOKUSAI is a human-centered AI workflow system designed for organizations where **trust, accountability, and control matter**.
 
 In industries like finance, payments, and enterprise systems, AI cannot operate unchecked. Every decision must be **explainable, auditable, and ultimately owned by a human**.
@@ -92,6 +100,40 @@ HOKUSAI is built around a simple but powerful workflow:
 10. **Record** — Persist outcomes for traceability and audit
 
 Each phase can pause for human input. Humans approve transitions, request revisions, or override at any point — keeping responsibility clearly on the human side while AI handles execution.
+
+## Key Capabilities
+
+- **Human-in-the-loop control** — Humans approve transitions, request revisions, or override at any point
+- **Standardized workflow design** — Reusable, explicit phases replace ad-hoc AI usage
+- **Full traceability and auditability** — Every action is logged for review and compliance
+- **AI orchestration layer** — Multiple AI tools (Claude Code, Copilot, etc.) integrated through a single workflow
+- **Knowledge-driven execution (specification-first)** — Tasks start from a clear specification, not from prompt improvisation
+
+## Use Cases
+
+HOKUSAI is particularly suited for environments where control and accountability are critical:
+
+- **Financial systems and payment platforms**
+- **Enterprise software development**
+- **Compliance-heavy operations**
+- **Contract and document review workflows**
+
+## What HOKUSAI is NOT
+
+- **Not just an AI tool** — it's a structured workflow that uses AI
+- **Not just an agent system** — humans are first-class participants, not optional reviewers
+- **Not just a prompt collection** — prompts are part of a larger orchestrated process
+- **Not just a RAG pipeline** — knowledge integration is one component, not the whole system
+
+HOKUSAI is an **operational framework** for integrating AI into real-world workflows.
+
+## Design Principles
+
+- **Human-centered** — Humans remain responsible for decisions
+- **AI-accelerated** — AI improves speed and efficiency, not the other way around
+- **Workflow-driven** — Processes are explicitly defined and reusable
+- **Observable** — Every action is logged and traceable
+- **Scalable** — Designed for organizational adoption, not just individual use
 
 ## Features
 
