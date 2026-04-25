@@ -31,6 +31,45 @@ Rather than replacing humans, HOKUSAI orchestrates AI around them.
 
 It provides a unified framework to integrate AI into real-world operations — safely, transparently, and at scale.
 
+## The Problem
+
+AI adoption in enterprise environments is fragmented and difficult to control.
+
+- AI usage is inconsistent across teams
+- Prompts and workflows are not standardized
+- Outputs are not always traceable or auditable
+- Human responsibility is unclear
+
+In regulated industries such as finance and payments, this makes it difficult to safely scale AI usage.
+
+## The Solution
+
+HOKUSAI provides a structured, human-in-the-loop workflow for AI integration.
+
+It transforms ad-hoc AI usage into a repeatable and controlled process where:
+
+- AI accelerates execution
+- Humans retain decision-making authority
+- Knowledge and processes are standardized
+- Every step is traceable and auditable
+
+## Workflow
+
+HOKUSAI is built around a simple but powerful workflow:
+
+1. **Research** — Investigate the task scope and existing code
+2. **Design** — Plan the architecture and approach
+3. **Plan** — Build a step-by-step execution checklist
+4. **Implement** — Execute changes via Claude Code
+5. **Verify** — Run tests and lint to confirm correctness
+6. **Review** — Final review against quality checklists
+7. **Branch hygiene** — Confirm scope and base-branch consistency
+8. **PR draft → Unified review loop** — Create a draft PR and handle Copilot / human review comments in any order
+9. **Approval** — Human approves the PR for merge
+10. **Record** — Persist outcomes for traceability and audit
+
+Each phase can pause for human input. Humans approve transitions, request revisions, or override at any point — keeping responsibility clearly on the human side while AI handles execution.
+
 ## Features
 
 ### Standard
