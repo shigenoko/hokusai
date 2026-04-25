@@ -36,8 +36,15 @@ class ClaudeCodeClient:
         else:
             self.working_dir = Path.cwd()
 
-        # claudeコマンドのパスを検出
-        self.claude_path = self._find_claude_command()
+        # claude コマンドの検出は遅延化（claude 未インストール環境でも初期化を可能にするため）
+        self._claude_path: str | None = None
+
+    @property
+    def claude_path(self) -> str:
+        """claude コマンドの絶対パス（必要時に検出）"""
+        if self._claude_path is None:
+            self._claude_path = self._find_claude_command()
+        return self._claude_path
 
     def execute_skill(
         self,
