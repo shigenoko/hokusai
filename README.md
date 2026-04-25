@@ -12,6 +12,25 @@ HOKUSAI orchestrates a 10-phase development workflow that automates research, pl
 
 The name reflects the design philosophy: **humans orchestrate** decisions and review, while a **unified system** integrates AI tooling for the heavy lifting. Each phase can pause for human input, and the unified review loop in Phase 8 handles Copilot and human review comments in any order — making the workflow safe and predictable for **Human-in-the-Loop (HITL)** development.
 
+## Why HOKUSAI?
+
+HOKUSAI is a human-centered AI workflow system designed for organizations where **trust, accountability, and control matter**.
+
+In industries like finance, payments, and enterprise systems, AI cannot operate unchecked. Every decision must be **explainable, auditable, and ultimately owned by a human**.
+
+HOKUSAI bridges this gap.
+
+It transforms fragmented AI usage into a structured, repeatable workflow where:
+
+- **AI accelerates execution**
+- **Humans retain control and responsibility**
+- **Knowledge and processes are standardized**
+- **Every step is traceable and auditable**
+
+Rather than replacing humans, HOKUSAI orchestrates AI around them.
+
+It provides a unified framework to integrate AI into real-world operations — safely, transparently, and at scale.
+
 ## Features
 
 ### Standard
