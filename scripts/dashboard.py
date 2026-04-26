@@ -2732,10 +2732,171 @@ def validate_config(data: dict) -> tuple[bool, list[str], list[str]]:
     # コマンドフィールドの静的検証
     cmd_result = validate_command_fields(data)
     errors.extend(cmd_result.get("errors", []))
-    cmd_warnings = cmd_result.get("warnings", [])
+    warnings: list[str] = list(cmd_result.get("warnings", []))
+
+    # トークン直書き検出（API トークン / シークレットらしき値の混入を警告）
+    warnings.extend(_detect_token_like_values(data))
+
+    # 接続状態と config の整合性検査（gh/glab 認証や Codex 利用可否）
+    warnings.extend(_check_service_alignment(data))
 
     is_valid = len(errors) == 0
-    return is_valid, errors, cmd_warnings
+    return is_valid, errors, warnings
+
+
+# トークン文字列のプレフィックスベース検出パターン
+_TOKEN_PATTERNS: tuple[tuple[str, str], ...] = (
+    (r"^gh[opsur]_[A-Za-z0-9]{30,}$", "GitHub トークン"),
+    (r"^glpat-[A-Za-z0-9_\-]{15,}$", "GitLab Personal Access Token"),
+    (r"^sk-ant-[A-Za-z0-9_\-]{30,}$", "Anthropic API key"),
+    (r"^sk-(?!ant-)[A-Za-z0-9_\-]{30,}$", "OpenAI API key"),
+)
+
+# シークレットを示唆するキー名（部分一致）。値が非空文字列なら警告対象。
+_SECRET_KEY_HINTS: tuple[str, ...] = (
+    "token",
+    "api_key",
+    "apikey",
+    "secret",
+    "password",
+)
+
+
+def _looks_redacted(value: str) -> bool:
+    """`***`、`<token>`、`xxxxxxxx` などの伏字を簡易判定する。"""
+    if "*" in value or "<" in value or ">" in value:
+        return True
+    if len(value) >= 4 and len(set(value.lower())) <= 2:
+        return True
+    return False
+
+
+def _detect_token_like_values(data: dict) -> list[str]:
+    """API トークン / シークレットらしき値が config に直書きされていないか検査。
+
+    検出された場合、保存自体は止めずに警告を返す。CI トークンや API キーは
+    環境変数 / OS keyring 経由で渡すべきなので、その旨を案内する。
+    """
+    warnings: list[str] = []
+
+    def _walk(node, path: str) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                child_path = f"{path}.{key}" if path else str(key)
+                if isinstance(value, str) and value.strip():
+                    key_lower = str(key).lower()
+                    if (
+                        any(hint in key_lower for hint in _SECRET_KEY_HINTS)
+                        and not _looks_redacted(value.strip())
+                    ):
+                        warnings.append(
+                            f"{child_path} にシークレットらしき値が直書きされています。"
+                            "環境変数または OS keyring 経由の参照に置き換えることを推奨します。"
+                        )
+                _walk(value, child_path)
+        elif isinstance(node, list):
+            for i, item in enumerate(node):
+                _walk(item, f"{path}[{i}]")
+        elif isinstance(node, str):
+            stripped = node.strip()
+            if stripped and not _looks_redacted(stripped):
+                for pattern, label in _TOKEN_PATTERNS:
+                    if re.match(pattern, stripped):
+                        warnings.append(
+                            f"{path or '<root>'} に {label} と思われる値が含まれています。"
+                            "config から削除し、環境変数や `gh` / `glab` CLI 経由で渡してください。"
+                        )
+                        break
+
+    _walk(data, "")
+
+    # 重複除去（同じパス・同じパターンが複数回検出された場合に一行にまとめる）
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for warning in warnings:
+        if warning not in seen:
+            seen.add(warning)
+            deduped.append(warning)
+    return deduped
+
+
+# 接続が「OK 扱い」とみなせる状態。warning を出さない条件。
+_CONNECTION_OK_STATUSES: frozenset[str] = frozenset({"connected", "disabled", "unsupported"})
+
+
+def _check_service_alignment(data: dict) -> list[str]:
+    """設定値（git_hosting / task_backend / cross_review）と connection_status の整合性。
+
+    対応サービスが「未認証 / 未インストール / タイムアウト」状態のとき警告を出す。
+    `connection_status` 取得自体に失敗した場合は警告を返さない（致命的でない）。
+    """
+    warnings: list[str] = []
+    try:
+        from hokusai.integrations import connection_status
+
+        bundle = connection_status.get_all_statuses(refresh=False)
+    except Exception:
+        return warnings
+
+    by_id = {svc.get("id"): svc for svc in bundle.get("services", [])}
+
+    def _problematic(service_id: str) -> tuple[str, str] | None:
+        """サービスが OK 状態でない場合 (status, label) を返す。OK なら None。"""
+        svc = by_id.get(service_id)
+        if svc is None:
+            return None
+        status = svc.get("status", "unknown")
+        if status in _CONNECTION_OK_STATUSES:
+            return None
+        return status, svc.get("label", service_id)
+
+    git_hosting = data.get("git_hosting") or {}
+    git_type = git_hosting.get("type")
+    if git_type == "github":
+        problem = _problematic("gh")
+        if problem:
+            status, label = problem
+            warnings.append(
+                f"git_hosting.type=github ですが、{label} の接続状態が「{status}」です。"
+                "`hokusai connect github` で認証してください。"
+            )
+    elif git_type == "gitlab":
+        problem = _problematic("glab")
+        if problem:
+            status, label = problem
+            warnings.append(
+                f"git_hosting.type=gitlab ですが、{label} の接続状態が「{status}」です。"
+                "`hokusai connect gitlab` で認証してください。"
+            )
+
+    task_backend = data.get("task_backend") or {}
+    task_type = task_backend.get("type")
+    if task_type == "github_issue":
+        problem = _problematic("gh")
+        if problem:
+            status, label = problem
+            warnings.append(
+                f"task_backend.type=github_issue ですが、{label} の接続状態が「{status}」です。"
+            )
+    elif task_type == "notion":
+        problem = _problematic("notion_mcp")
+        if problem:
+            status, label = problem
+            warnings.append(
+                f"task_backend.type=notion ですが、{label} の接続状態が「{status}」です。"
+            )
+
+    cross_review = data.get("cross_review") or {}
+    if cross_review.get("enabled"):
+        problem = _problematic("codex")
+        if problem:
+            status, label = problem
+            warnings.append(
+                f"cross_review.enabled=true ですが、{label} の接続状態が「{status}」です。"
+                "Codex CLI のインストールが必要です。"
+            )
+
+    return warnings
 
 
 def validate_command_fields(data: dict) -> dict:
