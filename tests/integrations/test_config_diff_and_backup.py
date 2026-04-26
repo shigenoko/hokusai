@@ -30,6 +30,7 @@ from scripts.dashboard import (  # noqa: E402
     compute_config_diff,
     get_config_backup_info,
     restore_config_backup,
+    save_config_yaml,
 )
 
 
@@ -404,6 +405,45 @@ def test_restore_config_backup_rejects_unsafe_name(configs_dir):
 def test_get_config_backup_info_returns_none_for_unsafe_name(configs_dir):
     """get_config_backup_info は ValueError を None として返す（呼び出し側で 400 にする）"""
     assert get_config_backup_info("../escape") is None
+
+
+# ---------------------------------------------------------------------------
+# Path traversal: save_config_yaml (defense in depth on write path)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["../escape", "..", ".", "foo/bar", "foo\\bar", ""],
+)
+def test_save_config_yaml_rejects_unsafe_name(configs_dir, name):
+    """書き込み経路でも `_safe_config_path` 経由で CONFIGS_DIR 配下に限定する"""
+    with pytest.raises(ValueError):
+        save_config_yaml(name, {"x": 1})
+
+
+def test_save_config_yaml_writes_inside_configs_dir(configs_dir):
+    """正常 name は CONFIGS_DIR 配下に保存される"""
+    success = save_config_yaml("demo", {"project_root": "/tmp"})
+    assert success is True
+    assert (configs_dir / "demo.yaml").exists()
+
+
+def test_api_save_returns_400_on_unsafe_config_name(configs_dir):
+    """`_handle_settings_post` で ValueError を 400 にマップする"""
+    handler = _make_handler()
+    handler._handle_settings_post = DashboardHandler._handle_settings_post.__get__(handler)
+    handler._read_json_body.return_value = {
+        "config_name": "../escape",
+        "data": {"project_root": str(configs_dir), "base_branch": "main"},
+    }
+
+    handler._handle_settings_post()
+
+    data = _parse(handler)
+    assert data["success"] is False
+    assert any("不正" in e for e in data["errors"])
+    handler.send_response.assert_called_with(400)
 
 
 # ---------------------------------------------------------------------------

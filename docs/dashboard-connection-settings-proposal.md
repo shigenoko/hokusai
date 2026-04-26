@@ -98,30 +98,58 @@ HOKUSAI が接続するサービス（Claude Code、GitHub、Codex、Notion、Gi
 
 ハイブリッド構成として、ダッシュボードは状態表示と手順提示、書き込みは CLI に寄せるのが最も安全。
 
-## 着手順序の提案
+## 進捗状況
 
-1. **Phase A: 接続状態表示**
-   - 設定ページに「サービス接続状態」セクションを追加する
-   - `claude` / `codex` / `gh` / `glab` の存在・認証状態を表示する
-   - Notion は実行単位の状態とは別に、軽量な接続確認として表示する
+| Phase | 状態 | 主な PR |
+|---|---|---|
+| Phase A: 接続状態表示 | ✅ 完了 | PR #1 / #3 |
+| Phase B-1: 保存前差分プレビュー | ✅ 完了 | PR #5 |
+| Phase B-2: `.bak` 復元 UI | ✅ 完了 | PR #5 |
+| Phase B-3: トークン混入警告 | ✅ 完了 | PR #4 |
+| Phase B-4: 接続状態と config の整合性警告 | ✅ 完了 | PR #4 |
+| Phase C: `hokusai connect` CLI（gh / glab） | ✅ 完了 | PR #2 |
+| Phase C': `hokusai connect linear` / `jira`（keyring 保存） | 🚫 保留 | クライアント未実装のため |
+| Phase D: シークレット管理の Web 連携 | 🚫 保留 | Phase C' 完了後に再検討 |
 
-2. **Phase B: 設定ページの安全性と UX 強化**
-   - YAML 保存時のコメント消失や未対応キーの扱いを明記する
-   - 保存前差分、バックアップ復元、トークン混入警告を追加する
-   - 接続状態に応じて cross_review / git_hosting / task_backend の警告を表示する
+## 着手済みフェーズの実装サマリ
 
-3. **Phase C: `hokusai connect` CLI**
-   - `hokusai connect github` は `gh auth login` の確認・誘導
-   - `hokusai connect gitlab` は `glab auth login` の確認・誘導
-   - `hokusai connect linear` / `jira` は keyring 保存を実装する。ただし、各クライアントの API 実装完了後に有効化する
+### Phase A: 接続状態表示
 
-4. **Phase D: シークレット管理の Web 連携（任意）**
-   - Web UI でのトークン入力は最後に検討する
-   - 実装する場合も、保存先は YAML ではなく OS keyring に限定する
+- `hokusai/integrations/connection_status.py` を新設し、サービスレジストリ + TTL キャッシュ + status / severity / category / next_action / message_key を含む共通レスポンス構造を提供
+- `GET /api/connections` / `GET /api/connections/{service}` を追加。`?refresh=1` でキャッシュ無視、`?mode=deep` は API のみ保持して UI 非露出
+- 設定ページ冒頭に「サービス接続状態」カードと再チェックボタンを実装
+- 対応サービス: `claude` / `codex` / `gh` / `glab` / `notion_mcp` / `jira` / `linear`
+- ダッシュボード UI の `next_action` は `hokusai connect <service>` を案内（PR #3）
 
-## 次のアクション
+### Phase B: 設定ページの安全性と UX 強化
 
-- 接続状態表示で対象にするサービスを `claude` / `codex` / `gh` / `glab` / Notion MCP に絞る
-- 状態チェック API のレスポンス形式を決める
-- Jira / Linear は「未実装サービス」として UI 上で誤解なく表示する
-- `hokusai connect <service>` のコマンド仕様を別ドキュメントまたは Issue に切り出す
+- **B-1 差分プレビュー**: `POST /api/config/diff` で unified diff を返し、設定ページにモーダル表示。`save_config_yaml` と同じ `yaml.dump` 形式で diff を取って整合性確保
+- **B-2 `.bak` 復元 UI**: `GET /api/config/backup` / `POST /api/config/backup/restore` を追加。「直前のバックアップ: <時刻>」と「バックアップに戻す」ボタンを設置（1 世代のみ）
+- **B-3 トークン直書き警告**: GitHub PAT / GitLab PAT / Anthropic / OpenAI 形式 + キー名ヒューリスティック（`token` / `api_key` / `secret` / `password` 等）で `validate_config` の warnings に追記
+- **B-4 接続整合性警告**: `git_hosting` / `task_backend` / `cross_review` の各設定値と `connection_status` の状態を突き合わせ、未認証等のとき warning を出して `hokusai connect <service>` を案内
+- パストラバーサル対策として `_safe_config_path` を導入し、書き込み・読み取り・差分・復元すべての経路で CONFIGS_DIR 配下に限定（PR #5 + 後続フォローアップ）
+
+### Phase C: `hokusai connect` CLI
+
+- `hokusai connect github` / `hokusai connect gitlab` で確認プロンプト後に `gh auth login` / `glab auth login` を自動実行
+- 非対話環境（パイプ / `--no-interactive`）では実行コマンドの表示のみ
+- `--force` で再認証、`--status` で `connection_status` を CLI から閲覧
+- 認証実行前に `connection_status` キャッシュをクリアし、続けて呼ばれる `--status` / ダッシュボードに古い状態が残らないようにする
+
+## 保留中の方針
+
+### Phase C'（Linear / Jira の keyring 保存）
+
+クライアント実装がスケルトンのままなので、keyring に保存しても「保存できるが使えない」状態になる。
+**前提条件**: Linear / Jira の API クライアント実装完了。
+
+### Phase D（Web シークレット管理）
+
+Phase C' が動くようになっても、Web UI でのシークレット直接入力は CSRF / origin 検証 / 保存先の権限チェックといった追加責務を伴う。
+当面は `hokusai connect` CLI 経由の認証で十分とし、必要性が高まった時点で再検討する。
+
+## 次に検討する候補
+
+- 多世代 `.bak` バックアップ（PR #5 では 1 世代のみ）
+- `mode=deep` で実際に MCP サーバへ ping を打つ実装（現状は設定確認のみ）
+- Linear / Jira クライアントの実装と Phase C' 着手

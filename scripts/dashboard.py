@@ -2750,13 +2750,16 @@ def save_config_yaml(config_name: str, data: dict) -> bool:
         成功した場合True
 
     Raises:
+        ValueError: config_name が安全でない（パストラバーサル等）場合
         Exception: 保存に失敗した場合
     """
-    config_path = CONFIGS_DIR / f"{config_name}.yaml"
+    # `_safe_config_path` 経由で構築することで、CONFIGS_DIR 配下に書き込みを
+    # 限定する（書き込み経路のパストラバーサル防止 / defense in depth）。
+    config_path = _safe_config_path(config_name, ".yaml")
 
     # .ymlファイルが存在する場合はそちらを使用
     if not config_path.exists():
-        yml_path = CONFIGS_DIR / f"{config_name}.yml"
+        yml_path = _safe_config_path(config_name, ".yml")
         if yml_path.exists():
             config_path = yml_path
 
@@ -6956,6 +6959,12 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 if warnings:
                     resp["warnings"] = warnings
                 self._send_json_response(resp)
+            except ValueError as e:
+                # 不正な config_name（パストラバーサル等）は 400
+                self._send_json_response(
+                    {"success": False, "errors": [str(e)]},
+                    status_code=400,
+                )
             except FileNotFoundError as e:
                 self._send_json_response(
                     {"success": False, "errors": [str(e)]}
