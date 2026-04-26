@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from scripts import dashboard as dash  # noqa: E402
 from scripts.dashboard import (  # noqa: E402
     DashboardHandler,
+    _safe_config_path,
     compute_config_diff,
     get_config_backup_info,
     restore_config_backup,
@@ -221,6 +222,7 @@ def test_api_diff_rejects_missing_config_name(configs_dir):
     data = _parse(handler)
     assert data["success"] is False
     assert any("config_name" in e for e in data["errors"])
+    handler.send_response.assert_called_with(400)
 
 
 def test_api_diff_rejects_invalid_data(configs_dir):
@@ -233,6 +235,23 @@ def test_api_diff_rejects_invalid_data(configs_dir):
     data = _parse(handler)
     assert data["success"] is False
     assert any("data" in e for e in data["errors"])
+    handler.send_response.assert_called_with(400)
+
+
+def test_api_diff_rejects_path_traversal(configs_dir):
+    handler = _make_handler()
+    handler._handle_config_diff_post = DashboardHandler._handle_config_diff_post.__get__(handler)
+    handler._read_json_body.return_value = {
+        "config_name": "../../etc/passwd",
+        "data": {"x": 1},
+    }
+
+    handler._handle_config_diff_post()
+
+    data = _parse(handler)
+    assert data["success"] is False
+    assert any("不正" in e for e in data["errors"])
+    handler.send_response.assert_called_with(400)
 
 
 # ---------------------------------------------------------------------------
@@ -322,6 +341,69 @@ def test_api_backup_restore_rejects_missing_config_name(configs_dir):
 
     data = _parse(handler)
     assert data["success"] is False
+    handler.send_response.assert_called_with(400)
+
+
+def test_api_backup_restore_rejects_path_traversal(configs_dir):
+    handler = _make_handler()
+    handler._handle_config_backup_restore_post = DashboardHandler._handle_config_backup_restore_post.__get__(handler)
+    handler._read_json_body.return_value = {"config_name": "../../etc/passwd"}
+
+    handler._handle_config_backup_restore_post()
+
+    data = _parse(handler)
+    assert data["success"] is False
+    assert any("不正" in e for e in data["errors"])
+    handler.send_response.assert_called_with(400)
+
+
+def test_api_backup_info_rejects_path_traversal(configs_dir):
+    handler = _make_handler()
+    handler._handle_config_backup_info_get = DashboardHandler._handle_config_backup_info_get.__get__(handler)
+
+    handler._handle_config_backup_info_get("../../etc/passwd")
+
+    data = _parse(handler)
+    assert data["success"] is False
+    assert any("不正" in e for e in data["errors"])
+    handler.send_response.assert_called_with(400)
+
+
+# ---------------------------------------------------------------------------
+# Path traversal: helper level (defense in depth)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["../etc/passwd", "..", ".", "foo/bar", "foo\\bar", "", None],
+)
+def test_safe_config_path_rejects_unsafe_names(configs_dir, name):
+    with pytest.raises(ValueError):
+        _safe_config_path(name, ".yaml")
+
+
+def test_safe_config_path_accepts_normal_name(configs_dir):
+    path = _safe_config_path("demo", ".yaml")
+    assert path.parent == configs_dir.resolve()
+    assert path.name == "demo.yaml"
+
+
+def test_compute_config_diff_rejects_unsafe_name(configs_dir):
+    """compute_config_diff も内部で _safe_config_path を呼び ValueError を返す"""
+    with pytest.raises(ValueError):
+        compute_config_diff("../escape", {"x": 1})
+
+
+def test_restore_config_backup_rejects_unsafe_name(configs_dir):
+    success, error = restore_config_backup("../escape")
+    assert success is False
+    assert error and "不正" in error
+
+
+def test_get_config_backup_info_returns_none_for_unsafe_name(configs_dir):
+    """get_config_backup_info は ValueError を None として返す（呼び出し側で 400 にする）"""
+    assert get_config_backup_info("../escape") is None
 
 
 # ---------------------------------------------------------------------------

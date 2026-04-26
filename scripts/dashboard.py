@@ -2133,19 +2133,49 @@ def list_config_files() -> list[str]:
     return sorted(configs)
 
 
+def _safe_config_path(config_name: str, ext: str) -> Path:
+    """`CONFIGS_DIR` 配下に限定した設定ファイルパスを返す。
+
+    パストラバーサル攻撃（`..`、絶対パス、`/` `\\` 区切り）を弾き、解決後の
+    パスが `CONFIGS_DIR` 配下に収まることを検証する。ファイルの存在は
+    チェックしない（書き込み先パスの構築にも使われるため）。
+
+    Raises:
+        ValueError: config_name が空、特殊名 (".", "..")、パス区切り文字を
+            含む、または resolve 結果が CONFIGS_DIR 配下に収まらない場合。
+    """
+    if (
+        not config_name
+        or not isinstance(config_name, str)
+        or config_name in (".", "..")
+        or "/" in config_name
+        or "\\" in config_name
+    ):
+        raise ValueError(f"不正な設定ファイル名です: {config_name!r}")
+    base = CONFIGS_DIR.resolve()
+    candidate = (CONFIGS_DIR / f"{config_name}{ext}").resolve()
+    try:
+        candidate.relative_to(base)
+    except ValueError as exc:
+        raise ValueError(f"不正な設定ファイル名です: {config_name!r}") from exc
+    return candidate
+
+
 def _resolve_config_path(config_name: str | None) -> Path | None:
-    """config名から設定ファイルパスを解決する。"""
+    """config名から既存の設定ファイルパスを解決する。
+
+    パストラバーサル等で `_safe_config_path` が `ValueError` を返した場合は、
+    既存呼び出し側との互換のため `None` を返す。実存チェックも行う。
+    """
     if not config_name:
         return None
-
-    yaml_path = CONFIGS_DIR / f"{config_name}.yaml"
-    if yaml_path.exists():
-        return yaml_path
-
-    yml_path = CONFIGS_DIR / f"{config_name}.yml"
-    if yml_path.exists():
-        return yml_path
-
+    for ext in (".yaml", ".yml"):
+        try:
+            candidate = _safe_config_path(config_name, ext)
+        except ValueError:
+            return None
+        if candidate.exists():
+            return candidate
     return None
 
 
@@ -2589,15 +2619,6 @@ def load_config_yaml(config_name: str) -> dict:
         return data if data is not None else {}
 
 
-def _resolve_config_yaml_path(config_name: str) -> Path | None:
-    """`config_name` から既存の .yaml/.yml を解決して返す。両方存在しない場合は None。"""
-    for ext in (".yaml", ".yml"):
-        path = CONFIGS_DIR / f"{config_name}{ext}"
-        if path.exists():
-            return path
-    return None
-
-
 def _render_yaml_for_diff(data: dict) -> str:
     """`save_config_yaml` と同じ形式で YAML 文字列化する。差分計算用。"""
     return yaml.dump(
@@ -2619,9 +2640,16 @@ def compute_config_diff(config_name: str, new_data: dict) -> dict:
             "lines_added": int,
             "lines_removed": int,
         }
+
+    Raises:
+        ValueError: config_name が安全でない（パストラバーサル等）の場合。
     """
+    # config_name の安全性を先に検査する（resolve 後 CONFIGS_DIR 配下に
+    # 収まらない / `..` などを含む場合は ValueError）。
+    _safe_config_path(config_name, ".yaml")
+
     new_text = _render_yaml_for_diff(new_data)
-    config_path = _resolve_config_yaml_path(config_name)
+    config_path = _resolve_config_path(config_name)
 
     if config_path is None:
         # 新規ファイル: 全行が追加扱い
@@ -2663,9 +2691,15 @@ def compute_config_diff(config_name: str, new_data: dict) -> dict:
 
 
 def get_config_backup_info(config_name: str) -> dict | None:
-    """`config_name` に対応する .bak ファイルの情報を返す。存在しなければ None。"""
+    """`config_name` に対応する .bak ファイルの情報を返す。存在しなければ None。
+
+    `config_name` が安全でない場合も None を返す（API 呼び出し側で検証すべき）。
+    """
     for ext in (".yaml", ".yml"):
-        config_path = CONFIGS_DIR / f"{config_name}{ext}"
+        try:
+            config_path = _safe_config_path(config_name, ext)
+        except ValueError:
+            return None
         backup_path = config_path.with_suffix(config_path.suffix + ".bak")
         if backup_path.exists():
             stat = backup_path.stat()
@@ -2683,17 +2717,22 @@ def restore_config_backup(config_name: str) -> tuple[bool, str | None]:
 
     Returns:
         (success, error_message)
+
+    `config_name` が安全でない（パストラバーサル等）場合は失敗扱い。
     """
-    for ext in (".yaml", ".yml"):
-        config_path = CONFIGS_DIR / f"{config_name}{ext}"
-        backup_path = config_path.with_suffix(config_path.suffix + ".bak")
-        if not backup_path.exists():
-            continue
-        try:
-            shutil.copy2(backup_path, config_path)
-            return True, None
-        except OSError as exc:
-            return False, f"バックアップ復元に失敗しました: {exc}"
+    try:
+        for ext in (".yaml", ".yml"):
+            config_path = _safe_config_path(config_name, ext)
+            backup_path = _safe_config_path(config_name, ext + ".bak")
+            if not backup_path.exists():
+                continue
+            try:
+                shutil.copy2(backup_path, config_path)
+                return True, None
+            except OSError as exc:
+                return False, f"バックアップ復元に失敗しました: {exc}"
+    except ValueError as exc:
+        return False, str(exc)
     return False, "バックアップファイル (.bak) が見つかりません"
 
 
@@ -6953,36 +6992,49 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 
             if not config_name:
                 self._send_json_response(
-                    {"success": False, "errors": ["config_name が指定されていません"]}
+                    {"success": False, "errors": ["config_name が指定されていません"]},
+                    status_code=400,
                 )
                 return
             if not isinstance(data, dict):
                 self._send_json_response(
-                    {"success": False, "errors": ["data が不正です"]}
+                    {"success": False, "errors": ["data が不正です"]},
+                    status_code=400,
                 )
                 return
 
             try:
                 result = compute_config_diff(config_name, data)
+            except ValueError as exc:
+                # 不正な config_name（パストラバーサル等）は 400
+                self._send_json_response(
+                    {"success": False, "errors": [str(exc)]},
+                    status_code=400,
+                )
+                return
             except yaml.YAMLError as exc:
                 self._send_json_response(
-                    {"success": False, "errors": [f"YAML 形式エラー: {exc}"]}
+                    {"success": False, "errors": [f"YAML 形式エラー: {exc}"]},
+                    status_code=400,
                 )
                 return
             except OSError as exc:
                 self._send_json_response(
-                    {"success": False, "errors": [f"ファイルアクセスエラー: {exc}"]}
+                    {"success": False, "errors": [f"ファイルアクセスエラー: {exc}"]},
+                    status_code=500,
                 )
                 return
 
             self._send_json_response({"success": True, **result})
         except json.JSONDecodeError:
             self._send_json_response(
-                {"success": False, "errors": ["JSONパースエラー"]}
+                {"success": False, "errors": ["JSONパースエラー"]},
+                status_code=400,
             )
         except Exception as exc:
             self._send_json_response(
-                {"success": False, "errors": [f"予期しないエラー: {exc}"]}
+                {"success": False, "errors": [f"予期しないエラー: {exc}"]},
+                status_code=500,
             )
 
     def _handle_config_backup_info_get(self, config_name: str | None):
@@ -6996,6 +7048,13 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 {"success": False, "errors": ["name が指定されていません"]}, status_code=400
             )
             return
+        try:
+            _safe_config_path(config_name, ".yaml")
+        except ValueError as exc:
+            self._send_json_response(
+                {"success": False, "errors": [str(exc)]}, status_code=400
+            )
+            return
         info = get_config_backup_info(config_name)
         if info is None:
             self._send_json_response({"success": True, "exists": False})
@@ -7006,20 +7065,48 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         """`.bak` から本体 YAML を復元する。
 
         リクエスト:  {"config_name": "..."}
+
+        ステータスコード:
+        - 200: 復元成功
+        - 400: config_name 不正 / JSON パースエラー
+        - 404: .bak が存在しない
+        - 500: I/O 失敗等のサーバ側エラー
         """
         try:
             request_data = self._read_json_body()
             config_name = request_data.get("config_name", "").strip()
             if not config_name:
                 self._send_json_response(
-                    {"success": False, "errors": ["config_name が指定されていません"]}
+                    {"success": False, "errors": ["config_name が指定されていません"]},
+                    status_code=400,
                 )
                 return
+
+            # 不正な config_name（パストラバーサル等）は 400
+            try:
+                _safe_config_path(config_name, ".yaml")
+            except ValueError as exc:
+                self._send_json_response(
+                    {"success": False, "errors": [str(exc)]},
+                    status_code=400,
+                )
+                return
+
+            # .bak が無ければ 404（restore_config_backup の戻り値文字列に
+            # 依存せず、構造化された存在チェックでステータスを決定する）
+            backup_info = get_config_backup_info(config_name)
+            if backup_info is None:
+                self._send_json_response(
+                    {"success": False, "errors": ["バックアップが見つかりません"]},
+                    status_code=404,
+                )
+                return
+
             success, error = restore_config_backup(config_name)
             if not success:
                 self._send_json_response(
                     {"success": False, "errors": [error or "バックアップ復元に失敗しました"]},
-                    status_code=404 if error and "見つかりません" in error else 500,
+                    status_code=500,
                 )
                 return
             self._send_json_response(
@@ -7027,11 +7114,13 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             )
         except json.JSONDecodeError:
             self._send_json_response(
-                {"success": False, "errors": ["JSONパースエラー"]}
+                {"success": False, "errors": ["JSONパースエラー"]},
+                status_code=400,
             )
         except Exception as exc:
             self._send_json_response(
-                {"success": False, "errors": [f"予期しないエラー: {exc}"]}
+                {"success": False, "errors": [f"予期しないエラー: {exc}"]},
+                status_code=500,
             )
 
     def _handle_config_validate_post(self):
