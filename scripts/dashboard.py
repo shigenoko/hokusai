@@ -30,6 +30,7 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from hokusai.constants import PHASE_SHORT_NAMES
+from hokusai.integrations import connection_status as _cs
 from hokusai.persistence.sqlite_store import SQLiteStore
 from hokusai.utils.phase_page_templates import (
     PHASE_PAGE_DECISION_DEFAULT,
@@ -2763,10 +2764,23 @@ _SECRET_KEY_HINTS: tuple[str, ...] = (
 
 
 def _looks_redacted(value: str) -> bool:
-    """`***`、`<token>`、`xxxxxxxx` などの伏字を簡易判定する。"""
-    if "*" in value or "<" in value or ">" in value:
+    """値全体がプレースホルダ表記の場合のみ伏字扱い。
+
+    部分一致（例: `pa*ssword` や `token<prod>`）を伏字扱いすると、実値の
+    トークン警告を取りこぼすため、全体一致で判定する。
+
+    判定対象:
+    - `<placeholder-name>` のような山かっこ表記
+    - `[*xX-]{4,}` の文字だけで構成された連続記号（例: `********`、`xxxxxxxx`、`----`）
+    - 4 文字以上で同一文字のみ（例: `aaaaaa`）
+    """
+    if not value:
+        return False
+    if re.fullmatch(r"<\s*[A-Za-z0-9_-]+\s*>", value):
         return True
-    if len(value) >= 4 and len(set(value.lower())) <= 2:
+    if re.fullmatch(r"[*xX\-]{4,}", value):
+        return True
+    if len(value) >= 4 and len(set(value.lower())) == 1:
         return True
     return False
 
@@ -2821,7 +2835,12 @@ def _detect_token_like_values(data: dict) -> list[str]:
 
 
 # 接続が「OK 扱い」とみなせる状態。warning を出さない条件。
-_CONNECTION_OK_STATUSES: frozenset[str] = frozenset({"connected", "disabled", "unsupported"})
+# connection_status の定数を参照することで、文字列リテラルと定数値の同期ズレを防ぐ。
+_CONNECTION_OK_STATUSES: frozenset[str] = frozenset({
+    _cs.STATUS_CONNECTED,
+    _cs.STATUS_DISABLED,
+    _cs.STATUS_UNSUPPORTED,
+})
 
 
 def _check_service_alignment(data: dict) -> list[str]:
@@ -2832,9 +2851,7 @@ def _check_service_alignment(data: dict) -> list[str]:
     """
     warnings: list[str] = []
     try:
-        from hokusai.integrations import connection_status
-
-        bundle = connection_status.get_all_statuses(refresh=False)
+        bundle = _cs.get_all_statuses(refresh=False)
     except Exception:
         return warnings
 
@@ -2877,6 +2894,7 @@ def _check_service_alignment(data: dict) -> list[str]:
             status, label = problem
             warnings.append(
                 f"task_backend.type=github_issue ですが、{label} の接続状態が「{status}」です。"
+                "`hokusai connect github` で認証してください。"
             )
     elif task_type == "notion":
         problem = _problematic("notion_mcp")

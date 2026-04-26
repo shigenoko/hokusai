@@ -91,7 +91,7 @@ def _stub_statuses(monkeypatch, status_by_id: dict[str, str]):
 
 @pytest.mark.parametrize(
     "value",
-    ["***", "<token>", "xxxxxxxx", "**********", "----"],
+    ["<token>", "<placeholder>", "xxxxxxxx", "**********", "----", "XXXX", "aaaaaa"],
 )
 def test_looks_redacted_detects_obvious_placeholders(value):
     assert _looks_redacted(value) is True
@@ -99,7 +99,18 @@ def test_looks_redacted_detects_obvious_placeholders(value):
 
 @pytest.mark.parametrize(
     "value",
-    ["gho_realtokenvalue123abc", "real-meaningful-string", "abc123def456"],
+    [
+        "gho_realtokenvalue123abc",
+        "real-meaningful-string",
+        "abc123def456",
+        # 部分一致は実値とみなす（false-positive 回避: PR #4 のレビュー指摘）
+        "pa*ssword",
+        "token<prod>",
+        "abc<x>def",
+        # 短い記号列は伏字扱いしない（4 文字未満）
+        "***",
+        "---",
+    ],
 )
 def test_looks_redacted_negative(value):
     assert _looks_redacted(value) is False
@@ -158,9 +169,24 @@ def test_detect_secret_keys_with_real_value(key):
 
 
 def test_redacted_secret_key_is_not_warned():
-    data = {"api_key": "***"}
+    """値全体が伏字（4 文字以上の連続記号など）の場合は警告しない"""
+    data = {"api_key": "********"}
     warnings = _detect_token_like_values(data)
     assert warnings == []
+
+
+def test_partial_asterisk_in_value_is_treated_as_real(monkeypatch):
+    """PR #4 レビュー回帰: `pa*ssword` のように `*` を含むだけの実値は警告対象"""
+    data = {"password": "pa*ssword"}
+    warnings = _detect_token_like_values(data)
+    assert any("password" in w for w in warnings)
+
+
+def test_partial_anglebrackets_in_value_is_treated_as_real():
+    """PR #4 レビュー回帰: `token<prod>` のように `<>` を含むだけの実値は警告対象"""
+    data = {"api_token": "token<prod>"}
+    warnings = _detect_token_like_values(data)
+    assert any("api_token" in w for w in warnings)
 
 
 def test_empty_secret_key_is_not_warned():
@@ -240,6 +266,8 @@ def test_alignment_warns_when_task_backend_github_issue_unauth(monkeypatch):
     data = {"task_backend": {"type": "github_issue"}}
     warnings = _check_service_alignment(data)
     assert any("task_backend.type=github_issue" in w for w in warnings)
+    # PR #4 review fix: hokusai connect github の導線も含めて出すこと
+    assert any("hokusai connect github" in w for w in warnings)
 
 
 def test_alignment_warns_on_cross_review_when_codex_missing(monkeypatch):
