@@ -20,7 +20,6 @@ from typing import Any
 
 from ...integrations import connection_status as cs
 
-
 SUPPORTED_SERVICES: dict[str, dict[str, Any]] = {
     "github": {
         "label": "GitHub CLI",
