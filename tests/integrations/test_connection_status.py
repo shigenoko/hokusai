@@ -132,6 +132,9 @@ def test_codex_not_installed(monkeypatch):
 
     assert result["status"] == cs.STATUS_NOT_INSTALLED
     assert result["next_action"]["type"] == "docs"
+    # type=docs で docs_url が None だと UI で導線が切れるため、有効な URL を持つこと
+    assert result["next_action"]["docs_url"]
+    assert result["docs_url"]
 
 
 # ---------------------------------------------------------------------------
@@ -343,6 +346,40 @@ def test_check_exception_falls_back_to_unknown(monkeypatch):
     assert "boom" in result["detail"]
 
 
+@pytest.mark.parametrize(
+    "service_id,expected_category,expected_label",
+    [
+        ("gh", cs.CategoryGitHosting, "GitHub CLI"),
+        ("glab", cs.CategoryGitHosting, "GitLab CLI"),
+        ("notion_mcp", cs.CategoryMCP, "Notion MCP"),
+        ("jira", cs.CategoryTaskBackend, "Jira"),
+        ("linear", cs.CategoryTaskBackend, "Linear"),
+        ("codex", cs.CategoryLLMAgent, "OpenAI Codex"),
+    ],
+)
+def test_exception_fallback_uses_correct_metadata(
+    monkeypatch, service_id, expected_category, expected_label
+):
+    """例外フォールバック時、サービスの category / label / required_for が正しい値になる"""
+
+    def _boom(mode):
+        raise RuntimeError("boom")
+
+    monkeypatch.setitem(cs.SERVICE_REGISTRY, service_id, _boom)
+
+    result = cs.get_service_status(service_id)
+
+    assert result["status"] == cs.STATUS_UNKNOWN
+    assert result["category"] == expected_category
+    assert result["label"] == expected_label
+    assert result["required_for"] == cs.SERVICE_METADATA[service_id]["required_for"]
+
+
+def test_service_metadata_covers_registry():
+    """SERVICE_REGISTRY と SERVICE_METADATA の service_id が一致している（ドリフト防止）"""
+    assert set(cs.SERVICE_METADATA.keys()) == set(cs.SERVICE_REGISTRY.keys())
+
+
 # ---------------------------------------------------------------------------
 # Cache
 # ---------------------------------------------------------------------------
@@ -396,6 +433,43 @@ def test_cache_refresh_forces_recheck(monkeypatch):
     cs.get_service_status("claude", refresh=True)
 
     assert calls["n"] == 2
+
+
+def test_unknown_mode_falls_back_to_shallow(monkeypatch):
+    """未知の mode はキャッシュキー肥大を避けるため shallow にフォールバックする"""
+    captured: list[str] = []
+
+    def _capturing_check(mode: str) -> dict[str, Any]:
+        captured.append(mode)
+        return cs._build_result(
+            service_id="claude",
+            label="Claude Code",
+            category=cs.CategoryLLMAgent,
+            status=cs.STATUS_CONNECTED,
+            summary="ok",
+            detail=None,
+            required_for=[],
+            message_key="x",
+            mode=mode,
+        )
+
+    monkeypatch.setitem(cs.SERVICE_REGISTRY, "claude", _capturing_check)
+
+    result = cs.get_service_status("claude", mode="bogus")
+
+    assert captured == [cs.MODE_SHALLOW]
+    assert result["mode"] == cs.MODE_SHALLOW
+
+
+def test_get_all_statuses_normalizes_mode(monkeypatch):
+    monkeypatch.setattr(cs.shutil, "which", _make_which({}))
+    monkeypatch.setattr(cs, "_notion_mcp_configured", lambda: (False, None))
+
+    bundle = cs.get_all_statuses(mode="weird-value")
+
+    assert bundle["mode"] == cs.MODE_SHALLOW
+    for svc in bundle["services"]:
+        assert svc["mode"] == cs.MODE_SHALLOW
 
 
 def test_cache_separates_shallow_and_deep(monkeypatch):

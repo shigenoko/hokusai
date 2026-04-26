@@ -52,6 +52,62 @@ CategoryGitHosting = "git_hosting"
 CategoryTaskBackend = "task_backend"
 CategoryMCP = "mcp"
 
+MODE_SHALLOW = "shallow"
+MODE_DEEP = "deep"
+VALID_MODES: frozenset[str] = frozenset({MODE_SHALLOW, MODE_DEEP})
+
+
+def _normalize_mode(mode: str) -> str:
+    """未知の mode は shallow にフォールバックする。
+
+    `get_service_status` のキャッシュキーに mode が含まれるため、任意文字列を
+    受け入れるとキャッシュが無制限に増える。バリデーションして既知の値だけを
+    通すことで、API 契約を安定させる。
+    """
+    return mode if mode in VALID_MODES else MODE_SHALLOW
+
+
+# サービスごとの静的メタデータ。チェック関数の例外フォールバックなど、
+# 動的なチェック結果を作れない場面で `label` / `category` / `required_for` を
+# 解決するための単一情報源として参照する。
+SERVICE_METADATA: dict[str, dict[str, Any]] = {
+    "claude": {
+        "label": "Claude Code",
+        "category": CategoryLLMAgent,
+        "required_for": ["implementation"],
+    },
+    "codex": {
+        "label": "OpenAI Codex",
+        "category": CategoryLLMAgent,
+        "required_for": ["cross_review"],
+    },
+    "gh": {
+        "label": "GitHub CLI",
+        "category": CategoryGitHosting,
+        "required_for": ["git_hosting", "pr_creation", "review_comment_reply"],
+    },
+    "glab": {
+        "label": "GitLab CLI",
+        "category": CategoryGitHosting,
+        "required_for": ["git_hosting", "pr_creation"],
+    },
+    "notion_mcp": {
+        "label": "Notion MCP",
+        "category": CategoryMCP,
+        "required_for": ["notion_sync", "task_backend"],
+    },
+    "jira": {
+        "label": "Jira",
+        "category": CategoryTaskBackend,
+        "required_for": ["task_backend"],
+    },
+    "linear": {
+        "label": "Linear",
+        "category": CategoryTaskBackend,
+        "required_for": ["task_backend"],
+    },
+}
+
 
 _cache_lock = threading.Lock()
 _cache: dict[tuple[str, str], tuple[dict[str, Any], float]] = {}
@@ -191,8 +247,9 @@ def _check_codex(mode: str) -> dict[str, Any]:
                 "type": "docs",
                 "label": "Codex CLI のセットアップ手順",
                 "command": None,
-                "docs_url": None,
+                "docs_url": "https://github.com/openai/codex",
             },
+            docs_url="https://github.com/openai/codex",
             mode=mode,
         )
     res = _run_cli(["codex", "--version"], timeout=3.0)
@@ -541,7 +598,7 @@ SERVICE_ORDER: list[str] = [
 
 
 def get_service_status(
-    service_id: str, *, refresh: bool = False, mode: str = "shallow"
+    service_id: str, *, refresh: bool = False, mode: str = MODE_SHALLOW
 ) -> dict[str, Any] | None:
     """単一サービスの接続状態を取得。
 
@@ -549,6 +606,7 @@ def get_service_status(
         service_id: サービス ID（SERVICE_REGISTRY のキー）
         refresh: True のときキャッシュを無視して再チェックする
         mode: "shallow" または "deep"。deep は将来的により詳細なチェックを行う。
+            未知の値は "shallow" にフォールバックする（キャッシュキー肥大の防止）。
 
     Returns:
         サービスのステータス辞書。未知の service_id の場合は None。
@@ -557,6 +615,7 @@ def get_service_status(
     if check_fn is None:
         return None
 
+    mode = _normalize_mode(mode)
     cache_key = (service_id, mode)
     now = time.monotonic()
 
@@ -573,14 +632,15 @@ def get_service_status(
         result = check_fn(mode)
     except Exception as exc:  # 想定外エラーは unknown で返す
         logger.exception("connection check failed: %s", service_id)
+        meta = SERVICE_METADATA.get(service_id, {})
         result = _build_result(
             service_id=service_id,
-            label=service_id,
-            category=CategoryLLMAgent,
+            label=meta.get("label", service_id),
+            category=meta.get("category", CategoryLLMAgent),
             status=STATUS_UNKNOWN,
-            summary=f"{service_id} の状態確認中にエラーが発生しました",
+            summary=f"{meta.get('label', service_id)} の状態確認中にエラーが発生しました",
             detail=str(exc),
-            required_for=[],
+            required_for=meta.get("required_for", []),
             message_key=f"connection.{service_id}.unknown",
             mode=mode,
         )
@@ -590,8 +650,9 @@ def get_service_status(
     return result
 
 
-def get_all_statuses(*, refresh: bool = False, mode: str = "shallow") -> dict[str, Any]:
+def get_all_statuses(*, refresh: bool = False, mode: str = MODE_SHALLOW) -> dict[str, Any]:
     """全サービスの接続状態をまとめて返す。"""
+    mode = _normalize_mode(mode)
     services = []
     for service_id in SERVICE_ORDER:
         status = get_service_status(service_id, refresh=refresh, mode=mode)

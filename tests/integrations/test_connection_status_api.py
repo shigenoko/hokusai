@@ -162,7 +162,9 @@ def test_get_unknown_service_returns_404(monkeypatch):
 
     data = _parse(handler)
     assert data["success"] is False
-    assert "does_not_exist" in data["error"]
+    # 他 API（_handle_config_get 等）と揃えて errors: [...] 配列を使う
+    assert isinstance(data["errors"], list)
+    assert any("does_not_exist" in msg for msg in data["errors"])
     handler.send_response.assert_called_with(404)
 
 
@@ -249,3 +251,17 @@ def test_do_get_url_decodes_service_id():
 
     args, _ = handler._handle_connections_get.call_args
     assert args[0] == "notion_mcp"
+
+
+def test_do_get_trailing_slash_routes_to_list():
+    """`/api/connections/`（末尾スラッシュ）は 404 ではなく一覧へ正規化"""
+    handler = _make_handler()
+    handler.path = "/api/connections/"
+    handler._handle_connections_list = MagicMock()
+    handler._handle_connections_get = MagicMock()
+    handler.do_GET = DashboardHandler.do_GET.__get__(handler)
+
+    handler.do_GET()
+
+    handler._handle_connections_list.assert_called_once()
+    handler._handle_connections_get.assert_not_called()

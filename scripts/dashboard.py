@@ -4014,7 +4014,6 @@ def render_settings_page(config_files: list) -> str:
             const btn = document.getElementById('recheckConnectionsBtn');
             if (!list || !meta) return;
             if (btn) btn.disabled = true;
-            const previousMeta = meta.textContent;
             meta.textContent = refresh ? '再チェック中…' : '読み込み中…';
             try {{
                 const resp = await fetch(url);
@@ -5898,7 +5897,8 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             prompt_id = unquote(prompt_id)
             self._handle_prompt_get(prompt_id)
             return
-        elif parsed.path == "/api/connections":
+        elif parsed.path == "/api/connections" or parsed.path == "/api/connections/":
+            # 末尾スラッシュ有無のいずれも一覧として扱う（空 service_id で 404 にしない）
             self._handle_connections_list(query)
             return
         elif parsed.path.startswith("/api/connections/"):
@@ -6029,7 +6029,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         )
         if status is None:
             self._send_json_response(
-                {"success": False, "error": f"unknown service: {service_id}"},
+                {"success": False, "errors": [f"unknown service: {service_id}"]},
                 status_code=404,
             )
             return
