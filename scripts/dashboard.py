@@ -6,6 +6,7 @@ HOKUS AI Workflow Dashboard
 使い方: python scripts/dashboard.py
 """
 
+import difflib
 import html as html_mod
 import json
 import os
@@ -2588,6 +2589,114 @@ def load_config_yaml(config_name: str) -> dict:
         return data if data is not None else {}
 
 
+def _resolve_config_yaml_path(config_name: str) -> Path | None:
+    """`config_name` から既存の .yaml/.yml を解決して返す。両方存在しない場合は None。"""
+    for ext in (".yaml", ".yml"):
+        path = CONFIGS_DIR / f"{config_name}{ext}"
+        if path.exists():
+            return path
+    return None
+
+
+def _render_yaml_for_diff(data: dict) -> str:
+    """`save_config_yaml` と同じ形式で YAML 文字列化する。差分計算用。"""
+    return yaml.dump(
+        data,
+        default_flow_style=False,
+        allow_unicode=True,
+        sort_keys=False,
+    )
+
+
+def compute_config_diff(config_name: str, new_data: dict) -> dict:
+    """保存予定のデータと現在の YAML ファイルの差分を計算する。
+
+    Returns:
+        {
+            "diff": str (unified diff テキスト),
+            "has_changes": bool,
+            "is_new_file": bool (現在のファイルが存在しない場合 True),
+            "lines_added": int,
+            "lines_removed": int,
+        }
+    """
+    new_text = _render_yaml_for_diff(new_data)
+    config_path = _resolve_config_yaml_path(config_name)
+
+    if config_path is None:
+        # 新規ファイル: 全行が追加扱い
+        new_lines = new_text.splitlines()
+        diff_text = "\n".join(f"+ {line}" for line in new_lines)
+        return {
+            "diff": diff_text,
+            "has_changes": True,
+            "is_new_file": True,
+            "lines_added": len(new_lines),
+            "lines_removed": 0,
+        }
+
+    current_text = config_path.read_text(encoding="utf-8")
+    diff_lines = list(
+        difflib.unified_diff(
+            current_text.splitlines(),
+            new_text.splitlines(),
+            fromfile=f"{config_path.name} (current)",
+            tofile=f"{config_path.name} (after save)",
+            lineterm="",
+        )
+    )
+
+    lines_added = sum(
+        1 for line in diff_lines if line.startswith("+") and not line.startswith("+++")
+    )
+    lines_removed = sum(
+        1 for line in diff_lines if line.startswith("-") and not line.startswith("---")
+    )
+
+    return {
+        "diff": "\n".join(diff_lines),
+        "has_changes": current_text != new_text,
+        "is_new_file": False,
+        "lines_added": lines_added,
+        "lines_removed": lines_removed,
+    }
+
+
+def get_config_backup_info(config_name: str) -> dict | None:
+    """`config_name` に対応する .bak ファイルの情報を返す。存在しなければ None。"""
+    for ext in (".yaml", ".yml"):
+        config_path = CONFIGS_DIR / f"{config_name}{ext}"
+        backup_path = config_path.with_suffix(config_path.suffix + ".bak")
+        if backup_path.exists():
+            stat = backup_path.stat()
+            return {
+                "exists": True,
+                "filename": backup_path.name,
+                "mtime": datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
+                "size": stat.st_size,
+            }
+    return None
+
+
+def restore_config_backup(config_name: str) -> tuple[bool, str | None]:
+    """.bak ファイルから本体 YAML を復元する。
+
+    Returns:
+        (success, error_message)
+    """
+    for ext in (".yaml", ".yml"):
+        config_path = CONFIGS_DIR / f"{config_name}{ext}"
+        backup_path = config_path.with_suffix(config_path.suffix + ".bak")
+        if not backup_path.exists():
+            continue
+        try:
+            shutil.copy2(backup_path, config_path)
+            return True, None
+        except OSError as exc:
+            return False, f"バックアップ復元に失敗しました: {exc}"
+    return False, "バックアップファイル (.bak) が見つかりません"
+
+
 def save_config_yaml(config_name: str, data: dict) -> bool:
     """YAMLファイルを保存する
 
@@ -3360,6 +3469,79 @@ def render_settings_page(config_files: list) -> str:
         .badge-info {{ background: #dbeafe; color: #1e40af; border: 1px solid #93c5fd; }}
         .connection-empty {{ color: var(--text-muted); font-style: italic; padding: 12px; }}
         .connection-error {{ color: #991b1b; padding: 8px; }}
+
+        /* 差分モーダル / バックアップ情報 */
+        .config-backup-info {{
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 8px 12px;
+            margin-top: 12px;
+            border: 1px solid var(--border-color, #e5e7eb);
+            border-radius: 6px;
+            background: var(--bg-secondary, #f9fafb);
+            font-size: 13px;
+        }}
+        .config-backup-info span {{ flex: 1; color: var(--text-muted); }}
+        .config-diff-modal {{
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(15, 23, 42, 0.55);
+            z-index: 1000;
+            align-items: center;
+            justify-content: center;
+        }}
+        .config-diff-modal[style*="display: flex"] {{ display: flex !important; }}
+        .config-diff-modal-content {{
+            background: var(--bg-primary, #fff);
+            width: min(960px, 92vw);
+            max-height: 86vh;
+            border-radius: 10px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.18);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }}
+        .config-diff-modal-header {{
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 14px 18px;
+            border-bottom: 1px solid var(--border-color, #e5e7eb);
+        }}
+        .config-diff-modal-header h3 {{ margin: 0; font-size: 16px; }}
+        .config-diff-close {{
+            background: none;
+            border: none;
+            font-size: 24px;
+            line-height: 1;
+            cursor: pointer;
+            color: var(--text-muted);
+        }}
+        .config-diff-summary {{
+            padding: 10px 18px;
+            color: var(--text-muted);
+            font-size: 13px;
+            border-bottom: 1px solid var(--border-color, #f3f4f6);
+        }}
+        .config-diff-body {{
+            margin: 0;
+            padding: 14px 18px;
+            font-family: ui-monospace, SFMono-Regular, monospace;
+            font-size: 12px;
+            line-height: 1.5;
+            background: var(--bg-secondary, #f9fafb);
+            overflow: auto;
+            white-space: pre-wrap;
+            word-break: break-word;
+            flex: 1;
+        }}
+        .config-diff-body .diff-add {{ color: #166534; background: #dcfce7; display: block; }}
+        .config-diff-body .diff-remove {{ color: #991b1b; background: #fee2e2; display: block; }}
+        .config-diff-body .diff-meta {{ color: var(--text-muted); display: block; }}
     </style>
 
     <!-- サービス接続状態 -->
@@ -3577,6 +3759,7 @@ def render_settings_page(config_files: list) -> str:
                     <button type="submit" class="save-btn">保存</button>
                     <button type="button" class="reset-btn" onclick="loadProjectConfig(document.getElementById('projectConfigSelect').value)">リセット</button>
                     <button type="button" class="reset-btn" onclick="validateConfigOnly()">検証のみ</button>
+                    <button type="button" class="reset-btn" onclick="previewConfigDiff()">差分プレビュー</button>
                     <button type="button" class="save-btn" onclick="saveAndRetryPhase6()" id="btnSaveAndRetryPhase6" style="display:none;">保存して Phase 6 を再実行</button>
                 </div>
             </form>
@@ -3591,7 +3774,26 @@ def render_settings_page(config_files: list) -> str:
                 <button type="button" class="reset-btn" onclick="loadProjectConfig(document.getElementById('projectConfigSelect').value)">リセット</button>
                 <button type="button" class="reset-btn" onclick="validateYaml()">構文チェック</button>
                 <button type="button" class="reset-btn" onclick="validateConfigOnly()">検証のみ</button>
+                <button type="button" class="reset-btn" onclick="previewConfigDiff()">差分プレビュー</button>
                 <button type="button" class="save-btn" onclick="saveAndRetryPhase6()" id="btnSaveAndRetryPhase6Yaml" style="display:none;">保存して Phase 6 を再実行</button>
+            </div>
+        </div>
+
+        <!-- バックアップ情報（直前の .bak） -->
+        <div id="configBackupInfo" class="config-backup-info" style="display: none;">
+            <span id="configBackupSummary"></span>
+            <button type="button" class="reset-btn" onclick="restoreConfigBackup()">バックアップに戻す</button>
+        </div>
+
+        <!-- 差分モーダル -->
+        <div id="configDiffModal" class="config-diff-modal" style="display: none;" role="dialog" aria-labelledby="configDiffTitle">
+            <div class="config-diff-modal-content">
+                <div class="config-diff-modal-header">
+                    <h3 id="configDiffTitle">保存差分プレビュー</h3>
+                    <button type="button" class="config-diff-close" onclick="closeConfigDiffModal()" aria-label="閉じる">×</button>
+                </div>
+                <div id="configDiffSummary" class="config-diff-summary"></div>
+                <pre id="configDiffBody" class="config-diff-body"></pre>
             </div>
         </div>
 
@@ -3615,6 +3817,9 @@ def render_settings_page(config_files: list) -> str:
                 document.getElementById('configEditorTabs').style.display = 'none';
                 document.getElementById('formEditor').style.display = 'none';
                 document.getElementById('yamlEditor').style.display = 'none';
+                const backupBox = document.getElementById('configBackupInfo');
+                if (backupBox) backupBox.style.display = 'none';
+                currentConfigName = '';
                 return;
             }}
 
@@ -3637,6 +3842,11 @@ def render_settings_page(config_files: list) -> str:
                     document.getElementById('yamlTextarea').value = jsyaml.dump(result.data);
 
                     showConfigStatus('設定を読み込みました', 'success');
+
+                    // バックアップ情報も更新（.bak が存在するなら表示）
+                    if (typeof refreshBackupInfo === 'function') {{
+                        refreshBackupInfo();
+                    }}
                 }} else {{
                     showConfigStatus('読み込みに失敗しました: ' + result.errors.join(', '), 'error');
                 }}
@@ -3931,6 +4141,126 @@ def render_settings_page(config_files: list) -> str:
                 }}
             }} catch (e) {{
                 showConfigStatus('検証エラー: ' + e.message, 'error');
+            }}
+        }}
+
+        // 差分プレビュー（保存前に現ファイルとの diff を表示）
+        async function previewConfigDiff() {{
+            if (!currentConfigName) {{
+                showConfigStatus('設定ファイルが選択されていません', 'error');
+                return;
+            }}
+            let data;
+            try {{
+                data = currentEditorMode === 'form' ? getFormData()
+                    : jsyaml.load(document.getElementById('yamlTextarea').value);
+            }} catch (e) {{
+                showConfigStatus('YAML パースエラー: ' + e.message, 'error');
+                return;
+            }}
+            try {{
+                const resp = await fetch('/api/config/diff', {{
+                    method: 'POST',
+                    headers: {{ 'Content-Type': 'application/json' }},
+                    body: JSON.stringify({{ config_name: currentConfigName, data }})
+                }});
+                const result = await resp.json();
+                if (!result.success) {{
+                    showConfigStatus('差分取得失敗: ' + (result.errors || []).join(', '), 'error');
+                    return;
+                }}
+                _renderConfigDiffModal(result);
+            }} catch (e) {{
+                showConfigStatus('差分取得エラー: ' + e.message, 'error');
+            }}
+        }}
+
+        function _renderConfigDiffModal(result) {{
+            const modal = document.getElementById('configDiffModal');
+            const summary = document.getElementById('configDiffSummary');
+            const body = document.getElementById('configDiffBody');
+            if (!modal || !summary || !body) return;
+
+            if (result.is_new_file) {{
+                summary.textContent = '新規ファイルとして保存されます（' + result.lines_added + ' 行追加）';
+            }} else if (!result.has_changes) {{
+                summary.textContent = '現在のファイルと差分はありません。';
+            }} else {{
+                summary.textContent = '+' + result.lines_added + ' / -' + result.lines_removed + ' 行';
+            }}
+
+            body.innerHTML = '';
+            const text = result.diff || '';
+            if (!text.trim()) {{
+                body.textContent = '（差分なし）';
+            }} else {{
+                text.split('\\n').forEach(function(line) {{
+                    const span = document.createElement('span');
+                    if (line.startsWith('+++') || line.startsWith('---') || line.startsWith('@@')) {{
+                        span.className = 'diff-meta';
+                    }} else if (line.startsWith('+')) {{
+                        span.className = 'diff-add';
+                    }} else if (line.startsWith('-')) {{
+                        span.className = 'diff-remove';
+                    }}
+                    span.textContent = line + '\\n';
+                    body.appendChild(span);
+                }});
+            }}
+            modal.style.display = 'flex';
+        }}
+
+        function closeConfigDiffModal() {{
+            const modal = document.getElementById('configDiffModal');
+            if (modal) modal.style.display = 'none';
+        }}
+
+        // バックアップ情報の表示更新（loadProjectConfig から呼ばれる）
+        async function refreshBackupInfo() {{
+            const container = document.getElementById('configBackupInfo');
+            const summary = document.getElementById('configBackupSummary');
+            if (!container || !summary) return;
+            if (!currentConfigName) {{
+                container.style.display = 'none';
+                return;
+            }}
+            try {{
+                const resp = await fetch('/api/config/backup?name=' + encodeURIComponent(currentConfigName));
+                const result = await resp.json();
+                if (result.success && result.exists) {{
+                    let mtime = result.mtime;
+                    try {{ mtime = new Date(result.mtime).toLocaleString('ja-JP'); }} catch (e) {{}}
+                    const sizeKb = (result.size / 1024).toFixed(1);
+                    summary.textContent = '直前のバックアップ: ' + mtime + '（' + sizeKb + ' KB）';
+                    container.style.display = 'flex';
+                }} else {{
+                    container.style.display = 'none';
+                }}
+            }} catch (e) {{
+                container.style.display = 'none';
+            }}
+        }}
+
+        async function restoreConfigBackup() {{
+            if (!currentConfigName) return;
+            if (!confirm('バックアップ (.bak) から復元すると、未保存の変更と現在の保存内容は失われます。続行しますか？')) {{
+                return;
+            }}
+            try {{
+                const resp = await fetch('/api/config/backup/restore', {{
+                    method: 'POST',
+                    headers: {{ 'Content-Type': 'application/json' }},
+                    body: JSON.stringify({{ config_name: currentConfigName }})
+                }});
+                const result = await resp.json();
+                if (!result.success) {{
+                    showConfigStatus('復元失敗: ' + (result.errors || []).join(', '), 'error');
+                    return;
+                }}
+                showConfigStatus('バックアップから復元しました。エディタを再読み込みします', 'success');
+                await loadProjectConfig(currentConfigName);
+            }} catch (e) {{
+                showConfigStatus('復元エラー: ' + e.message, 'error');
             }}
         }}
 
@@ -6051,6 +6381,11 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             # 設定ファイル一覧API
             self._handle_configs_list()
             return
+        elif parsed.path == "/api/config/backup":
+            # バックアップ (.bak) 情報取得 API
+            config_name = query.get("name", [None])[0]
+            self._handle_config_backup_info_get(config_name)
+            return
         elif parsed.path == "/settings":
             # 設定ページ
             config_files = list_config_files()
@@ -6242,6 +6577,10 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._handle_settings_post()
         elif parsed.path == "/api/config/validate":
             self._handle_config_validate_post()
+        elif parsed.path == "/api/config/diff":
+            self._handle_config_diff_post()
+        elif parsed.path == "/api/config/backup/restore":
+            self._handle_config_backup_restore_post()
         elif parsed.path == "/api/workflow/pr-review-action":
             self._handle_pr_review_action_post()
         elif parsed.path == "/api/workflow/retry-notion":
@@ -6598,6 +6937,101 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         except Exception as e:
             self._send_json_response(
                 {"success": False, "errors": [f"予期しないエラー: {e}"]}
+            )
+
+    def _handle_config_diff_post(self):
+        """保存予定データと現在の YAML ファイルの差分を返す（保存はしない）。
+
+        リクエスト:  {"config_name": "...", "data": {...}}
+        レスポンス:  {"success": true, "diff": "<unified diff>", "has_changes": bool,
+                     "is_new_file": bool, "lines_added": int, "lines_removed": int}
+        """
+        try:
+            request_data = self._read_json_body()
+            config_name = request_data.get("config_name", "").strip()
+            data = request_data.get("data")
+
+            if not config_name:
+                self._send_json_response(
+                    {"success": False, "errors": ["config_name が指定されていません"]}
+                )
+                return
+            if not isinstance(data, dict):
+                self._send_json_response(
+                    {"success": False, "errors": ["data が不正です"]}
+                )
+                return
+
+            try:
+                result = compute_config_diff(config_name, data)
+            except yaml.YAMLError as exc:
+                self._send_json_response(
+                    {"success": False, "errors": [f"YAML 形式エラー: {exc}"]}
+                )
+                return
+            except OSError as exc:
+                self._send_json_response(
+                    {"success": False, "errors": [f"ファイルアクセスエラー: {exc}"]}
+                )
+                return
+
+            self._send_json_response({"success": True, **result})
+        except json.JSONDecodeError:
+            self._send_json_response(
+                {"success": False, "errors": ["JSONパースエラー"]}
+            )
+        except Exception as exc:
+            self._send_json_response(
+                {"success": False, "errors": [f"予期しないエラー: {exc}"]}
+            )
+
+    def _handle_config_backup_info_get(self, config_name: str | None):
+        """指定 config の .bak ファイル情報を返す。
+
+        レスポンス:  {"success": true, "exists": bool, "filename": str|None,
+                     "mtime": str|None, "size": int|None}
+        """
+        if not config_name:
+            self._send_json_response(
+                {"success": False, "errors": ["name が指定されていません"]}, status_code=400
+            )
+            return
+        info = get_config_backup_info(config_name)
+        if info is None:
+            self._send_json_response({"success": True, "exists": False})
+            return
+        self._send_json_response({"success": True, **info})
+
+    def _handle_config_backup_restore_post(self):
+        """`.bak` から本体 YAML を復元する。
+
+        リクエスト:  {"config_name": "..."}
+        """
+        try:
+            request_data = self._read_json_body()
+            config_name = request_data.get("config_name", "").strip()
+            if not config_name:
+                self._send_json_response(
+                    {"success": False, "errors": ["config_name が指定されていません"]}
+                )
+                return
+            success, error = restore_config_backup(config_name)
+            if not success:
+                self._send_json_response(
+                    {"success": False, "errors": [error or "バックアップ復元に失敗しました"]},
+                    status_code=404 if error and "見つかりません" in error else 500,
+                )
+                return
+            self._send_json_response(
+                {"success": True, "message": "バックアップから復元しました"}
+            )
+        except json.JSONDecodeError:
+            self._send_json_response(
+                {"success": False, "errors": ["JSONパースエラー"]}
+            )
+        except Exception as exc:
+            self._send_json_response(
+                {"success": False, "errors": [f"予期しないエラー: {exc}"]}
             )
 
     def _handle_config_validate_post(self):
