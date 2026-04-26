@@ -178,6 +178,33 @@ def main():
         help="GitHubからの同期をスキップ（手動指定のみ）",
     )
 
+    # connect コマンド（Phase C: gh / glab CLI 認証導線）
+    connect_parser = subparsers.add_parser(
+        "connect",
+        help="外部サービスへの認証導線（gh / glab CLI を経由）",
+    )
+    connect_parser.add_argument(
+        "service",
+        nargs="?",
+        choices=["github", "gitlab"],
+        help="接続するサービス",
+    )
+    connect_parser.add_argument(
+        "--status",
+        action="store_true",
+        help="全サービスの接続状態を表示",
+    )
+    connect_parser.add_argument(
+        "--no-interactive",
+        action="store_true",
+        help="認証コマンドを自動実行せず、表示のみにする",
+    )
+    connect_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="既に認証済みでも再認証を実行する",
+    )
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -202,6 +229,23 @@ def main():
 
     if args.step:
         print_step_mode()
+
+    # connect コマンドは config / Notion を必要としないため、早期に処理して終了する
+    if args.command == "connect":
+        from .cli.commands.connect import connect_service, show_status
+
+        if args.status:
+            sys.exit(show_status())
+        if args.service:
+            sys.exit(
+                connect_service(
+                    args.service,
+                    no_interactive=args.no_interactive,
+                    force=args.force,
+                )
+            )
+        connect_parser.print_help()
+        sys.exit(1)
 
     # 設定ファイルを読み込み
     try:
