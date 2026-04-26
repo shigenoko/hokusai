@@ -47,7 +47,7 @@ def main():
     """メインエントリーポイント"""
     parser = argparse.ArgumentParser(
         description="LangGraph開発ワークフローCLI",
-        prog="workflow",
+        prog="hokusai",
     )
 
     # グローバルオプション
@@ -233,6 +233,14 @@ def main():
     # connect コマンドは config / Notion を必要としないため、早期に処理して終了する
     if args.command == "connect":
         from .cli.commands.connect import connect_service, show_status
+
+        # service と --status は曖昧なので併用不可（argparse の mutually-exclusive
+        # group は positional + flag の組み合わせを safely 扱えないため、明示的に
+        # error にして usage を表示する）
+        if args.service and args.status:
+            connect_parser.error(
+                "--status は service と同時に指定できません"
+            )
 
         if args.status:
             sys.exit(show_status())
