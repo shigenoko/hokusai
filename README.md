@@ -140,14 +140,15 @@ HOKUSAI is an **operational framework** for integrating AI into real-world workf
 ### Standard
 
 - 10-phase LangGraph workflow (research → design → plan → implement → verify → review → branch hygiene → PR draft → unified review loop → record)
-- CLI commands: `start`, `continue`, `status`, `list`, `cleanup`, `pr-status`
-- Web dashboard (`scripts/dashboard.py`) for monitoring runs
+- CLI commands: `start`, `continue`, `status`, `list`, `cleanup`, `pr-status`, `connect`
+- Web dashboard (`scripts/dashboard.py`) with a service connection status panel and a re-check button
 - SQLite-based persistence and LangGraph checkpointing
 - LLM-based coding agent integration for autonomous implementation (Claude Code by default)
 - GitHub integration via the `gh` CLI
 - GitHub Issue task backend
 - Phase 7.5 branch hygiene checks (file scope, base-branch sync)
 - Customizable prompts in `prompts/`
+- `hokusai connect <github|gitlab>` / `hokusai connect --status` for guided CLI authentication and a quick connection-status read-out
 
 ### Experimental
 

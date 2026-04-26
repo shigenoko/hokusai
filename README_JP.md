@@ -140,14 +140,15 @@ HOKUSAI は、AI を実世界のワークフローに統合する **運用フレ
 ### 標準機能
 
 - 10 フェーズの LangGraph ワークフロー（調査 → 設計 → 計画 → 実装 → 検証 → レビュー → ブランチ衛生 → PR draft → 統合レビューループ → 記録）
-- CLI コマンド: `start`、`continue`、`status`、`list`、`cleanup`、`pr-status`
-- Web ダッシュボード（`scripts/dashboard.py`）で実行状況を監視
+- CLI コマンド: `start`、`continue`、`status`、`list`、`cleanup`、`pr-status`、`connect`
+- Web ダッシュボード（`scripts/dashboard.py`）にサービス接続状態パネルと再チェックボタンを内蔵
 - SQLite による永続化と LangGraph checkpoint
 - LLM ベースのコーディングエージェント連携による自律実装（デフォルトは Claude Code）
 - `gh` CLI 経由の GitHub 連携
 - GitHub Issue タスクバックエンド
 - Phase 7.5 ブランチ衛生チェック（ファイルスコープ、ベースブランチ同期）
 - `prompts/` 配下のカスタマイズ可能なプロンプト
+- `hokusai connect <github|gitlab>` / `hokusai connect --status` による CLI 認証導線と接続状態の一括表示
 
 ### 実験的機能
 
