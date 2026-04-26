@@ -3107,6 +3107,93 @@ def render_settings_page(config_files: list) -> str:
 
     <h1 class="page-title">設定</h1>
 
+    <style>
+        .connection-card-header {{
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+        }}
+        .connection-recheck-btn {{
+            padding: 6px 14px;
+            border-radius: 6px;
+            border: 1px solid #2563eb;
+            background: white;
+            color: #2563eb;
+            cursor: pointer;
+            font-size: 13px;
+        }}
+        .connection-recheck-btn:hover {{ background: #eff6ff; }}
+        .connection-recheck-btn:disabled {{ opacity: 0.6; cursor: wait; }}
+        .connection-meta {{ color: var(--text-muted); font-size: 12px; margin: 8px 0 12px 0; }}
+        .connection-list {{ display: grid; gap: 10px; }}
+        .connection-item {{
+            display: grid;
+            grid-template-columns: minmax(180px, 1fr) 2fr minmax(0, 1.2fr);
+            gap: 16px;
+            align-items: start;
+            padding: 12px 14px;
+            border: 1px solid var(--border-color, #e5e7eb);
+            border-radius: 8px;
+            background: var(--bg-primary, #fff);
+        }}
+        .connection-item-head {{ display: flex; flex-direction: column; gap: 6px; }}
+        .connection-label {{ font-weight: 600; }}
+        .connection-category {{ font-size: 11px; color: var(--text-muted); }}
+        .connection-summary {{ color: var(--text-primary); }}
+        .connection-detail {{
+            font-family: ui-monospace, SFMono-Regular, monospace;
+            font-size: 11px;
+            color: var(--text-muted);
+            background: var(--bg-secondary, #f9fafb);
+            padding: 6px 8px;
+            border-radius: 4px;
+            white-space: pre-wrap;
+            word-break: break-word;
+            margin: 4px 0 0 0;
+            max-height: 140px;
+            overflow: auto;
+        }}
+        .connection-action {{ display: flex; flex-direction: column; gap: 6px; align-items: stretch; }}
+        .connection-action-label {{ font-size: 11px; color: var(--text-muted); }}
+        .connection-command-row {{ display: flex; gap: 6px; align-items: center; }}
+        .connection-command {{
+            flex: 1;
+            font-family: ui-monospace, SFMono-Regular, monospace;
+            font-size: 12px;
+            padding: 6px 8px;
+            background: var(--bg-secondary, #f9fafb);
+            border: 1px solid var(--border-color, #e5e7eb);
+            border-radius: 4px;
+            user-select: all;
+            word-break: break-all;
+        }}
+        .connection-copy-btn {{
+            font-size: 11px;
+            padding: 4px 8px;
+            cursor: pointer;
+            border-radius: 4px;
+            border: 1px solid var(--border-color, #d1d5db);
+            background: white;
+        }}
+        .connection-docs-link {{ font-size: 12px; }}
+        .badge-error {{ background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5; }}
+        .badge-info {{ background: #dbeafe; color: #1e40af; border: 1px solid #93c5fd; }}
+        .connection-empty {{ color: var(--text-muted); font-style: italic; padding: 12px; }}
+        .connection-error {{ color: #991b1b; padding: 8px; }}
+    </style>
+
+    <!-- サービス接続状態 -->
+    <div class="card" id="connectionStatusCard">
+        <div class="connection-card-header">
+            <h3>サービス接続状態</h3>
+            <button type="button" id="recheckConnectionsBtn" class="connection-recheck-btn">再チェック</button>
+        </div>
+        <p>HOKUSAI が接続するサービスの状態を表示します。設定変更や再認証は CLI から行ってください。</p>
+        <p class="connection-meta" id="connectionStatusMeta">読み込み中…</p>
+        <div id="connectionStatusList" class="connection-list" aria-live="polite"></div>
+    </div>
+
     <!-- ダッシュボード設定 (Phase 3C) -->
     <div class="card">
         <h3>ダッシュボード設定</h3>
@@ -3843,6 +3930,147 @@ def render_settings_page(config_files: list) -> str:
 
     <!-- js-yaml ライブラリ (CDN) -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/js-yaml/4.1.0/js-yaml.min.js"></script>
+
+    <!-- サービス接続状態セクション -->
+    <script>
+    (function() {{
+        const SEVERITY_BADGE = {{
+            ok: 'badge-ok',
+            warn: 'badge-warn',
+            error: 'badge-error',
+            info: 'badge-info'
+        }};
+        const STATUS_LABEL = {{
+            connected: '接続済み',
+            not_installed: '未インストール',
+            not_authenticated: '未認証',
+            timeout: 'タイムアウト',
+            unsupported: '未対応',
+            disabled: '無効化',
+            unknown: 'エラー'
+        }};
+        const CATEGORY_LABEL = {{
+            llm_agent: 'LLM エージェント',
+            git_hosting: 'Git ホスティング',
+            task_backend: 'タスクバックエンド',
+            mcp: 'MCP サーバ'
+        }};
+
+        function escapeHtml(str) {{
+            if (str === null || str === undefined) return '';
+            return String(str).replace(/[&<>"']/g, function(c) {{
+                return ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}})[c];
+            }});
+        }}
+
+        function renderActionBlock(svc) {{
+            const action = svc.next_action;
+            if (!action) return '';
+            const label = action.label ? escapeHtml(action.label) : '';
+            if (action.type === 'command' && action.command) {{
+                return '<div class="connection-action">'
+                    + (label ? '<span class="connection-action-label">' + label + '</span>' : '')
+                    + '<div class="connection-command-row">'
+                    + '<code class="connection-command">' + escapeHtml(action.command) + '</code>'
+                    + '<button type="button" class="connection-copy-btn" data-copy="' + escapeHtml(action.command) + '">コピー</button>'
+                    + '</div>'
+                    + (action.docs_url ? '<a class="connection-docs-link" href="' + escapeHtml(action.docs_url) + '" target="_blank" rel="noopener">ドキュメント</a>' : '')
+                    + '</div>';
+            }}
+            if (action.type === 'docs' && action.docs_url) {{
+                return '<div class="connection-action">'
+                    + '<a class="connection-docs-link" href="' + escapeHtml(action.docs_url) + '" target="_blank" rel="noopener">'
+                    + (label || 'ドキュメントを開く')
+                    + '</a></div>';
+            }}
+            if (label) {{
+                return '<div class="connection-action"><span class="connection-action-label">' + label + '</span></div>';
+            }}
+            return '';
+        }}
+
+        function renderItem(svc) {{
+            const badgeClass = SEVERITY_BADGE[svc.severity] || 'badge-muted';
+            const statusLabel = STATUS_LABEL[svc.status] || svc.status;
+            const categoryLabel = CATEGORY_LABEL[svc.category] || svc.category || '';
+            return '<div class="connection-item" data-service-id="' + escapeHtml(svc.id) + '" data-status="' + escapeHtml(svc.status) + '">'
+                + '<div class="connection-item-head">'
+                + '<span class="connection-label">' + escapeHtml(svc.label) + '</span>'
+                + '<span class="badge ' + badgeClass + '">' + escapeHtml(statusLabel) + '</span>'
+                + '<span class="connection-category">' + escapeHtml(categoryLabel) + '</span>'
+                + '</div>'
+                + '<div class="connection-item-body">'
+                + '<div class="connection-summary">' + escapeHtml(svc.summary || '') + '</div>'
+                + (svc.detail ? '<pre class="connection-detail">' + escapeHtml(svc.detail) + '</pre>' : '')
+                + '</div>'
+                + renderActionBlock(svc)
+                + '</div>';
+        }}
+
+        async function fetchConnections(refresh) {{
+            const url = refresh ? '/api/connections?refresh=1' : '/api/connections';
+            const meta = document.getElementById('connectionStatusMeta');
+            const list = document.getElementById('connectionStatusList');
+            const btn = document.getElementById('recheckConnectionsBtn');
+            if (!list || !meta) return;
+            if (btn) btn.disabled = true;
+            meta.textContent = refresh ? '再チェック中…' : '読み込み中…';
+            try {{
+                const resp = await fetch(url);
+                const data = await resp.json();
+                if (!data || !data.success) throw new Error('failed');
+                const services = data.services || [];
+                if (services.length === 0) {{
+                    list.innerHTML = '<p class="connection-empty">サービスが登録されていません</p>';
+                }} else {{
+                    list.innerHTML = services.map(renderItem).join('');
+                }}
+                let checkedAt = data.checked_at;
+                try {{ checkedAt = new Date(data.checked_at).toLocaleString('ja-JP'); }} catch (e) {{}}
+                meta.textContent = '最終チェック: ' + checkedAt;
+            }} catch (e) {{
+                meta.textContent = '接続状態の取得に失敗しました';
+                if (!list.innerHTML) {{
+                    list.innerHTML = '<p class="connection-error">接続状態を取得できませんでした。ダッシュボードを再起動するか、開発者ツールのコンソールを確認してください。</p>';
+                }}
+            }} finally {{
+                if (btn) btn.disabled = false;
+            }}
+        }}
+
+        function setupCopyHandler() {{
+            document.addEventListener('click', function(ev) {{
+                const target = ev.target;
+                if (!target || !target.classList || !target.classList.contains('connection-copy-btn')) return;
+                const text = target.getAttribute('data-copy') || '';
+                if (!text) return;
+                if (navigator.clipboard && navigator.clipboard.writeText) {{
+                    navigator.clipboard.writeText(text).then(function() {{
+                        const original = target.textContent;
+                        target.textContent = 'コピー済み';
+                        setTimeout(function() {{ target.textContent = original; }}, 1500);
+                    }});
+                }}
+            }});
+        }}
+
+        function init() {{
+            if (!document.getElementById('connectionStatusList')) return;
+            fetchConnections(false);
+            const btn = document.getElementById('recheckConnectionsBtn');
+            if (btn) {{
+                btn.addEventListener('click', function() {{ fetchConnections(true); }});
+            }}
+            setupCopyHandler();
+        }}
+
+        if (document.readyState === 'loading') {{
+            document.addEventListener('DOMContentLoaded', init);
+        }} else {{
+            init();
+        }}
+    }})();
+    </script>
     """
 
 
@@ -5669,6 +5897,15 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             prompt_id = unquote(prompt_id)
             self._handle_prompt_get(prompt_id)
             return
+        elif parsed.path == "/api/connections" or parsed.path == "/api/connections/":
+            # 末尾スラッシュ有無のいずれも一覧として扱う（空 service_id で 404 にしない）
+            self._handle_connections_list(query)
+            return
+        elif parsed.path.startswith("/api/connections/"):
+            from urllib.parse import unquote
+            service_id = unquote(parsed.path[len("/api/connections/"):])
+            self._handle_connections_get(service_id, query)
+            return
         elif "id" in query:
             # 詳細ページ
             workflow_id = query["id"][0]
@@ -5762,6 +5999,41 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         """
         configs = list_config_files()
         self._send_json_response({"success": True, "configs": configs})
+
+    def _handle_connections_list(self, query: dict):
+        """全サービスの接続状態を返す。
+
+        クエリパラメータ:
+            refresh=1: キャッシュを無視して再チェック
+            mode=deep: より詳細なチェックを行う（現状は shallow と同等）
+        """
+        from hokusai.integrations import connection_status
+
+        refresh = query.get("refresh", ["0"])[0] == "1"
+        mode = query.get("mode", ["shallow"])[0]
+        if mode not in ("shallow", "deep"):
+            mode = "shallow"
+        result = connection_status.get_all_statuses(refresh=refresh, mode=mode)
+        self._send_json_response(result)
+
+    def _handle_connections_get(self, service_id: str, query: dict):
+        """単一サービスの接続状態を返す。"""
+        from hokusai.integrations import connection_status
+
+        refresh = query.get("refresh", ["0"])[0] == "1"
+        mode = query.get("mode", ["shallow"])[0]
+        if mode not in ("shallow", "deep"):
+            mode = "shallow"
+        status = connection_status.get_service_status(
+            service_id, refresh=refresh, mode=mode
+        )
+        if status is None:
+            self._send_json_response(
+                {"success": False, "errors": [f"unknown service: {service_id}"]},
+                status_code=404,
+            )
+            return
+        self._send_json_response({"success": True, "service": status})
 
     def do_POST(self):
         """POSTリクエストを処理する"""
