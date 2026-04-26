@@ -354,7 +354,10 @@ def _check_gh(mode: str) -> dict[str, Any]:
         next_action={
             "type": "command",
             "label": "GitHub に接続",
-            "command": "gh auth login",
+            # `hokusai connect github` は内部で `gh auth login` を実行する
+            # ラッパー。ダッシュボードからは hokusai 経由のコマンドを案内し、
+            # CLI 状態クリアと TTY/非 TTY のフォールバックも一括して任せる。
+            "command": "hokusai connect github",
             "docs_url": None,
         },
         mode=mode,
@@ -423,7 +426,7 @@ def _check_glab(mode: str) -> dict[str, Any]:
         next_action={
             "type": "command",
             "label": "GitLab に接続",
-            "command": "glab auth login",
+            "command": "hokusai connect gitlab",
             "docs_url": None,
         },
         mode=mode,

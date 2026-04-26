@@ -172,7 +172,8 @@ def test_gh_not_authenticated(monkeypatch):
     assert result["next_action"] == {
         "type": "command",
         "label": "GitHub に接続",
-        "command": "gh auth login",
+        # `hokusai connect github` 経由を案内（gh auth login の直接案内は廃止）
+        "command": "hokusai connect github",
         "docs_url": None,
     }
 
@@ -208,7 +209,7 @@ def test_glab_not_authenticated(monkeypatch):
     result = cs.get_service_status("glab")
 
     assert result["status"] == cs.STATUS_NOT_AUTHENTICATED
-    assert result["next_action"]["command"] == "glab auth login"
+    assert result["next_action"]["command"] == "hokusai connect gitlab"
 
 
 def test_glab_connected(monkeypatch):
