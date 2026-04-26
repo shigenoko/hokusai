@@ -2,13 +2,13 @@
 
 **HOKUSAI** = **H**uman-**O**rchestrated **K**nowledge & **U**nified **S**ystem for **A**I **I**ntegration
 
-LangGraph をベースにした AI 開発ワークフロー自動化ツール。Claude Code と統合されている。
+LangGraph をベースに、複数の LLM をオーケストレーションする AI 開発ワークフロー自動化ツール。
 
 [English README is here](./README.md)
 
 ## 概要
 
-HOKUSAI は調査・計画・実装・検証・レビュー・プルリクエスト管理を自動化する 10 フェーズの開発ワークフローをオーケストレーションする。[LangGraph](https://github.com/langchain-ai/langgraph) 上に構築され、[Claude Code](https://claude.com/claude-code) および GitHub CLI (`gh`) と密に統合されている。
+HOKUSAI は調査・計画・実装・検証・レビュー・プルリクエスト管理を自動化する 10 フェーズの開発ワークフローをオーケストレーションする。[LangGraph](https://github.com/langchain-ai/langgraph) 上に構築され、複数の LLM ベースのコーディングエージェント（[Claude Code](https://claude.com/claude-code) など）および GitHub CLI (`gh`) と統合される。
 
 名前は設計思想を反映している。意思決定とレビューは **人間がオーケストレーション** し、AI ツール群を **統合システム** が連携させて実装・検証を担う。各フェーズは人間の判断を待つために一時停止可能で、Phase 8 の統合レビューループは Copilot と人間のレビューコメントを順不同で処理する。これにより **Human-in-the-Loop (HITL)** な開発を安全かつ予測可能に進められる。
 
@@ -91,7 +91,7 @@ HOKUSAI はシンプルでパワフルなワークフローを軸に設計され
 1. **Research（調査）** — タスクのスコープと既存コードを調査
 2. **Design（設計）** — アーキテクチャと方針を計画
 3. **Plan（計画）** — 実行チェックリストを段階的に構築
-4. **Implement（実装）** — Claude Code 経由で変更を実行
+4. **Implement（実装）** — LLM ベースのコーディングエージェント経由で変更を実行（デフォルトは Claude Code）
 5. **Verify（検証）** — テストと lint で正しさを確認
 6. **Review（レビュー）** — 品質チェックリストに沿った最終レビュー
 7. **Branch hygiene（ブランチ衛生）** — スコープとベースブランチの整合性を確認
@@ -143,7 +143,7 @@ HOKUSAI は、AI を実世界のワークフローに統合する **運用フレ
 - CLI コマンド: `start`、`continue`、`status`、`list`、`cleanup`、`pr-status`
 - Web ダッシュボード（`scripts/dashboard.py`）で実行状況を監視
 - SQLite による永続化と LangGraph checkpoint
-- Claude Code 連携による自律実装
+- LLM ベースのコーディングエージェント連携による自律実装（デフォルトは Claude Code）
 - `gh` CLI 経由の GitHub 連携
 - GitHub Issue タスクバックエンド
 - Phase 7.5 ブランチ衛生チェック（ファイルスコープ、ベースブランチ同期）
@@ -162,7 +162,7 @@ HOKUSAI は、AI を実世界のワークフローに統合する **運用フレ
 
 - **Python**: 3.11 以降
 - **`gh` CLI**: `repo` スコープで認証済み（PR 管理とレビューコメント返信に必要）
-- **Claude Code CLI**: インストール・設定済み（自律実装に使用）
+- **LLM ベースのコーディングエージェント CLI**: 少なくとも 1 つがインストール・設定済み（例: Claude Code — 自律実装のデフォルト駆動役として使用）
 - **Git**: 2.30 以降
 
 Phase 8 の統合レビューループは `gh` 経由で PR レビューコメントに返信するため、認証ユーザーが対象リポジトリへの write 権限を持っている必要がある。

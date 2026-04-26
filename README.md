@@ -2,13 +2,13 @@
 
 **HOKUSAI** = **H**uman-**O**rchestrated **K**nowledge & **U**nified **S**ystem for **A**I **I**ntegration
 
-LangGraph-based AI development workflow automation with Claude Code integration.
+LangGraph-based AI development workflow automation that orchestrates multiple LLMs.
 
 [日本語版 README はこちら](./README_JP.md)
 
 ## Overview
 
-HOKUSAI orchestrates a 10-phase development workflow that automates research, planning, implementation, verification, review, and pull-request management. It is built on [LangGraph](https://github.com/langchain-ai/langgraph) and integrates tightly with [Claude Code](https://claude.com/claude-code) and the GitHub CLI (`gh`).
+HOKUSAI orchestrates a 10-phase development workflow that automates research, planning, implementation, verification, review, and pull-request management. It is built on [LangGraph](https://github.com/langchain-ai/langgraph) and integrates with multiple LLM-based coding agents (e.g., [Claude Code](https://claude.com/claude-code)) and the GitHub CLI (`gh`).
 
 The name reflects the design philosophy: **humans orchestrate** decisions and review, while a **unified system** integrates AI tooling for the heavy lifting. Each phase can pause for human input, and the unified review loop in Phase 8 handles Copilot and human review comments in any order — making the workflow safe and predictable for **Human-in-the-Loop (HITL)** development.
 
@@ -91,7 +91,7 @@ HOKUSAI is built around a simple but powerful workflow:
 1. **Research** — Investigate the task scope and existing code
 2. **Design** — Plan the architecture and approach
 3. **Plan** — Build a step-by-step execution checklist
-4. **Implement** — Execute changes via Claude Code
+4. **Implement** — Execute changes via an LLM-based coding agent (Claude Code by default)
 5. **Verify** — Run tests and lint to confirm correctness
 6. **Review** — Final review against quality checklists
 7. **Branch hygiene** — Confirm scope and base-branch consistency
@@ -143,7 +143,7 @@ HOKUSAI is an **operational framework** for integrating AI into real-world workf
 - CLI commands: `start`, `continue`, `status`, `list`, `cleanup`, `pr-status`
 - Web dashboard (`scripts/dashboard.py`) for monitoring runs
 - SQLite-based persistence and LangGraph checkpointing
-- Claude Code integration for autonomous implementation
+- LLM-based coding agent integration for autonomous implementation (Claude Code by default)
 - GitHub integration via the `gh` CLI
 - GitHub Issue task backend
 - Phase 7.5 branch hygiene checks (file scope, base-branch sync)
@@ -162,7 +162,7 @@ The following components are present in the codebase but are not enabled by defa
 
 - **Python**: 3.11 or later
 - **`gh` CLI**: authenticated with `repo` scope (required for PR management and review-comment handling)
-- **Claude Code CLI**: installed and configured (used to drive autonomous implementation)
+- **LLM-based coding agent CLI**: at least one installed and configured (e.g., Claude Code — used as the default driver for autonomous implementation)
 - **Git**: 2.30 or later
 
 The Phase 8 unified review loop replies to PR review comments via `gh`, so the authenticated user must have write access to the target repository.
