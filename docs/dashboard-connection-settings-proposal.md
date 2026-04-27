@@ -107,6 +107,8 @@ HOKUSAI が接続するサービス（Claude Code、GitHub、Codex、Notion、Gi
 | Phase B-2: `.bak` 復元 UI | ✅ 完了 | PR #5 |
 | Phase B-3: トークン混入警告 | ✅ 完了 | PR #4 |
 | Phase B-4: 接続状態と config の整合性警告 | ✅ 完了 | PR #4 |
+| Phase B-5: パストラバーサル防御の全経路化 | ✅ 完了 | PR #6 |
+| Phase B-6: 多世代 `.bak` バックアップ + 選択復元 | ✅ 完了 | PR #7 |
 | Phase C: `hokusai connect` CLI（gh / glab） | ✅ 完了 | PR #2 |
 | Phase C': `hokusai connect linear` / `jira`（keyring 保存） | 🚫 保留 | クライアント未実装のため |
 | Phase D: シークレット管理の Web 連携 | 🚫 保留 | Phase C' 完了後に再検討 |
@@ -124,10 +126,12 @@ HOKUSAI が接続するサービス（Claude Code、GitHub、Codex、Notion、Gi
 ### Phase B: 設定ページの安全性と UX 強化
 
 - **B-1 差分プレビュー**: `POST /api/config/diff` で unified diff を返し、設定ページにモーダル表示。`save_config_yaml` と同じ `yaml.dump` 形式で diff を取って整合性確保
-- **B-2 `.bak` 復元 UI**: `GET /api/config/backup` / `POST /api/config/backup/restore` を追加。「直前のバックアップ: <時刻>」と「バックアップに戻す」ボタンを設置（1 世代のみ）
-- **B-3 トークン直書き警告**: GitHub PAT / GitLab PAT / Anthropic / OpenAI 形式 + キー名ヒューリスティック（`token` / `api_key` / `secret` / `password` 等）で `validate_config` の warnings に追記
+- **B-2 `.bak` 復元 UI**: `GET /api/config/backup` / `POST /api/config/backup/restore` を追加。設定ページにバックアップ一覧と「この世代に戻す」ボタンを設置
+- **B-3 トークン直書き警告**: GitHub PAT / GitLab PAT / Anthropic / OpenAI 形式 + キー名ヒューリスティック（`token` / `api_key` / `secret` / `password` 等）で `validate_config` の warnings に追記。`re.fullmatch` ベースの伏字判定（`<placeholder>` / `[*xX-]{4,}` / 4 文字以上同一文字）で false-positive を避ける
 - **B-4 接続整合性警告**: `git_hosting` / `task_backend` / `cross_review` の各設定値と `connection_status` の状態を突き合わせ、未認証等のとき warning を出して `hokusai connect <service>` を案内
-- パストラバーサル対策として `_safe_config_path` を導入し、書き込み・読み取り・差分・復元すべての経路で CONFIGS_DIR 配下に限定（PR #5 + 後続フォローアップ）
+- **B-5 パストラバーサル防御**: `_safe_config_path` を新設し、`config_name` を `^[A-Za-z0-9_\-]+$` の許可文字集合に制限。`load_config_yaml` / `save_config_yaml` / `compute_config_diff` / `restore_config_backup` / `parse_project_rules` 全経路で CONFIGS_DIR 配下に限定。`glob.escape` で defense in depth
+- **B-6 多世代バックアップ**: `.bak` を `.bak.<YYYYMMDD-HHMMSS-microseconds>` 形式に拡張し、`BACKUP_RETAIN_COUNT = 10` で自動 prune。同一秒内の連続保存にも UUID 短縮ハッシュ末尾でユニーク化対応。`_safe_backup_path` で他 config の `.bak` を指定した上書きを 400 で拒否
+- **API 一貫性**: 全エンドポイントで client error → 400 / not found → 404 / I/O 失敗 → 500 を明示。`restore_config_backup` は `(success, error_code, error_message)` 形式で構造化エラーを返し、ハンドラ側は dict 引きでステータスを決定（メッセージ文字列の substring match に依存しない）
 
 ### Phase C: `hokusai connect` CLI
 
@@ -148,8 +152,18 @@ HOKUSAI が接続するサービス（Claude Code、GitHub、Codex、Notion、Gi
 Phase C' が動くようになっても、Web UI でのシークレット直接入力は CSRF / origin 検証 / 保存先の権限チェックといった追加責務を伴う。
 当面は `hokusai connect` CLI 経由の認証で十分とし、必要性が高まった時点で再検討する。
 
-## 次に検討する候補
+## 次に検討する候補（必要性が顕在化した時点で着手）
 
-- 多世代 `.bak` バックアップ（PR #5 では 1 世代のみ）
-- `mode=deep` で実際に MCP サーバへ ping を打つ実装（現状は設定確認のみ）
-- Linear / Jira クライアントの実装と Phase C' 着手
+- **`mode=deep` 実装**: Notion MCP サーバへの軽量 ping。現状は設定ファイルの存在確認のみ。MCP の stdio 通信を直接叩く実装が必要で中程度の作業
+- **Linear / Jira クライアントの実装**: Phase C' / D 着手の前提。外部依存が大きい
+- **保持世代数の config 化**: 現状ハードコード `BACKUP_RETAIN_COUNT = 10`
+- **バックアップとの差分表示**: 「この世代と現在の差分を見る」ボタンを各バックアップ行に追加
+- **別ページでの全バックアップ閲覧 UI**: 多 config 横断のバックアップ管理画面
+
+## 完了状態のメトリクス（2026-04-27 時点）
+
+- 関連 PR: #1〜#7（マージ済み）
+- 累計テスト数: 927 件
+- 主要モジュール: `hokusai/integrations/connection_status.py` / `hokusai/cli/commands/connect.py` / `scripts/dashboard.py`
+- 公開 API: `/api/connections` / `/api/connections/{service}` / `/api/config/diff` / `/api/config/backup` / `/api/config/backup/restore`
+- セキュリティ防御: `_safe_config_path` / `_safe_backup_path` / `glob.escape` の三段階で defense in depth
