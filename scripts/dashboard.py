@@ -7,6 +7,7 @@ HOKUS AI Workflow Dashboard
 """
 
 import difflib
+import glob
 import html as html_mod
 import json
 import os
@@ -2133,23 +2134,27 @@ def list_config_files() -> list[str]:
     return sorted(configs)
 
 
+# 許可する config 名: 英数字 + `_` + `-` のみ。
+# パス区切り文字（`/` `\\`）、特殊名 (`.`, `..`)、glob メタ文字（`*`, `?`,
+# `[`, `]`）等を一律に弾くことで、後段の `Path` 構築や `glob` 呼び出しで
+# 意図しないファイル列挙・列挙先の上書きが起きないようにする。
+_SAFE_CONFIG_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_\-]+$")
+
+
 def _safe_config_path(config_name: str, ext: str) -> Path:
     """`CONFIGS_DIR` 配下に限定した設定ファイルパスを返す。
 
-    パストラバーサル攻撃（`..`、絶対パス、`/` `\\` 区切り）を弾き、解決後の
-    パスが `CONFIGS_DIR` 配下に収まることを検証する。ファイルの存在は
-    チェックしない（書き込み先パスの構築にも使われるため）。
+    パストラバーサル攻撃（`..`、絶対パス、`/` `\\` 区切り）に加え、glob
+    メタ文字（`*`, `?`, `[`）等も弾く。解決後のパスが `CONFIGS_DIR` 配下に
+    収まることも検証する。ファイルの存在はチェックしない（書き込み先パスの
+    構築にも使われるため）。
 
     Raises:
-        ValueError: config_name が空、特殊名 (".", "..")、パス区切り文字を
-            含む、または resolve 結果が CONFIGS_DIR 配下に収まらない場合。
+        ValueError: config_name が空、許可文字集合（英数字 + `_` + `-`）外、
+            または resolve 結果が CONFIGS_DIR 配下に収まらない場合。
     """
-    if (
-        not config_name
-        or not isinstance(config_name, str)
-        or config_name in (".", "..")
-        or "/" in config_name
-        or "\\" in config_name
+    if not isinstance(config_name, str) or not _SAFE_CONFIG_NAME_PATTERN.match(
+        config_name
     ):
         raise ValueError(f"不正な設定ファイル名です: {config_name!r}")
     base = CONFIGS_DIR.resolve()
@@ -2690,50 +2695,211 @@ def compute_config_diff(config_name: str, new_data: dict) -> dict:
     }
 
 
-def get_config_backup_info(config_name: str) -> dict | None:
-    """`config_name` に対応する .bak ファイルの情報を返す。存在しなければ None。
+# 保持する最大バックアップ世代数。古いものから自動削除される。
+BACKUP_RETAIN_COUNT = 10
 
-    `config_name` が安全でない場合も None を返す（API 呼び出し側で検証すべき）。
+
+def _safe_backup_path(config_name: str, filename: str) -> Path:
+    """`config_name` のバックアップファイル名を CONFIGS_DIR 配下で安全に解決。
+
+    `filename` には以下を許容:
+    - `<config_name>.yaml.bak` / `<config_name>.yml.bak`（PR #5 以前の単一世代形式）
+    - `<config_name>.yaml.bak.<timestamp>` / `<config_name>.yml.bak.<timestamp>`
+
+    Raises:
+        ValueError: filename にパス区切り文字や `..` が含まれる、CONFIGS_DIR
+            外、または config_name と一致しない場合。
+        FileNotFoundError: ファイルが存在しない場合。
     """
-    for ext in (".yaml", ".yml"):
-        try:
-            config_path = _safe_config_path(config_name, ext)
-        except ValueError:
-            return None
-        backup_path = config_path.with_suffix(config_path.suffix + ".bak")
-        if backup_path.exists():
-            stat = backup_path.stat()
-            return {
-                "exists": True,
-                "filename": backup_path.name,
-                "mtime": datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
-                "size": stat.st_size,
-            }
-    return None
+    if (
+        not filename
+        or not isinstance(filename, str)
+        or "/" in filename
+        or "\\" in filename
+        or filename in (".", "..")
+    ):
+        raise ValueError(f"不正なバックアップファイル名です: {filename!r}")
+
+    # config_name 自体の安全性も検証（連鎖的なパストラバーサル防止）
+    _safe_config_path(config_name, ".yaml")
+
+    valid_prefixes = (f"{config_name}.yaml.bak", f"{config_name}.yml.bak")
+    is_valid_match = filename in valid_prefixes or any(
+        filename.startswith(p + ".") for p in valid_prefixes
+    )
+    if not is_valid_match:
+        raise ValueError(
+            f"バックアップファイル {filename!r} は {config_name} に対応していません"
+        )
+
+    base = CONFIGS_DIR.resolve()
+    candidate = (CONFIGS_DIR / filename).resolve()
+    try:
+        candidate.relative_to(base)
+    except ValueError as exc:
+        raise ValueError(f"不正なバックアップファイル名です: {filename!r}") from exc
+    if not candidate.exists():
+        raise FileNotFoundError(filename)
+    return candidate
 
 
-def restore_config_backup(config_name: str) -> tuple[bool, str | None]:
-    """.bak ファイルから本体 YAML を復元する。
+def list_config_backups(config_name: str) -> list[dict]:
+    """`config_name` のバックアップファイル一覧を新しい順に返す。
 
-    Returns:
-        (success, error_message)
+    各エントリは {filename, mtime, size}。レガシー（PR #5 以前の単一世代
+    `.bak`）と新形式（`.bak.<timestamp>`）の両方を含める。
 
-    `config_name` が安全でない（パストラバーサル等）場合は失敗扱い。
+    本体ファイルが既に存在する場合（`_resolve_config_path` で解決可能）は、
+    その拡張子に一致するバックアップだけを返す。これは `restore_config_backup`
+    のデフォルト（filename 省略時の最新復元）が、本体と異なる拡張子の
+    バックアップを誤って復元先に選ばないようにするため。
     """
     try:
-        for ext in (".yaml", ".yml"):
-            config_path = _safe_config_path(config_name, ext)
-            backup_path = _safe_config_path(config_name, ext + ".bak")
-            if not backup_path.exists():
+        _safe_config_path(config_name, ".yaml")
+    except ValueError:
+        return []
+
+    # 本体が存在するなら拡張子を固定。なければ両方を候補にする（新規作成の
+    # ファイルなど、本体がまだない場合のために）。
+    active_path = _resolve_config_path(config_name)
+    if active_path is not None:
+        target_exts: tuple[str, ...] = (active_path.suffix,)
+    else:
+        target_exts = (".yaml", ".yml")
+
+    # 内部用の数値 mtime をキーにソートし、同 timestamp 内では filename を
+    # 2 次キーにして決定的に並べる。文字列化された mtime は DST 等で巻き戻る
+    # ケースがあるため、ソートには使わない（出力には ISO 文字列を入れる）。
+    entries: list[tuple[float, str, dict]] = []
+    for ext in target_exts:
+        # config_name は `_safe_config_path` で許可文字集合に制限済みだが、
+        # 念のため `glob.escape` を介してリテラル一致のみを行う（defense in
+        # depth）。
+        escaped = glob.escape(f"{config_name}{ext}")
+
+        legacy_path = CONFIGS_DIR / f"{config_name}{ext}.bak"
+        if legacy_path.is_file():
+            stat = legacy_path.stat()
+            entries.append((
+                stat.st_mtime,
+                legacy_path.name,
+                {
+                    "filename": legacy_path.name,
+                    "mtime": datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
+                    "size": stat.st_size,
+                },
+            ))
+
+        for backup_path in CONFIGS_DIR.glob(f"{escaped}.bak.*"):
+            if not backup_path.is_file():
                 continue
-            try:
-                shutil.copy2(backup_path, config_path)
-                return True, None
-            except OSError as exc:
-                return False, f"バックアップ復元に失敗しました: {exc}"
+            stat = backup_path.stat()
+            entries.append((
+                stat.st_mtime,
+                backup_path.name,
+                {
+                    "filename": backup_path.name,
+                    "mtime": datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
+                    "size": stat.st_size,
+                },
+            ))
+
+    entries.sort(key=lambda e: (e[0], e[1]), reverse=True)
+    return [entry[2] for entry in entries]
+
+
+def _prune_old_backups(config_path: Path, retain: int) -> int:
+    """`config_path` に紐づくバックアップが retain 件を超える場合、古いものから削除。
+
+    Returns:
+        削除した件数。
+    """
+    candidates: list[Path] = []
+    legacy = config_path.with_suffix(config_path.suffix + ".bak")
+    if legacy.is_file():
+        candidates.append(legacy)
+    # config_path.name は `_safe_config_path` 経由で構築されているため安全だが、
+    # defense in depth として `glob.escape` で glob メタ文字をリテラル化する。
+    pattern = f"{glob.escape(config_path.name)}.bak.*"
+    candidates.extend(p for p in CONFIGS_DIR.glob(pattern) if p.is_file())
+
+    if len(candidates) <= retain:
+        return 0
+
+    # 数値 `st_mtime` でソート（DST/フォーマット由来のズレを避ける）
+    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    deleted = 0
+    for path in candidates[retain:]:
+        try:
+            path.unlink()
+            deleted += 1
+        except OSError:
+            pass
+    return deleted
+
+
+# `restore_config_backup` の構造化エラーコード。HTTP ステータスへのマッピング
+# に使う（メッセージ文字列の部分一致に依存しないため、文言変更や翻訳でも
+# 壊れない）。
+RESTORE_ERROR_INVALID_NAME = "invalid_name"
+RESTORE_ERROR_NOT_FOUND = "not_found"
+RESTORE_ERROR_IO_ERROR = "io_error"
+
+
+def restore_config_backup(
+    config_name: str, filename: str | None = None
+) -> tuple[bool, str | None, str | None]:
+    """指定バックアップから本体 YAML を復元する。
+
+    Args:
+        config_name: 設定ファイル名（拡張子なし）
+        filename: 復元元のバックアップファイル名。省略時は最新を選択。
+
+    Returns:
+        (success, error_code, error_message)
+
+        error_code は失敗時のみ非 None で、以下のいずれか:
+          - RESTORE_ERROR_INVALID_NAME: config_name / filename が不正、または
+            指定 filename が config_name に対応していない
+          - RESTORE_ERROR_NOT_FOUND: バックアップが存在しない
+          - RESTORE_ERROR_IO_ERROR: shutil.copy2 などの I/O 失敗
+    """
+    try:
+        # config_name の安全性を最初に検証する。`list_config_backups` は不正な
+        # name に対して [] を返すため、この検証を省くと「見つかりません」と
+        # 誤った理由を返してしまう。
+        _safe_config_path(config_name, ".yaml")
+
+        if filename is None:
+            backups = list_config_backups(config_name)
+            if not backups:
+                return False, RESTORE_ERROR_NOT_FOUND, "バックアップファイル (.bak) が見つかりません"
+            filename = backups[0]["filename"]
+
+        backup_path = _safe_backup_path(config_name, filename)
+
+        # 復元先（本体）の決定: バックアップファイル名から本体拡張子を逆引き
+        for ext in (".yaml", ".yml"):
+            backup_marker = f"{ext}.bak"
+            if backup_marker in backup_path.name:
+                config_path = _safe_config_path(config_name, ext)
+                break
+        else:
+            return (
+                False,
+                RESTORE_ERROR_INVALID_NAME,
+                f"対応する本体ファイル拡張子を判定できません: {filename}",
+            )
+
+        try:
+            shutil.copy2(backup_path, config_path)
+            return True, None, None
+        except OSError as exc:
+            return False, RESTORE_ERROR_IO_ERROR, f"バックアップ復元に失敗しました: {exc}"
+    except FileNotFoundError as exc:
+        return False, RESTORE_ERROR_NOT_FOUND, f"バックアップファイルが見つかりません: {exc}"
     except ValueError as exc:
-        return False, str(exc)
-    return False, "バックアップファイル (.bak) が見つかりません"
+        return False, RESTORE_ERROR_INVALID_NAME, str(exc)
 
 
 def save_config_yaml(config_name: str, data: dict) -> bool:
@@ -2763,10 +2929,23 @@ def save_config_yaml(config_name: str, data: dict) -> bool:
         if yml_path.exists():
             config_path = yml_path
 
-    # バックアップ作成
+    # タイムスタンプ付きバックアップを作成（多世代保持）。マイクロ秒まで含めて
+    # 同一秒内の連続保存でも衝突しないようにし、それでも衝突した場合は UUID を
+    # 末尾に付けてユニーク化する。古い世代は BACKUP_RETAIN_COUNT を超えた分から
+    # 自動で削除される。
     if config_path.exists():
-        backup_path = config_path.with_suffix(config_path.suffix + ".bak")
+        import uuid as _uuid
+
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        backup_path = config_path.with_suffix(
+            config_path.suffix + f".bak.{timestamp}"
+        )
+        if backup_path.exists():
+            backup_path = config_path.with_suffix(
+                config_path.suffix + f".bak.{timestamp}-{_uuid.uuid4().hex[:8]}"
+            )
         shutil.copy2(config_path, backup_path)
+        _prune_old_backups(config_path, retain=BACKUP_RETAIN_COUNT)
 
     # 原子的保存: 一時ファイルに書き込み→rename
     fd, temp_path = tempfile.mkstemp(
@@ -3511,19 +3690,65 @@ def render_settings_page(config_files: list) -> str:
         .connection-empty {{ color: var(--text-muted); font-style: italic; padding: 12px; }}
         .connection-error {{ color: #991b1b; padding: 8px; }}
 
-        /* 差分モーダル / バックアップ情報 */
+        /* 差分モーダル / バックアップ一覧 */
         .config-backup-info {{
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            padding: 8px 12px;
+            display: block;
+            padding: 10px 12px;
             margin-top: 12px;
             border: 1px solid var(--border-color, #e5e7eb);
             border-radius: 6px;
             background: var(--bg-secondary, #f9fafb);
             font-size: 13px;
         }}
-        .config-backup-info span {{ flex: 1; color: var(--text-muted); }}
+        .config-backup-header {{
+            margin-bottom: 8px;
+            color: var(--text-muted);
+            font-weight: 500;
+        }}
+        .config-backup-list {{
+            list-style: none;
+            padding: 0;
+            margin: 0;
+            max-height: 200px;
+            overflow: auto;
+        }}
+        .config-backup-list li {{
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 6px 8px;
+            border-top: 1px solid var(--border-color, #e5e7eb);
+            gap: 12px;
+        }}
+        .config-backup-list li:first-child {{ border-top: none; }}
+        .config-backup-list .backup-meta {{
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+            color: var(--text-primary);
+            font-family: ui-monospace, SFMono-Regular, monospace;
+            font-size: 12px;
+        }}
+        .config-backup-list .backup-mtime {{ color: var(--text-primary); }}
+        .config-backup-list .backup-filename {{ color: var(--text-muted); }}
+        .config-backup-list .backup-restore-btn {{
+            font-size: 12px;
+            padding: 4px 10px;
+            border-radius: 4px;
+            border: 1px solid var(--border-color, #d1d5db);
+            background: white;
+            cursor: pointer;
+            white-space: nowrap;
+        }}
+        .config-backup-list .backup-restore-btn:hover {{ background: #eff6ff; }}
+        .config-backup-list .backup-latest-tag {{
+            font-size: 10px;
+            background: #d1fae5;
+            color: #065f46;
+            padding: 2px 6px;
+            border-radius: 999px;
+            margin-left: 4px;
+        }}
         .config-diff-modal {{
             position: fixed;
             top: 0;
@@ -3820,10 +4045,10 @@ def render_settings_page(config_files: list) -> str:
             </div>
         </div>
 
-        <!-- バックアップ情報（直前の .bak） -->
+        <!-- バックアップ一覧（多世代） -->
         <div id="configBackupInfo" class="config-backup-info" style="display: none;">
-            <span id="configBackupSummary"></span>
-            <button type="button" class="reset-btn" onclick="restoreConfigBackup()">バックアップに戻す</button>
+            <div id="configBackupHeader" class="config-backup-header"></div>
+            <ul id="configBackupList" class="config-backup-list"></ul>
         </div>
 
         <!-- 差分モーダル -->
@@ -4256,11 +4481,12 @@ def render_settings_page(config_files: list) -> str:
             if (modal) modal.style.display = 'none';
         }}
 
-        // バックアップ情報の表示更新（loadProjectConfig から呼ばれる）
+        // バックアップ一覧の表示更新（loadProjectConfig から呼ばれる）
         async function refreshBackupInfo() {{
             const container = document.getElementById('configBackupInfo');
-            const summary = document.getElementById('configBackupSummary');
-            if (!container || !summary) return;
+            const header = document.getElementById('configBackupHeader');
+            const list = document.getElementById('configBackupList');
+            if (!container || !header || !list) return;
             if (!currentConfigName) {{
                 container.style.display = 'none';
                 return;
@@ -4268,37 +4494,75 @@ def render_settings_page(config_files: list) -> str:
             try {{
                 const resp = await fetch('/api/config/backup?name=' + encodeURIComponent(currentConfigName));
                 const result = await resp.json();
-                if (result.success && result.exists) {{
-                    let mtime = result.mtime;
-                    try {{ mtime = new Date(result.mtime).toLocaleString('ja-JP'); }} catch (e) {{}}
-                    const sizeKb = (result.size / 1024).toFixed(1);
-                    summary.textContent = '直前のバックアップ: ' + mtime + '（' + sizeKb + ' KB）';
-                    container.style.display = 'flex';
-                }} else {{
+                if (!result.success || !result.backups || result.backups.length === 0) {{
                     container.style.display = 'none';
+                    return;
                 }}
+                const retain = typeof result.retain === 'number' ? result.retain : 0;
+                header.textContent = 'バックアップ ' + result.backups.length + ' 世代'
+                    + (retain ? '（最大 ' + retain + ' 世代を保持）' : '')
+                    + '— 古いバージョンをクリックして復元できます';
+                list.innerHTML = '';
+                result.backups.forEach(function (entry, index) {{
+                    const li = document.createElement('li');
+
+                    const meta = document.createElement('div');
+                    meta.className = 'backup-meta';
+                    let mtime = entry.mtime;
+                    try {{ mtime = new Date(entry.mtime).toLocaleString('ja-JP'); }} catch (e) {{}}
+                    const mtimeSpan = document.createElement('span');
+                    mtimeSpan.className = 'backup-mtime';
+                    mtimeSpan.textContent = mtime + '（' + ((entry.size || 0) / 1024).toFixed(1) + ' KB）';
+                    if (index === 0) {{
+                        const tag = document.createElement('span');
+                        tag.className = 'backup-latest-tag';
+                        tag.textContent = '最新';
+                        mtimeSpan.appendChild(tag);
+                    }}
+                    meta.appendChild(mtimeSpan);
+
+                    const fname = document.createElement('span');
+                    fname.className = 'backup-filename';
+                    fname.textContent = entry.filename;
+                    meta.appendChild(fname);
+
+                    li.appendChild(meta);
+
+                    const btn = document.createElement('button');
+                    btn.type = 'button';
+                    btn.className = 'backup-restore-btn';
+                    btn.textContent = 'この世代に戻す';
+                    btn.addEventListener('click', function () {{ restoreConfigBackup(entry.filename); }});
+                    li.appendChild(btn);
+
+                    list.appendChild(li);
+                }});
+                container.style.display = 'block';
             }} catch (e) {{
                 container.style.display = 'none';
             }}
         }}
 
-        async function restoreConfigBackup() {{
+        async function restoreConfigBackup(filename) {{
             if (!currentConfigName) return;
-            if (!confirm('バックアップ (.bak) から復元すると、未保存の変更と現在の保存内容は失われます。続行しますか？')) {{
+            const target = filename ? '世代「' + filename + '」' : '直前のバックアップ';
+            if (!confirm(target + 'から復元すると、未保存の変更と現在の保存内容は失われます。続行しますか？')) {{
                 return;
             }}
             try {{
+                const body = {{ config_name: currentConfigName }};
+                if (filename) body.filename = filename;
                 const resp = await fetch('/api/config/backup/restore', {{
                     method: 'POST',
                     headers: {{ 'Content-Type': 'application/json' }},
-                    body: JSON.stringify({{ config_name: currentConfigName }})
+                    body: JSON.stringify(body)
                 }});
                 const result = await resp.json();
                 if (!result.success) {{
                     showConfigStatus('復元失敗: ' + (result.errors || []).join(', '), 'error');
                     return;
                 }}
-                showConfigStatus('バックアップから復元しました。エディタを再読み込みします', 'success');
+                showConfigStatus('バックアップから復元しました（' + (result.filename || '最新') + '）。エディタを再読み込みします', 'success');
                 await loadProjectConfig(currentConfigName);
             }} catch (e) {{
                 showConfigStatus('復元エラー: ' + e.message, 'error');
@@ -7056,10 +7320,15 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             )
 
     def _handle_config_backup_info_get(self, config_name: str | None):
-        """指定 config の .bak ファイル情報を返す。
+        """指定 config のバックアップファイル一覧を返す（新しい順）。
 
-        レスポンス:  {"success": true, "exists": bool, "filename": str|None,
-                     "mtime": str|None, "size": int|None}
+        レスポンス:  {
+            "success": true,
+            "backups": [{"filename": str, "mtime": str, "size": int}, ...],
+            "retain": int
+        }
+
+        互換のため、`backups` が空のときは `exists=false` も含める。
         """
         if not config_name:
             self._send_json_response(
@@ -7073,26 +7342,37 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 {"success": False, "errors": [str(exc)]}, status_code=400
             )
             return
-        info = get_config_backup_info(config_name)
-        if info is None:
-            self._send_json_response({"success": True, "exists": False})
-            return
-        self._send_json_response({"success": True, **info})
+        backups = list_config_backups(config_name)
+        self._send_json_response({
+            "success": True,
+            "backups": backups,
+            "exists": bool(backups),
+            "retain": BACKUP_RETAIN_COUNT,
+        })
 
     def _handle_config_backup_restore_post(self):
-        """`.bak` から本体 YAML を復元する。
+        """指定バックアップから本体 YAML を復元する。
 
-        リクエスト:  {"config_name": "..."}
+        リクエスト:  {
+            "config_name": "...",
+            "filename": "<config>.yaml.bak.<ts>"  # 省略時は最新を選択
+        }
 
         ステータスコード:
         - 200: 復元成功
-        - 400: config_name 不正 / JSON パースエラー
-        - 404: .bak が存在しない
+        - 400: config_name / filename 不正 / JSON パースエラー
+        - 404: 指定バックアップが存在しない、またはバックアップが 1 件もない
         - 500: I/O 失敗等のサーバ側エラー
         """
         try:
             request_data = self._read_json_body()
             config_name = request_data.get("config_name", "").strip()
+            filename = request_data.get("filename")
+            if filename is not None:
+                filename = filename.strip() if isinstance(filename, str) else None
+                if not filename:
+                    filename = None
+
             if not config_name:
                 self._send_json_response(
                     {"success": False, "errors": ["config_name が指定されていません"]},
@@ -7110,25 +7390,40 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 )
                 return
 
-            # .bak が無ければ 404（restore_config_backup の戻り値文字列に
-            # 依存せず、構造化された存在チェックでステータスを決定する）
-            backup_info = get_config_backup_info(config_name)
-            if backup_info is None:
-                self._send_json_response(
-                    {"success": False, "errors": ["バックアップが見つかりません"]},
-                    status_code=404,
-                )
-                return
+            # filename 省略時は最新を選ぶ。バックアップが 0 件なら 404
+            if filename is None:
+                backups = list_config_backups(config_name)
+                if not backups:
+                    self._send_json_response(
+                        {"success": False, "errors": ["バックアップが見つかりません"]},
+                        status_code=404,
+                    )
+                    return
+                filename = backups[0]["filename"]
 
-            success, error = restore_config_backup(config_name)
+            success, error_code, error_msg = restore_config_backup(
+                config_name, filename=filename
+            )
             if not success:
+                # error_code に基づいて HTTP ステータスを決定（メッセージ文字列の
+                # substring match には依存しない）
+                code_to_status = {
+                    RESTORE_ERROR_INVALID_NAME: 400,
+                    RESTORE_ERROR_NOT_FOUND: 404,
+                    RESTORE_ERROR_IO_ERROR: 500,
+                }
+                code = code_to_status.get(error_code, 500)
                 self._send_json_response(
-                    {"success": False, "errors": [error or "バックアップ復元に失敗しました"]},
-                    status_code=500,
+                    {"success": False, "errors": [error_msg or "バックアップ復元に失敗しました"]},
+                    status_code=code,
                 )
                 return
             self._send_json_response(
-                {"success": True, "message": "バックアップから復元しました"}
+                {
+                    "success": True,
+                    "message": "バックアップから復元しました",
+                    "filename": filename,
+                }
             )
         except json.JSONDecodeError:
             self._send_json_response(

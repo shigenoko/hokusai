@@ -529,8 +529,11 @@ class TestSettingsConfigIO:
             loaded = load_config_yaml("demo")
 
         assert loaded["base_branch"] == "develop"
-        backup_path = config_dir / "demo.yaml.bak"
-        assert backup_path.exists()
+        # 多世代バックアップ: `.bak.<timestamp>` 形式で生成される
+        backup_paths = list(config_dir.glob("demo.yaml.bak*"))
+        assert len(backup_paths) == 1
+        backup_path = backup_paths[0]
+        assert backup_path.name.startswith("demo.yaml.bak")
         backup_text = backup_path.read_text(encoding="utf-8")
         assert "base_branch: main" in backup_text
 
