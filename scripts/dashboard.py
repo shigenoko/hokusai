@@ -2773,8 +2773,8 @@ def list_config_backups(config_name: str) -> list[dict]:
                 "size": stat.st_size,
             })
 
-    # 新しい順
-    backups.sort(key=lambda b: b["mtime"], reverse=True)
+    # 新しい順。mtime が同秒の場合は filename を 2 次キーにして決定的に並べる。
+    backups.sort(key=lambda b: (b["mtime"], b["filename"]), reverse=True)
     return backups
 
 

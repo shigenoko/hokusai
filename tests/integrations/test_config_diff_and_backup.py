@@ -146,20 +146,26 @@ def test_list_backups_includes_legacy(configs_dir):
 
 
 def test_list_backups_returns_timestamped(configs_dir):
+    """新しい順（mtime 降順）で返される。同秒は filename で決定的に並ぶ。"""
+    import os as _os
     _write_yaml(configs_dir / "demo.yaml", "x: 1\n")
-    _write_yaml(configs_dir / "demo.yaml.bak.20260427-100000", "x: a\n")
-    _write_yaml(configs_dir / "demo.yaml.bak.20260427-110000", "x: b\n")
-    _write_yaml(configs_dir / "demo.yaml.bak.20260427-120000", "x: c\n")
+    a = configs_dir / "demo.yaml.bak.20260427-100000"
+    b = configs_dir / "demo.yaml.bak.20260427-110000"
+    c = configs_dir / "demo.yaml.bak.20260427-120000"
+    _write_yaml(a, "x: a\n")
+    _write_yaml(b, "x: b\n")
+    _write_yaml(c, "x: c\n")
+    # mtime を明示して並びを安定化
+    _os.utime(a, (1700000000, 1700000000))
+    _os.utime(b, (1800000000, 1800000000))
+    _os.utime(c, (1900000000, 1900000000))
+
     backups = list_config_backups("demo")
-    assert len(backups) == 3
-    # 新しい順（mtime 降順）
-    filenames = [b["filename"] for b in backups]
-    # ファイル作成順序は同じだが mtime は近接するので、少なくとも全部含まれること
-    assert set(filenames) == {
-        "demo.yaml.bak.20260427-100000",
-        "demo.yaml.bak.20260427-110000",
+    assert [b["filename"] for b in backups] == [
         "demo.yaml.bak.20260427-120000",
-    }
+        "demo.yaml.bak.20260427-110000",
+        "demo.yaml.bak.20260427-100000",
+    ]
 
 
 def test_list_backups_handles_yml_extension(configs_dir):
@@ -391,9 +397,15 @@ def test_api_backup_info_rejects_missing_name(configs_dir):
 
 def test_api_backup_restore_picks_latest_by_default(configs_dir):
     """filename 省略時は最新世代を復元する"""
+    import os as _os
     _write_yaml(configs_dir / "demo.yaml", "x: current\n")
-    _write_yaml(configs_dir / "demo.yaml.bak.20260427-100000", "x: a\n")
-    _write_yaml(configs_dir / "demo.yaml.bak.20260427-120000", "x: b\n")
+    older = configs_dir / "demo.yaml.bak.20260427-100000"
+    newer = configs_dir / "demo.yaml.bak.20260427-120000"
+    _write_yaml(older, "x: a\n")
+    _write_yaml(newer, "x: b\n")
+    # CI 環境で連続書き込みの mtime が同秒になるのを避けるため explicit に設定
+    _os.utime(older, (1700000000, 1700000000))
+    _os.utime(newer, (1900000000, 1900000000))
 
     handler = _make_handler()
     handler._handle_config_backup_restore_post = DashboardHandler._handle_config_backup_restore_post.__get__(handler)
