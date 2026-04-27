@@ -446,6 +446,68 @@ def test_api_save_returns_400_on_unsafe_config_name(configs_dir):
     handler.send_response.assert_called_with(400)
 
 
+def test_api_save_returns_400_on_missing_config_name(configs_dir):
+    """`_handle_settings_post` の他のクライアント側エラーも 400 で返す"""
+    handler = _make_handler()
+    handler._handle_settings_post = DashboardHandler._handle_settings_post.__get__(handler)
+    handler._read_json_body.return_value = {"data": {"project_root": str(configs_dir)}}
+
+    handler._handle_settings_post()
+
+    data = _parse(handler)
+    assert data["success"] is False
+    handler.send_response.assert_called_with(400)
+
+
+def test_api_save_returns_400_on_invalid_data(configs_dir):
+    handler = _make_handler()
+    handler._handle_settings_post = DashboardHandler._handle_settings_post.__get__(handler)
+    handler._read_json_body.return_value = {"config_name": "demo", "data": "not-a-dict"}
+
+    handler._handle_settings_post()
+
+    data = _parse(handler)
+    assert data["success"] is False
+    handler.send_response.assert_called_with(400)
+
+
+def test_api_save_returns_400_on_validate_config_failure(configs_dir):
+    """validate_config NG（必須フィールド欠損など）も 400 で返す"""
+    handler = _make_handler()
+    handler._handle_settings_post = DashboardHandler._handle_settings_post.__get__(handler)
+    # base_branch も project_root も指定しない → validate_config が必須欠損で NG
+    handler._read_json_body.return_value = {"config_name": "demo", "data": {}}
+
+    handler._handle_settings_post()
+
+    data = _parse(handler)
+    assert data["success"] is False
+    handler.send_response.assert_called_with(400)
+
+
+# ---------------------------------------------------------------------------
+# load_config_yaml / parse_project_rules: パストラバーサル防御 (defense in depth)
+# ---------------------------------------------------------------------------
+
+
+def test_load_config_yaml_rejects_unsafe_name(configs_dir):
+    """load_config_yaml も `_resolve_config_path` 経由で CONFIGS_DIR 外を読まない"""
+    from scripts.dashboard import load_config_yaml
+
+    with pytest.raises(FileNotFoundError):
+        # `..` 等の不正な name は _resolve_config_path が None を返し、
+        # FileNotFoundError として返ってくる
+        load_config_yaml("../etc/passwd")
+
+
+def test_parse_project_rules_returns_empty_for_unsafe_name(configs_dir):
+    """parse_project_rules も同様に不正な name で外部ファイルを読まない"""
+    from scripts.dashboard import parse_project_rules
+
+    rules = parse_project_rules("../escape")
+    assert rules == []
+
+
 # ---------------------------------------------------------------------------
 # Routing (do_POST / do_GET dispatch)
 # ---------------------------------------------------------------------------
