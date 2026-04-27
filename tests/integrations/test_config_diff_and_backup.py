@@ -26,6 +26,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from scripts import dashboard as dash  # noqa: E402
 from scripts.dashboard import (  # noqa: E402
     BACKUP_RETAIN_COUNT,
+    RESTORE_ERROR_INVALID_NAME,
+    RESTORE_ERROR_IO_ERROR,
+    RESTORE_ERROR_NOT_FOUND,
     DashboardHandler,
     _prune_old_backups,
     _safe_backup_path,
@@ -199,7 +202,7 @@ def test_restore_picks_latest_backup_by_default(configs_dir):
     _os.utime(older, (1700000000, 1700000000))
     _os.utime(newer, (1900000000, 1900000000))
 
-    success, error = restore_config_backup("demo")
+    success, _code, error = restore_config_backup("demo")
 
     assert success is True
     assert error is None
@@ -218,7 +221,7 @@ def test_restore_specific_filename(configs_dir):
     _write_yaml(older, "x: older\n")
     _write_yaml(newer, "x: newer\n")
 
-    success, error = restore_config_backup("demo", filename="demo.yaml.bak.20260101-000000")
+    success, _code, error = restore_config_backup("demo", filename="demo.yaml.bak.20260101-000000")
 
     assert success is True
     assert error is None
@@ -232,7 +235,7 @@ def test_restore_legacy_bak_still_works(configs_dir):
     _write_yaml(config_path, "x: current\n")
     _write_yaml(backup_path, "x: previous\n")
 
-    success, error = restore_config_backup("demo")
+    success, _code, error = restore_config_backup("demo")
 
     assert success is True
     assert error is None
@@ -241,7 +244,7 @@ def test_restore_legacy_bak_still_works(configs_dir):
 
 def test_restore_returns_error_when_no_bak(configs_dir):
     _write_yaml(configs_dir / "demo.yaml", "x: 1\n")
-    success, error = restore_config_backup("demo")
+    success, _code, error = restore_config_backup("demo")
     assert success is False
     assert error and "見つかりません" in error
 
@@ -251,7 +254,7 @@ def test_restore_rejects_filename_outside_config_name(configs_dir):
     _write_yaml(configs_dir / "demo.yaml", "x: 1\n")
     _write_yaml(configs_dir / "other.yaml.bak", "x: hostile\n")
 
-    success, error = restore_config_backup("demo", filename="other.yaml.bak")
+    success, _code, error = restore_config_backup("demo", filename="other.yaml.bak")
 
     assert success is False
     assert error and ("対応していません" in error or "不正" in error)
@@ -259,7 +262,7 @@ def test_restore_rejects_filename_outside_config_name(configs_dir):
 
 def test_restore_rejects_path_traversal_filename(configs_dir):
     _write_yaml(configs_dir / "demo.yaml", "x: 1\n")
-    success, error = restore_config_backup("demo", filename="../etc/passwd")
+    success, _code, error = restore_config_backup("demo", filename="../etc/passwd")
     assert success is False
     assert error and "不正" in error
 
@@ -270,7 +273,7 @@ def test_restore_handles_yml_extension(configs_dir):
     _write_yaml(config_path, "x: current\n")
     _write_yaml(backup_path, "x: previous\n")
 
-    success, _ = restore_config_backup("legacy")
+    success, _code, _msg = restore_config_backup("legacy")
 
     assert success is True
     assert config_path.read_text(encoding="utf-8") == "x: previous\n"
@@ -538,7 +541,7 @@ def test_compute_config_diff_rejects_unsafe_name(configs_dir):
 
 
 def test_restore_config_backup_rejects_unsafe_name(configs_dir):
-    success, error = restore_config_backup("../escape")
+    success, _code, error = restore_config_backup("../escape")
     assert success is False
     assert error and "不正" in error
 
@@ -656,6 +659,78 @@ def test_safe_backup_path_rejects_other_config(configs_dir):
     _write_yaml(configs_dir / "other.yaml.bak", "x: 0\n")
     with pytest.raises(ValueError):
         _safe_backup_path("demo", "other.yaml.bak")
+
+
+# ---------------------------------------------------------------------------
+# レビュー指摘対応: 構造化エラーコード / glob escape / 拡張子フィルタ
+# ---------------------------------------------------------------------------
+
+
+def test_restore_returns_error_codes(configs_dir):
+    """`restore_config_backup` が構造化された error_code を返す"""
+    _write_yaml(configs_dir / "demo.yaml", "x: 1\n")
+
+    # 1) ファイル無し → not_found
+    success, code, _msg = restore_config_backup("demo")
+    assert success is False
+    assert code == RESTORE_ERROR_NOT_FOUND
+
+    # 2) 不正な name → invalid_name
+    success, code, _msg = restore_config_backup("../escape")
+    assert success is False
+    assert code == RESTORE_ERROR_INVALID_NAME
+
+    # 3) 他 config の filename → invalid_name
+    _write_yaml(configs_dir / "other.yaml.bak", "x: hostile\n")
+    success, code, _msg = restore_config_backup("demo", filename="other.yaml.bak")
+    assert success is False
+    assert code == RESTORE_ERROR_INVALID_NAME
+
+
+def test_safe_config_path_rejects_glob_metachars(configs_dir):
+    """glob メタ文字 (`*`, `?`, `[`) を含む config_name は拒否する"""
+    for name in ["demo*", "de?o", "demo[1]", "demo$", "demo@", "demo space"]:
+        with pytest.raises(ValueError):
+            _safe_config_path(name, ".yaml")
+
+
+def test_list_backups_does_not_match_other_configs_via_glob(configs_dir):
+    """`config_name` に glob メタ文字を入れて他 config を列挙できない（拒否される）"""
+    _write_yaml(configs_dir / "demo.yaml", "x: 1\n")
+    _write_yaml(configs_dir / "demo.yaml.bak.20260427-100000", "x: a\n")
+    _write_yaml(configs_dir / "other.yaml.bak.20260427-100000", "x: b\n")
+
+    # `*` を含む name は `_safe_config_path` で弾かれて空リストになる
+    assert list_config_backups("demo*") == []
+    # 通常の name では他 config の .bak は混入しない
+    backups = list_config_backups("demo")
+    assert all(b["filename"].startswith("demo.yaml.bak") for b in backups)
+
+
+def test_list_backups_filters_by_active_extension(configs_dir):
+    """本体が .yaml のとき `.yml.bak.*` は一覧から除外される"""
+    _write_yaml(configs_dir / "demo.yaml", "x: current\n")
+    _write_yaml(configs_dir / "demo.yaml.bak.20260427-100000", "x: yaml-backup\n")
+    _write_yaml(configs_dir / "demo.yml.bak.20260427-110000", "x: yml-stray\n")
+
+    backups = list_config_backups("demo")
+
+    filenames = [b["filename"] for b in backups]
+    assert "demo.yaml.bak.20260427-100000" in filenames
+    assert "demo.yml.bak.20260427-110000" not in filenames
+
+
+def test_save_creates_unique_filenames_in_same_second(configs_dir):
+    """同一秒内に複数回保存しても多世代バックアップが衝突しない"""
+    _write_yaml(configs_dir / "demo.yaml", "x: 0\n")
+    save_config_yaml("demo", {"x": 1})
+    save_config_yaml("demo", {"x": 2})
+    save_config_yaml("demo", {"x": 3})
+
+    bak_files = list(configs_dir.glob("demo.yaml.bak.*"))
+    # 3 回の保存ごとに 1 ファイルずつ生成されるはず（マイクロ秒精度 + UUID）
+    assert len(bak_files) == 3
+    assert len({p.name for p in bak_files}) == 3
 
 
 # ---------------------------------------------------------------------------

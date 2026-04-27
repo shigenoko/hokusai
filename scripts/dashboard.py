@@ -7,6 +7,7 @@ HOKUS AI Workflow Dashboard
 """
 
 import difflib
+import glob
 import html as html_mod
 import json
 import os
@@ -2133,23 +2134,27 @@ def list_config_files() -> list[str]:
     return sorted(configs)
 
 
+# 許可する config 名: 英数字 + `_` + `-` のみ。
+# パス区切り文字（`/` `\\`）、特殊名 (`.`, `..`)、glob メタ文字（`*`, `?`,
+# `[`, `]`）等を一律に弾くことで、後段の `Path` 構築や `glob` 呼び出しで
+# 意図しないファイル列挙・列挙先の上書きが起きないようにする。
+_SAFE_CONFIG_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_\-]+$")
+
+
 def _safe_config_path(config_name: str, ext: str) -> Path:
     """`CONFIGS_DIR` 配下に限定した設定ファイルパスを返す。
 
-    パストラバーサル攻撃（`..`、絶対パス、`/` `\\` 区切り）を弾き、解決後の
-    パスが `CONFIGS_DIR` 配下に収まることを検証する。ファイルの存在は
-    チェックしない（書き込み先パスの構築にも使われるため）。
+    パストラバーサル攻撃（`..`、絶対パス、`/` `\\` 区切り）に加え、glob
+    メタ文字（`*`, `?`, `[`）等も弾く。解決後のパスが `CONFIGS_DIR` 配下に
+    収まることも検証する。ファイルの存在はチェックしない（書き込み先パスの
+    構築にも使われるため）。
 
     Raises:
-        ValueError: config_name が空、特殊名 (".", "..")、パス区切り文字を
-            含む、または resolve 結果が CONFIGS_DIR 配下に収まらない場合。
+        ValueError: config_name が空、許可文字集合（英数字 + `_` + `-`）外、
+            または resolve 結果が CONFIGS_DIR 配下に収まらない場合。
     """
-    if (
-        not config_name
-        or not isinstance(config_name, str)
-        or config_name in (".", "..")
-        or "/" in config_name
-        or "\\" in config_name
+    if not isinstance(config_name, str) or not _SAFE_CONFIG_NAME_PATTERN.match(
+        config_name
     ):
         raise ValueError(f"不正な設定ファイル名です: {config_name!r}")
     base = CONFIGS_DIR.resolve()
@@ -2743,39 +2748,64 @@ def list_config_backups(config_name: str) -> list[dict]:
 
     各エントリは {filename, mtime, size}。レガシー（PR #5 以前の単一世代
     `.bak`）と新形式（`.bak.<timestamp>`）の両方を含める。
-    """
-    backups: list[dict] = []
-    for ext in (".yaml", ".yml"):
-        try:
-            _safe_config_path(config_name, ext)
-        except ValueError:
-            return []
 
-        # legacy: <config_name>.<ext>.bak
-        legacy_name = f"{config_name}{ext}.bak"
-        legacy_path = CONFIGS_DIR / legacy_name
+    本体ファイルが既に存在する場合（`_resolve_config_path` で解決可能）は、
+    その拡張子に一致するバックアップだけを返す。これは `restore_config_backup`
+    のデフォルト（filename 省略時の最新復元）が、本体と異なる拡張子の
+    バックアップを誤って復元先に選ばないようにするため。
+    """
+    try:
+        _safe_config_path(config_name, ".yaml")
+    except ValueError:
+        return []
+
+    # 本体が存在するなら拡張子を固定。なければ両方を候補にする（新規作成の
+    # ファイルなど、本体がまだない場合のために）。
+    active_path = _resolve_config_path(config_name)
+    if active_path is not None:
+        target_exts: tuple[str, ...] = (active_path.suffix,)
+    else:
+        target_exts = (".yaml", ".yml")
+
+    # 内部用の数値 mtime をキーにソートし、同 timestamp 内では filename を
+    # 2 次キーにして決定的に並べる。文字列化された mtime は DST 等で巻き戻る
+    # ケースがあるため、ソートには使わない（出力には ISO 文字列を入れる）。
+    entries: list[tuple[float, str, dict]] = []
+    for ext in target_exts:
+        # config_name は `_safe_config_path` で許可文字集合に制限済みだが、
+        # 念のため `glob.escape` を介してリテラル一致のみを行う（defense in
+        # depth）。
+        escaped = glob.escape(f"{config_name}{ext}")
+
+        legacy_path = CONFIGS_DIR / f"{config_name}{ext}.bak"
         if legacy_path.is_file():
             stat = legacy_path.stat()
-            backups.append({
-                "filename": legacy_name,
-                "mtime": datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
-                "size": stat.st_size,
-            })
+            entries.append((
+                stat.st_mtime,
+                legacy_path.name,
+                {
+                    "filename": legacy_path.name,
+                    "mtime": datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
+                    "size": stat.st_size,
+                },
+            ))
 
-        # timestamped: <config_name>.<ext>.bak.<timestamp>
-        for backup_path in CONFIGS_DIR.glob(f"{config_name}{ext}.bak.*"):
+        for backup_path in CONFIGS_DIR.glob(f"{escaped}.bak.*"):
             if not backup_path.is_file():
                 continue
             stat = backup_path.stat()
-            backups.append({
-                "filename": backup_path.name,
-                "mtime": datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
-                "size": stat.st_size,
-            })
+            entries.append((
+                stat.st_mtime,
+                backup_path.name,
+                {
+                    "filename": backup_path.name,
+                    "mtime": datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
+                    "size": stat.st_size,
+                },
+            ))
 
-    # 新しい順。mtime が同秒の場合は filename を 2 次キーにして決定的に並べる。
-    backups.sort(key=lambda b: (b["mtime"], b["filename"]), reverse=True)
-    return backups
+    entries.sort(key=lambda e: (e[0], e[1]), reverse=True)
+    return [entry[2] for entry in entries]
 
 
 def _prune_old_backups(config_path: Path, retain: int) -> int:
@@ -2788,12 +2818,15 @@ def _prune_old_backups(config_path: Path, retain: int) -> int:
     legacy = config_path.with_suffix(config_path.suffix + ".bak")
     if legacy.is_file():
         candidates.append(legacy)
-    pattern = f"{config_path.name}.bak.*"
+    # config_path.name は `_safe_config_path` 経由で構築されているため安全だが、
+    # defense in depth として `glob.escape` で glob メタ文字をリテラル化する。
+    pattern = f"{glob.escape(config_path.name)}.bak.*"
     candidates.extend(p for p in CONFIGS_DIR.glob(pattern) if p.is_file())
 
     if len(candidates) <= retain:
         return 0
 
+    # 数値 `st_mtime` でソート（DST/フォーマット由来のズレを避ける）
     candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
     deleted = 0
     for path in candidates[retain:]:
@@ -2805,9 +2838,17 @@ def _prune_old_backups(config_path: Path, retain: int) -> int:
     return deleted
 
 
+# `restore_config_backup` の構造化エラーコード。HTTP ステータスへのマッピング
+# に使う（メッセージ文字列の部分一致に依存しないため、文言変更や翻訳でも
+# 壊れない）。
+RESTORE_ERROR_INVALID_NAME = "invalid_name"
+RESTORE_ERROR_NOT_FOUND = "not_found"
+RESTORE_ERROR_IO_ERROR = "io_error"
+
+
 def restore_config_backup(
     config_name: str, filename: str | None = None
-) -> tuple[bool, str | None]:
+) -> tuple[bool, str | None, str | None]:
     """指定バックアップから本体 YAML を復元する。
 
     Args:
@@ -2815,9 +2856,13 @@ def restore_config_backup(
         filename: 復元元のバックアップファイル名。省略時は最新を選択。
 
     Returns:
-        (success, error_message)
+        (success, error_code, error_message)
 
-    `config_name` または `filename` が安全でない場合は失敗扱い。
+        error_code は失敗時のみ非 None で、以下のいずれか:
+          - RESTORE_ERROR_INVALID_NAME: config_name / filename が不正、または
+            指定 filename が config_name に対応していない
+          - RESTORE_ERROR_NOT_FOUND: バックアップが存在しない
+          - RESTORE_ERROR_IO_ERROR: shutil.copy2 などの I/O 失敗
     """
     try:
         # config_name の安全性を最初に検証する。`list_config_backups` は不正な
@@ -2828,7 +2873,7 @@ def restore_config_backup(
         if filename is None:
             backups = list_config_backups(config_name)
             if not backups:
-                return False, "バックアップファイル (.bak) が見つかりません"
+                return False, RESTORE_ERROR_NOT_FOUND, "バックアップファイル (.bak) が見つかりません"
             filename = backups[0]["filename"]
 
         backup_path = _safe_backup_path(config_name, filename)
@@ -2840,17 +2885,21 @@ def restore_config_backup(
                 config_path = _safe_config_path(config_name, ext)
                 break
         else:
-            return False, f"対応する本体ファイル拡張子を判定できません: {filename}"
+            return (
+                False,
+                RESTORE_ERROR_INVALID_NAME,
+                f"対応する本体ファイル拡張子を判定できません: {filename}",
+            )
 
         try:
             shutil.copy2(backup_path, config_path)
-            return True, None
+            return True, None, None
         except OSError as exc:
-            return False, f"バックアップ復元に失敗しました: {exc}"
+            return False, RESTORE_ERROR_IO_ERROR, f"バックアップ復元に失敗しました: {exc}"
     except FileNotFoundError as exc:
-        return False, f"バックアップファイルが見つかりません: {exc}"
+        return False, RESTORE_ERROR_NOT_FOUND, f"バックアップファイルが見つかりません: {exc}"
     except ValueError as exc:
-        return False, str(exc)
+        return False, RESTORE_ERROR_INVALID_NAME, str(exc)
 
 
 def save_config_yaml(config_name: str, data: dict) -> bool:
@@ -2880,13 +2929,21 @@ def save_config_yaml(config_name: str, data: dict) -> bool:
         if yml_path.exists():
             config_path = yml_path
 
-    # タイムスタンプ付きバックアップを作成（多世代保持）。古い世代は
-    # BACKUP_RETAIN_COUNT を超えた分から自動で削除される。
+    # タイムスタンプ付きバックアップを作成（多世代保持）。マイクロ秒まで含めて
+    # 同一秒内の連続保存でも衝突しないようにし、それでも衝突した場合は UUID を
+    # 末尾に付けてユニーク化する。古い世代は BACKUP_RETAIN_COUNT を超えた分から
+    # 自動で削除される。
     if config_path.exists():
-        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        import uuid as _uuid
+
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
         backup_path = config_path.with_suffix(
             config_path.suffix + f".bak.{timestamp}"
         )
+        if backup_path.exists():
+            backup_path = config_path.with_suffix(
+                config_path.suffix + f".bak.{timestamp}-{_uuid.uuid4().hex[:8]}"
+            )
         shutil.copy2(config_path, backup_path)
         _prune_old_backups(config_path, retain=BACKUP_RETAIN_COUNT)
 
@@ -7344,19 +7401,20 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                     return
                 filename = backups[0]["filename"]
 
-            success, error = restore_config_backup(config_name, filename=filename)
+            success, error_code, error_msg = restore_config_backup(
+                config_name, filename=filename
+            )
             if not success:
-                # filename 不正 / config_name 不一致は 400、見つからない場合 404、
-                # それ以外は 500
-                msg = error or "バックアップ復元に失敗しました"
-                if "不正" in msg or "対応していません" in msg:
-                    code = 400
-                elif "見つかりません" in msg:
-                    code = 404
-                else:
-                    code = 500
+                # error_code に基づいて HTTP ステータスを決定（メッセージ文字列の
+                # substring match には依存しない）
+                code_to_status = {
+                    RESTORE_ERROR_INVALID_NAME: 400,
+                    RESTORE_ERROR_NOT_FOUND: 404,
+                    RESTORE_ERROR_IO_ERROR: 500,
+                }
+                code = code_to_status.get(error_code, 500)
                 self._send_json_response(
-                    {"success": False, "errors": [msg]},
+                    {"success": False, "errors": [error_msg or "バックアップ復元に失敗しました"]},
                     status_code=code,
                 )
                 return
