@@ -2608,10 +2608,10 @@ def load_config_yaml(config_name: str) -> dict:
         FileNotFoundError: ファイルが存在しない場合
         yaml.YAMLError: YAMLパースエラーの場合
     """
-    config_path = CONFIGS_DIR / f"{config_name}.yaml"
-    if not config_path.exists():
-        config_path = CONFIGS_DIR / f"{config_name}.yml"
-    if not config_path.exists():
+    # `_resolve_config_path` 経由でパス構築することで、`config_name` の
+    # パストラバーサル（`..` / `/` 等）を弾き、CONFIGS_DIR 配下に限定する。
+    config_path = _resolve_config_path(config_name)
+    if config_path is None:
         raise FileNotFoundError(f"設定ファイルが見つかりません: {config_name}")
 
     with open(config_path, encoding="utf-8") as f:
@@ -2750,13 +2750,16 @@ def save_config_yaml(config_name: str, data: dict) -> bool:
         成功した場合True
 
     Raises:
+        ValueError: config_name が安全でない（パストラバーサル等）場合
         Exception: 保存に失敗した場合
     """
-    config_path = CONFIGS_DIR / f"{config_name}.yaml"
+    # `_safe_config_path` 経由で構築することで、CONFIGS_DIR 配下に書き込みを
+    # 限定する（書き込み経路のパストラバーサル防止 / defense in depth）。
+    config_path = _safe_config_path(config_name, ".yaml")
 
     # .ymlファイルが存在する場合はそちらを使用
     if not config_path.exists():
-        yml_path = CONFIGS_DIR / f"{config_name}.yml"
+        yml_path = _safe_config_path(config_name, ".yml")
         if yml_path.exists():
             config_path = yml_path
 
@@ -3139,10 +3142,9 @@ def parse_project_rules(config_name: str) -> list[dict]:
     """
     import yaml
 
-    config_path = CONFIGS_DIR / f"{config_name}.yaml"
-    if not config_path.exists():
-        config_path = CONFIGS_DIR / f"{config_name}.yml"
-    if not config_path.exists():
+    # `_resolve_config_path` 経由で安全にパス解決（不正な name は None になる）
+    config_path = _resolve_config_path(config_name)
+    if config_path is None:
         return []
 
     with open(config_path) as f:
@@ -6930,23 +6932,28 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             config_name = request_data.get("config_name")
             data = request_data.get("data")
 
-            # 基本的なバリデーション
+            # 基本的なバリデーション（client error は 400）
             if not config_name:
                 self._send_json_response(
-                    {"success": False, "errors": ["config_name が指定されていません"]}
+                    {"success": False, "errors": ["config_name が指定されていません"]},
+                    status_code=400,
                 )
                 return
 
             if data is None or not isinstance(data, dict):
                 self._send_json_response(
-                    {"success": False, "errors": ["data が不正です"]}
+                    {"success": False, "errors": ["data が不正です"]},
+                    status_code=400,
                 )
                 return
 
-            # 設定値のバリデーション
+            # 設定値のバリデーション失敗も client error なので 400
             is_valid, errors, warnings = validate_config(data)
             if not is_valid:
-                self._send_json_response({"success": False, "errors": errors, "warnings": warnings})
+                self._send_json_response(
+                    {"success": False, "errors": errors, "warnings": warnings},
+                    status_code=400,
+                )
                 return
 
             # 保存
@@ -6956,26 +6963,37 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 if warnings:
                     resp["warnings"] = warnings
                 self._send_json_response(resp)
+            except ValueError as e:
+                # 不正な config_name（パストラバーサル等）は 400
+                self._send_json_response(
+                    {"success": False, "errors": [str(e)]},
+                    status_code=400,
+                )
             except FileNotFoundError as e:
                 self._send_json_response(
-                    {"success": False, "errors": [str(e)]}
+                    {"success": False, "errors": [str(e)]},
+                    status_code=404,
                 )
             except yaml.YAMLError as e:
                 self._send_json_response(
-                    {"success": False, "errors": [f"YAML形式エラー: {e}"]}
+                    {"success": False, "errors": [f"YAML形式エラー: {e}"]},
+                    status_code=400,
                 )
             except Exception as e:
                 self._send_json_response(
-                    {"success": False, "errors": [f"保存に失敗しました: {e}"]}
+                    {"success": False, "errors": [f"保存に失敗しました: {e}"]},
+                    status_code=500,
                 )
 
         except json.JSONDecodeError:
             self._send_json_response(
-                {"success": False, "errors": ["JSONパースエラー"]}
+                {"success": False, "errors": ["JSONパースエラー"]},
+                status_code=400,
             )
         except Exception as e:
             self._send_json_response(
-                {"success": False, "errors": [f"予期しないエラー: {e}"]}
+                {"success": False, "errors": [f"予期しないエラー: {e}"]},
+                status_code=500,
             )
 
     def _handle_config_diff_post(self):
