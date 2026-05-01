@@ -149,6 +149,7 @@ HOKUSAI は、AI を実世界のワークフローに統合する **運用フレ
 - Phase 7.5 ブランチ衛生チェック（ファイルスコープ、ベースブランチ同期）
 - `prompts/` 配下のカスタマイズ可能なプロンプト
 - `hokusai connect <github|gitlab>` / `hokusai connect --status` による CLI 認証導線と接続状態の一括表示
+- Slack 通知（Incoming Webhook 経由）— ワークフロー開始 / Human-in-the-loop 待機 / 失敗 / PR 作成 / 完了をチームへ通知
 
 ### 実験的機能
 
@@ -215,6 +216,31 @@ task_backend:
 git_hosting:
   type: github
 ```
+
+### Slack 通知（任意）
+
+Slack Incoming Webhook を使ってワークフローイベントを Slack に通知できる。Webhook URL は YAML には書かず、必ず環境変数経由で渡す。
+
+```bash
+export HOKUSAI_SLACK_WEBHOOK_URL="https://hooks.slack.com/services/T.../B.../..."
+```
+
+```yaml
+notifications:
+  slack:
+    enabled: true
+    webhook_url_env: HOKUSAI_SLACK_WEBHOOK_URL  # デフォルト
+    events:
+      - waiting_for_human
+      - workflow_failed
+      - pr_created
+      - workflow_completed
+    timeout: 5.0  # 秒。1.0〜30.0 の範囲にクランプされる
+```
+
+サポートしているイベント: `workflow_started`、`waiting_for_human`、`workflow_failed`、`pr_created`、`workflow_completed`。
+
+送信失敗（タイムアウト・HTTP エラー・ネットワークエラー）はワークフロー本体を止めない（best effort）。Webhook URL はログにも DB にも書き込まれない。誤って YAML に webhook URL を直書きするとダッシュボードで `Slack Incoming Webhook URL` の警告が出る。
 
 ## ドキュメント
 

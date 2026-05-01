@@ -23,3 +23,17 @@ status_mapping:
   in_progress: "in-progress"
   reviewing: "reviewing"
   done: "done"
+
+# Slack 通知（任意）
+# Webhook URL は YAML に直書きせず、環境変数経由で渡す
+#   export HOKUSAI_SLACK_WEBHOOK_URL="https://hooks.slack.com/services/..."
+# notifications:
+#   slack:
+#     enabled: true
+#     webhook_url_env: HOKUSAI_SLACK_WEBHOOK_URL
+#     events:
+#       - waiting_for_human
+#       - workflow_failed
+#       - pr_created
+#       - workflow_completed
+#     timeout: 5.0

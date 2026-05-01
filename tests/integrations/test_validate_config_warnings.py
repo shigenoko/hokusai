@@ -154,6 +154,33 @@ def test_detect_openai_api_key_does_not_match_anthropic():
     assert not any("Anthropic" in w for w in warnings)
 
 
+def test_detect_slack_webhook_url_value():
+    """Slack Incoming Webhook URL が直書きされた場合に検出する"""
+    data = {
+        "notifications": {
+            "slack": {
+                "webhook_url": "https://hooks.slack.com/services/T01ABCD/B02EFGH/abcXYZ123def456ghi"
+            }
+        }
+    }
+    warnings = _detect_token_like_values(data)
+    assert any("Slack Incoming Webhook URL" in w for w in warnings)
+
+
+def test_detect_slack_webhook_url_in_root_value():
+    """key 名に依らず webhook URL 自体のパターンで検出される"""
+    data = {"any_field": "https://hooks.slack.com/services/T0/B0/secret123"}
+    warnings = _detect_token_like_values(data)
+    assert any("Slack Incoming Webhook URL" in w for w in warnings)
+
+
+def test_no_false_positive_on_other_slack_url():
+    """hooks.slack.com 以外の Slack URL は誤検知しない"""
+    data = {"link": "https://api.slack.com/messaging/webhooks"}
+    warnings = _detect_token_like_values(data)
+    assert not any("Slack Incoming Webhook URL" in w for w in warnings)
+
+
 # ---------------------------------------------------------------------------
 # _detect_token_like_values: key-name-based heuristics
 # ---------------------------------------------------------------------------

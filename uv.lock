@@ -265,7 +265,7 @@ wheels = [
 ]
 
 [[package]]
-name = "hokusai"
+name = "hokusai-flow"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

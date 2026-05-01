@@ -3081,6 +3081,7 @@ _TOKEN_PATTERNS: tuple[tuple[str, str], ...] = (
     (r"^glpat-[A-Za-z0-9_\-]{15,}$", "GitLab Personal Access Token"),
     (r"^sk-ant-[A-Za-z0-9_\-]{30,}$", "Anthropic API key"),
     (r"^sk-(?!ant-)[A-Za-z0-9_\-]{30,}$", "OpenAI API key"),
+    (r"^https://hooks\.slack\.com/services/[A-Z0-9]+/[A-Z0-9]+/[A-Za-z0-9]+$", "Slack Incoming Webhook URL"),
 )
 
 # シークレットを示唆するキー名（部分一致）。値が非空文字列なら警告対象。

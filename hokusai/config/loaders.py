@@ -9,9 +9,12 @@ from pathlib import Path
 import yaml
 
 from .models import (
+    SLACK_NOTIFICATION_EVENTS,
     CrossReviewConfig,
     GitHostingConfig,
+    NotificationConfig,
     RepositoryConfig,
+    SlackNotificationConfig,
     TaskBackendConfig,
 )
 
@@ -141,6 +144,76 @@ def _parse_cross_review_config(config_dict: dict) -> CrossReviewConfig:
         timeout=cr_config.get("timeout", 300),
         on_failure=on_failure,
         max_correction_rounds=max_correction_rounds,
+    )
+
+
+def _parse_notifications_config(config_dict: dict) -> NotificationConfig:
+    """notifications 設定をパース
+
+    設定例:
+        notifications:
+          slack:
+            enabled: true
+            webhook_url_env: HOKUSAI_SLACK_WEBHOOK_URL
+            events:
+              - waiting_for_human
+              - workflow_failed
+              - pr_created
+              - workflow_completed
+            timeout: 5.0
+
+    バリデーション:
+    - notifications が dict でなければデフォルト
+    - slack.enabled は bool のみ採用
+    - webhook_url_env が空文字ならデフォルト
+    - events は既知イベントのみ採用、不正値のみなら events のデフォルトに戻す
+    - timeout は 1.0 以上 30.0 以下にクランプ
+    """
+    notifications_raw = config_dict.get("notifications")
+    if not isinstance(notifications_raw, dict):
+        return NotificationConfig()
+
+    slack_raw = notifications_raw.get("slack")
+    if not isinstance(slack_raw, dict):
+        return NotificationConfig()
+
+    defaults = SlackNotificationConfig()
+
+    enabled = slack_raw.get("enabled", defaults.enabled)
+    if not isinstance(enabled, bool):
+        enabled = defaults.enabled
+
+    webhook_url_env = slack_raw.get("webhook_url_env", defaults.webhook_url_env)
+    if not isinstance(webhook_url_env, str) or not webhook_url_env.strip():
+        webhook_url_env = defaults.webhook_url_env
+
+    events_raw = slack_raw.get("events", defaults.events)
+    if isinstance(events_raw, list):
+        valid_events = [
+            evt for evt in events_raw
+            if isinstance(evt, str) and evt in SLACK_NOTIFICATION_EVENTS
+        ]
+        events = valid_events if valid_events else list(defaults.events)
+    else:
+        events = list(defaults.events)
+
+    timeout_raw = slack_raw.get("timeout", defaults.timeout)
+    if isinstance(timeout_raw, (int, float)) and not isinstance(timeout_raw, bool):
+        timeout = float(timeout_raw)
+        if timeout < 1.0:
+            timeout = 1.0
+        elif timeout > 30.0:
+            timeout = 30.0
+    else:
+        timeout = defaults.timeout
+
+    return NotificationConfig(
+        slack=SlackNotificationConfig(
+            enabled=enabled,
+            webhook_url_env=webhook_url_env,
+            events=events,
+            timeout=timeout,
+        )
     )
 
 

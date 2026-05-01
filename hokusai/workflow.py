@@ -10,6 +10,7 @@ from pathlib import Path
 
 from .config import get_config
 from .constants import MAX_WORKFLOW_EVENTS, PHASE_NAMES
+from .integrations.notifications import notify_slack
 from .logging_config import get_logger
 from .state import PhaseStatus, add_audit_log, create_initial_state, update_phase_status
 
@@ -208,6 +209,9 @@ class WorkflowRunner:
         # 開始時点で即座に永続化（ダッシュボードに表示されるように）
         self.store.save_workflow(workflow_id, state)
         logger.debug(f"初期状態を永続化: workflow_id={workflow_id}")
+
+        # ワークフロー開始の通知（best effort: 失敗しても本体は止めない）
+        _safe_notify("workflow_started", state)
 
         config = {"configurable": {"thread_id": workflow_id}}
 
@@ -610,6 +614,15 @@ class WorkflowRunner:
         _abort_state: dict | None = None  # リトライ中断時の補正済み状態
         interrupt_reason: str | None = None
 
+        # PR 作成検出のため、開始時点の PR 数を記録（再開時は既存件数を起点とする）
+        try:
+            initial_state_for_pr = state if state is not None else (
+                self.store.load_workflow(workflow_id) or {}
+            )
+            previous_pr_count = len(initial_state_for_pr.get("pull_requests") or [])
+        except Exception:
+            previous_pr_count = 0
+
         # チェックポイントから再開する場合はNoneを渡す
         stream_input = None if resume_from_checkpoint else state
 
@@ -622,6 +635,15 @@ class WorkflowRunner:
                 current_state = self.compiled_workflow.get_state(config)
                 self.store.save_workflow(workflow_id, current_state.values)
                 logger.debug(f"イベント後に永続化: phase={current_phase}, event_count={event_count}")
+
+                # PR 作成検出: pull_requests が増えていれば通知
+                try:
+                    current_prs = current_state.values.get("pull_requests") or []
+                    if len(current_prs) > previous_pr_count:
+                        _safe_notify("pr_created", current_state.values)
+                        previous_pr_count = len(current_prs)
+                except Exception as notify_err:
+                    logger.debug(f"PR 作成通知中のエラーを抑制: {notify_err}")
 
                 # ループ検出: 同じフェーズが繰り返されているか
                 if current_phase:
@@ -720,6 +742,7 @@ class WorkflowRunner:
                         break
         except Exception as e:
             logger.error(f"ストリーム実行中に例外発生: {e}", exc_info=True)
+            failed_state_for_notify: dict | None = None
             try:
                 current_state = self.compiled_workflow.get_state(config)
                 if current_state and current_state.values:
@@ -742,9 +765,17 @@ class WorkflowRunner:
                         error=str(e),
                     )
                     self.store.save_workflow(workflow_id, failed_state)
+                    failed_state_for_notify = failed_state
                     logger.info(f"例外時の状態を保存: phase={cp}, error={e}")
             except Exception as save_err:
                 logger.error(f"例外時の状態保存に失敗: {save_err}", exc_info=True)
+            # 例外時の通知（best effort: 通知失敗で本来の例外を握り潰さない）
+            _safe_notify(
+                "workflow_failed",
+                failed_state_for_notify,
+                reason="exception",
+                error=str(e),
+            )
             raise
 
         if user_aborted:
@@ -766,6 +797,13 @@ class WorkflowRunner:
             logger.debug(f"最終状態を保存: phase={final_values.get('current_phase')}")
 
         interrupted = interrupt_reason is not None
+
+        # 終了時の通知（best effort）
+        _emit_terminal_notification(
+            interrupt_reason=interrupt_reason,
+            final_values=final_values,
+        )
+
         return StreamResult(
             final_state=final_values,
             events_processed=event_count,
@@ -783,3 +821,52 @@ def _log_cross_review_config(config) -> None:
         f"on_failure={cr.on_failure}, phases={cr.phases}, "
         f"timeout={cr.timeout}, max_correction_rounds={cr.max_correction_rounds}"
     )
+
+
+def _safe_notify(
+    event: str,
+    state: dict | None,
+    *,
+    reason: str | None = None,
+    error: str | None = None,
+) -> None:
+    """通知送信を best effort で実行する。例外はワークフローに伝播させない。"""
+    try:
+        notify_slack(event, state, reason=reason, error=error)
+    except Exception as e:
+        logger.debug(f"通知送信中に例外を抑制: event={event}, error={e}")
+
+
+def _emit_terminal_notification(
+    *,
+    interrupt_reason: str | None,
+    final_values: dict | None,
+) -> None:
+    """ストリーム終了時の通知を発火する。
+
+    interrupt_reason に応じて以下のいずれかを送る:
+    - "waiting_for_human" → waiting_for_human
+    - "loop_detected" / "max_events" → workflow_failed
+    - "user_aborted" → 何も送らない（ユーザ操作のため）
+    - None（自然終了）→ Phase 10 完了なら workflow_completed
+    """
+    state = final_values or {}
+
+    if interrupt_reason == "waiting_for_human":
+        reason = state.get("human_input_request") or "waiting_for_human"
+        _safe_notify("waiting_for_human", state, reason=str(reason))
+        return
+
+    if interrupt_reason in ("loop_detected", "max_events"):
+        _safe_notify("workflow_failed", state, reason=interrupt_reason)
+        return
+
+    if interrupt_reason is None:
+        # 自然終了: Phase 10 完了相当か確認
+        phases = state.get("phases") or {}
+        phase10 = phases.get(10) if isinstance(phases, dict) else None
+        phase10_status = (
+            (phase10 or {}).get("status") if isinstance(phase10, dict) else None
+        )
+        if phase10_status == PhaseStatus.COMPLETED.value:
+            _safe_notify("workflow_completed", state)

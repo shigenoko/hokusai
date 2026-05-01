@@ -56,6 +56,43 @@ class CrossReviewConfig:
     max_correction_rounds: int = 2
 
 
+# Slack 通知のサポートイベント名
+SLACK_NOTIFICATION_EVENTS = (
+    "workflow_started",
+    "waiting_for_human",
+    "workflow_failed",
+    "pr_created",
+    "workflow_completed",
+)
+
+
+@dataclass
+class SlackNotificationConfig:
+    """Slack 通知設定
+
+    Webhook URL は YAML には保存せず、環境変数経由で参照する。
+    """
+
+    enabled: bool = False
+    webhook_url_env: str = "HOKUSAI_SLACK_WEBHOOK_URL"
+    events: list[str] = field(
+        default_factory=lambda: [
+            "waiting_for_human",
+            "workflow_failed",
+            "pr_created",
+            "workflow_completed",
+        ]
+    )
+    timeout: float = 5.0
+
+
+@dataclass
+class NotificationConfig:
+    """通知設定（複数チャネルへの拡張ポイント）"""
+
+    slack: SlackNotificationConfig = field(default_factory=SlackNotificationConfig)
+
+
 @dataclass
 class RepositoryConfig:
     """リポジトリ設定（複数リポジトリ対応）"""
@@ -135,6 +172,9 @@ class WorkflowConfig:
 
     # クロスLLMレビュー設定
     cross_review: CrossReviewConfig = field(default_factory=CrossReviewConfig)
+
+    # 通知設定（Slack 等）
+    notifications: NotificationConfig = field(default_factory=NotificationConfig)
 
     # 複数リポジトリ設定（Phase 7で全リポジトリをレビュー）
     # 空の場合はproject_rootのみをレビュー

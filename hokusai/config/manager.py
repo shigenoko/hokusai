@@ -10,6 +10,7 @@ from pathlib import Path
 from .loaders import (
     _parse_cross_review_config,
     _parse_git_hosting_config,
+    _parse_notifications_config,
     _parse_repositories,
     _parse_review_checklist,
     _parse_task_backend_config,
@@ -91,8 +92,11 @@ def create_config_from_env_and_file(
     default_base_branch = config_dict.get("base_branch", "main")
     repositories = _parse_repositories(config_dict, default_base_branch)
 
+    # notifications をパース（Slack 等）
+    notifications = _parse_notifications_config(config_dict)
+
     # 不要なキーを削除
-    for key in ["task_backend", "git_hosting", "status_mapping", "review_checklist", "devin_check", "cross_review", "repositories"]:
+    for key in ["task_backend", "git_hosting", "status_mapping", "review_checklist", "devin_check", "cross_review", "repositories", "notifications"]:
         config_dict.pop(key, None)
 
     return WorkflowConfig(
@@ -103,6 +107,7 @@ def create_config_from_env_and_file(
         devin_check=devin_check,
         cross_review=cross_review,
         repositories=repositories,
+        notifications=notifications,
         **config_dict,
     )
 

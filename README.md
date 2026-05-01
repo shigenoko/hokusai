@@ -149,6 +149,7 @@ HOKUSAI is an **operational framework** for integrating AI into real-world workf
 - Phase 7.5 branch hygiene checks (file scope, base-branch sync)
 - Customizable prompts in `prompts/`
 - `hokusai connect <github|gitlab>` / `hokusai connect --status` for guided CLI authentication and a quick connection-status read-out
+- Slack notifications (Incoming Webhook) for workflow start, human-review pauses, failures, PR creation, and completion
 
 ### Experimental
 
@@ -215,6 +216,31 @@ task_backend:
 git_hosting:
   type: github
 ```
+
+### Slack notifications (optional)
+
+HOKUSAI can post workflow events to a Slack Incoming Webhook. The webhook URL is **never** stored in YAML — pass it via an environment variable.
+
+```bash
+export HOKUSAI_SLACK_WEBHOOK_URL="https://hooks.slack.com/services/T.../B.../..."
+```
+
+```yaml
+notifications:
+  slack:
+    enabled: true
+    webhook_url_env: HOKUSAI_SLACK_WEBHOOK_URL  # default
+    events:
+      - waiting_for_human
+      - workflow_failed
+      - pr_created
+      - workflow_completed
+    timeout: 5.0  # seconds, clamped to [1.0, 30.0]
+```
+
+Supported events: `workflow_started`, `waiting_for_human`, `workflow_failed`, `pr_created`, `workflow_completed`.
+
+If sending fails (timeout, HTTP error, network error), the workflow continues running — notification failures never abort the workflow. The webhook URL is not written to logs or DB. Pasting the webhook URL directly into the YAML triggers a `Slack Incoming Webhook URL` warning in the dashboard.
 
 ## Documentation
 
