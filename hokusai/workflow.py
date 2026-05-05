@@ -6,11 +6,13 @@ LangGraphベースの開発ワークフロー定義。
 
 import os
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from .config import get_config
 from .constants import MAX_WORKFLOW_EVENTS, PHASE_NAMES
 from .integrations.notifications import notify_slack
+from .integrations.notion_dashboard import NotionSyncDispatcher
 from .logging_config import get_logger
 from .state import PhaseStatus, add_audit_log, create_initial_state, update_phase_status
 
@@ -69,6 +71,11 @@ class WorkflowRunner:
         self.verbose = verbose
         self.dry_run = dry_run
         self.step_mode = step_mode
+        # Notion メインダッシュボード同期 dispatcher
+        # enabled=False または環境変数未設定なら is_configured() が False で no-op
+        self.notion_dispatcher = NotionSyncDispatcher(
+            store=self.store, config=self.config.notion_dashboard
+        )
 
         if verbose:
             logger.debug("WorkflowRunner初期化")
@@ -80,6 +87,85 @@ class WorkflowRunner:
         """ワークフローがコンパイルされていることを確認"""
         if self.compiled_workflow is None:
             self.compiled_workflow = create_compiled_workflow()
+
+    def _safe_notion_dispatch(self, event_type: str, payload: dict) -> None:
+        """Notion 同期 dispatcher を best effort で呼ぶ。
+
+        ワークフロー本体には絶対に例外を伝播させない。
+        is_configured() = False（disabled or 環境変数未設定）の場合は no-op。
+        """
+        try:
+            self.notion_dispatcher.dispatch(event_type, payload)
+        except Exception as e:
+            logger.debug(f"Notion 同期で例外を抑制: event={event_type}, error={e}")
+
+    def _enrich_state_with_notion_url(self, state: dict) -> dict:
+        """Slack 通知向けに Notion ダッシュボードページ URL を state に補う。
+
+        Notion 同期が無効、または URL 解決失敗時は state をそのまま返す。
+        """
+        try:
+            workflow_id = state.get("workflow_id") if isinstance(state, dict) else None
+            if not workflow_id:
+                return state
+            url = self.notion_dispatcher.resolve_workflow_page_url(workflow_id)
+            if not url:
+                return state
+            enriched = dict(state)
+            enriched["notion_dashboard_url"] = url
+            return enriched
+        except Exception:
+            return state
+
+    def _emit_terminal_notion_sync(
+        self,
+        *,
+        interrupt_reason: str | None,
+        final_values: dict | None,
+    ) -> None:
+        """ストリーム終了時の Notion 同期を発火する。
+
+        - "waiting_for_human" → status=waiting_for_human
+        - "loop_detected" / "max_events" → status=failed
+        - "user_aborted" → 何も送らない（ユーザ操作のため）
+        - None（自然終了）→ Phase 10 完了なら status=done
+        """
+        if interrupt_reason == "user_aborted":
+            return
+
+        state = final_values or {}
+
+        if interrupt_reason == "waiting_for_human":
+            reason = str(state.get("human_input_request") or "")
+            payload = _build_notion_payload(
+                state,
+                status="waiting_for_human",
+                waiting_reason=reason,
+                next_action=_next_action_for_waiting_reason(
+                    reason, state.get("workflow_id", "")
+                ),
+            )
+            self._safe_notion_dispatch("terminal_status_changed", payload)
+            return
+
+        if interrupt_reason in ("loop_detected", "max_events"):
+            payload = _build_notion_payload(state, status="failed")
+            self._safe_notion_dispatch("terminal_status_changed", payload)
+            return
+
+        if interrupt_reason is None:
+            phases = state.get("phases") or {}
+            phase10 = phases.get(10) if isinstance(phases, dict) else None
+            phase10_status = (
+                (phase10 or {}).get("status") if isinstance(phase10, dict) else None
+            )
+            if phase10_status == PhaseStatus.COMPLETED.value:
+                payload = _build_notion_payload(
+                    state,
+                    status="done",
+                    completed_at=datetime_now_iso(),
+                )
+                self._safe_notion_dispatch("terminal_status_changed", payload)
 
     def _validate_worktrees(self, state: dict) -> None:
         """state 内の worktree パスが実在するか検証する
@@ -210,8 +296,16 @@ class WorkflowRunner:
         self.store.save_workflow(workflow_id, state)
         logger.debug(f"初期状態を永続化: workflow_id={workflow_id}")
 
+        # Notion メインダッシュボード同期（best effort、Slack 通知の前に呼んで page URL を解決）
+        self._safe_notion_dispatch("workflow_started", _build_notion_payload(
+            state, status="running", current_phase_name=self.PHASE_NAMES.get(
+                state.get("current_phase", 1), ""
+            ),
+        ))
+
         # ワークフロー開始の通知（best effort: 失敗しても本体は止めない）
-        _safe_notify("workflow_started", state)
+        # Notion ページ URL を補ってから Slack 通知
+        _safe_notify("workflow_started", self._enrich_state_with_notion_url(state))
 
         config = {"configurable": {"thread_id": workflow_id}}
 
@@ -622,6 +716,11 @@ class WorkflowRunner:
             previous_pr_count = len(initial_state_for_pr.get("pull_requests") or [])
         except Exception:
             previous_pr_count = 0
+            initial_state_for_pr = {}
+
+        # Notion 同期: phase 変化と subpage 追加の検出のため、開始時点の値を記録
+        previous_phase = initial_state_for_pr.get("current_phase")
+        previous_subpages: dict = dict(initial_state_for_pr.get("phase_subpages") or {})
 
         # チェックポイントから再開する場合はNoneを渡す
         stream_input = None if resume_from_checkpoint else state
@@ -640,10 +739,61 @@ class WorkflowRunner:
                 try:
                     current_prs = current_state.values.get("pull_requests") or []
                     if len(current_prs) > previous_pr_count:
-                        _safe_notify("pr_created", current_state.values)
+                        # Notion 同期を先に走らせてページ URL を解決可能にする
+                        self._safe_notion_dispatch(
+                            "pr_created",
+                            _build_notion_payload(
+                                current_state.values,
+                                pull_requests=current_prs,
+                            ),
+                        )
+                        _safe_notify(
+                            "pr_created",
+                            self._enrich_state_with_notion_url(
+                                current_state.values
+                            ),
+                        )
                         previous_pr_count = len(current_prs)
                 except Exception as notify_err:
                     logger.debug(f"PR 作成通知中のエラーを抑制: {notify_err}")
+
+                # Notion 同期: phase 変化と Phase 2/3/4 子ページ追加を検出
+                try:
+                    sv = current_state.values
+                    cp = sv.get("current_phase")
+                    if cp is not None and cp != previous_phase:
+                        self._safe_notion_dispatch(
+                            "phase_changed",
+                            _build_notion_payload(
+                                sv,
+                                status="running",
+                                current_phase_name=self.PHASE_NAMES.get(cp, ""),
+                            ),
+                        )
+                        previous_phase = cp
+
+                    current_subpages = sv.get("phase_subpages") or {}
+                    new_artifacts = {
+                        phase: url
+                        for phase, url in current_subpages.items()
+                        if phase in (2, 3, 4)
+                        and url
+                        and previous_subpages.get(phase) != url
+                    }
+                    if new_artifacts:
+                        artifact_payload = _build_notion_payload(sv)
+                        if 2 in new_artifacts:
+                            artifact_payload["research_page_url"] = new_artifacts[2]
+                        if 3 in new_artifacts:
+                            artifact_payload["design_page_url"] = new_artifacts[3]
+                        if 4 in new_artifacts:
+                            artifact_payload["plan_page_url"] = new_artifacts[4]
+                        self._safe_notion_dispatch(
+                            "phase_artifact_linked", artifact_payload
+                        )
+                        previous_subpages = dict(current_subpages)
+                except Exception as sync_err:
+                    logger.debug(f"Notion 同期中のエラーを抑制: {sync_err}")
 
                 # ループ検出: 同じフェーズが繰り返されているか
                 if current_phase:
@@ -769,10 +919,19 @@ class WorkflowRunner:
                     logger.info(f"例外時の状態を保存: phase={cp}, error={e}")
             except Exception as save_err:
                 logger.error(f"例外時の状態保存に失敗: {save_err}", exc_info=True)
+            # Notion 同期を先に行い、page URL を解決可能にする
+            self._safe_notion_dispatch(
+                "terminal_status_changed",
+                _build_notion_payload(
+                    failed_state_for_notify or {},
+                    status="failed",
+                    error_summary=str(e)[:500],
+                ),
+            )
             # 例外時の通知（best effort: 通知失敗で本来の例外を握り潰さない）
             _safe_notify(
                 "workflow_failed",
-                failed_state_for_notify,
+                self._enrich_state_with_notion_url(failed_state_for_notify or {}),
                 reason="exception",
                 error=str(e),
             )
@@ -798,10 +957,17 @@ class WorkflowRunner:
 
         interrupted = interrupt_reason is not None
 
-        # 終了時の通知（best effort）
-        _emit_terminal_notification(
+        # Notion 同期を先に行い、page URL を解決可能にしてから Slack 通知
+        self._emit_terminal_notion_sync(
             interrupt_reason=interrupt_reason,
             final_values=final_values,
+        )
+
+        # 終了時の通知（best effort）— Notion URL を state に補ってから送る
+        enriched_final = self._enrich_state_with_notion_url(final_values or {})
+        _emit_terminal_notification(
+            interrupt_reason=interrupt_reason,
+            final_values=enriched_final,
         )
 
         return StreamResult(
@@ -835,6 +1001,78 @@ def _safe_notify(
         notify_slack(event, state, reason=reason, error=error)
     except Exception as e:
         logger.debug(f"通知送信中に例外を抑制: event={event}, error={e}")
+
+
+def datetime_now_iso() -> str:
+    """現在時刻の ISO 文字列。テスト差し替え用に関数化。"""
+    return datetime.now().isoformat()
+
+
+# Waiting for Human の reason → 推奨 Next Action テンプレート
+_NEXT_ACTION_TEMPLATES: dict[str, str] = {
+    "branch_hygiene": (
+        "ブランチ衛生チェックの判定が必要です。Operations Console で対応アクション"
+        "（rebase / cherry-pick / merge / ignore）を選んで `hokusai continue {wf}` を実行してください。"
+    ),
+    "cross_review_blocked": (
+        "Cross-LLM レビューで指摘事項あり。Operations Console で `apply-cross-review-fixes` "
+        "または `continue-ignore-cross-review` を選択してください。"
+    ),
+    "review_wait": (
+        "PR レビュー待ちです。GitLab MR を確認後、`hokusai continue {wf}` で進めてください。"
+    ),
+    "copilot_review_wait": (
+        "Copilot レビュー待ちです。完了後 `hokusai continue {wf}` で進めてください。"
+    ),
+    "human_review_wait": (
+        "人間レビュー待ちです。レビュー完了後 `hokusai continue {wf}` で進めてください。"
+    ),
+    "review_fix": (
+        "レビュー修正が必要です。修正適用後 `hokusai continue {wf}` で進めてください。"
+    ),
+    "review_status": (
+        "PR ステータスを再確認してください。`hokusai continue {wf}` で進められます。"
+    ),
+    "complete_review": (
+        "全 PR のレビュー完了処理が必要です。`hokusai continue {wf}` で完了処理に進めてください。"
+    ),
+}
+
+
+def _next_action_for_waiting_reason(reason: str, workflow_id: str) -> str:
+    """waiting_reason に応じた標準 Next Action テンプレートを返す。"""
+    template = _NEXT_ACTION_TEMPLATES.get(
+        reason,
+        "Operations Console で状況を確認し、`hokusai continue {wf}` で再開してください。",
+    )
+    return template.format(wf=workflow_id or "<workflow-id>")
+
+
+def _build_notion_payload(state: dict, **overrides: object) -> dict:
+    """state から Notion 同期用 payload を構築する。
+
+    overrides で個別フィールド（status / waiting_reason / next_action 等）を
+    上書きできる。current_phase の revision としては state のフェーズ
+    リトライ回数の合計を使い、冪等キーが phase 内のリトライで変わるようにする。
+    """
+    current_phase = state.get("current_phase")
+    phases = state.get("phases") or {}
+    phase_info = phases.get(current_phase) if isinstance(phases, dict) else None
+    retry_count = (
+        phase_info.get("retry_count", 0) if isinstance(phase_info, dict) else 0
+    )
+
+    payload: dict = {
+        "workflow_id": state.get("workflow_id"),
+        "task_url": state.get("task_url"),
+        "task_title": state.get("task_title"),
+        "current_phase": current_phase,
+        "started_at": state.get("created_at"),
+        "last_updated": datetime_now_iso(),
+        "revision": str(retry_count),
+    }
+    payload.update(overrides)
+    return payload
 
 
 def _emit_terminal_notification(

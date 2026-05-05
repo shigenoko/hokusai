@@ -53,6 +53,96 @@ def _get_store() -> SQLiteStore:
     return _store
 
 
+def _get_notion_dispatcher():
+    """Notion 同期 dispatcher を遅延生成して返す。is_configured=False でも返す。"""
+    from hokusai.config import get_config
+    from hokusai.integrations.notion_dashboard import NotionSyncDispatcher
+
+    return NotionSyncDispatcher(
+        store=_get_store(),
+        config=get_config().notion_dashboard,
+    )
+
+
+def render_notion_dashboard_panel() -> str:
+    """HOKUSAI Web Dashboard 上に表示する「Notion 同期状態」パネル。
+
+    Operations Console の責務として、Notion メインダッシュボードへの誘導と、
+    Notion 同期失敗時の状況把握・再送操作を提供する。
+    """
+    try:
+        dispatcher = _get_notion_dispatcher()
+    except Exception:
+        return ""
+
+    if not dispatcher._config.enabled:
+        return ""
+
+    store = _get_store()
+    pending = store.count_notion_sync_pending()
+    errors = store.count_notion_sync_errors()
+    is_ready = dispatcher.is_configured()
+    state_label = (
+        "🟢 接続準備済み" if is_ready
+        else "🟡 設定済み（環境変数未設定のため送信は no-op）"
+    )
+
+    return f"""
+    <div class="card" id="notion-dashboard-panel">
+      <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px;">
+        <div>
+          <h3 style="margin:0;">Notion メインダッシュボード</h3>
+          <p style="margin:4px 0; color:#666;">
+            ワークフロー一覧・進捗・PR 状態は Notion 側のメインダッシュボードで参照してください。
+          </p>
+          <p style="margin:0; font-size:0.85em;">同期状態: {state_label}</p>
+        </div>
+        <div style="display:flex; gap:8px; flex-wrap:wrap;">
+          <button class="btn btn-secondary" onclick="hokusaiNotionRetryPending()">
+            同期再送（保留 {pending} 件 / 永続失敗 {errors} 件）
+          </button>
+          <button class="btn btn-secondary" onclick="hokusaiNotionSyncServiceStatus()">
+            Service Status を Notion へ反映
+          </button>
+        </div>
+      </div>
+      <div id="notion-dashboard-result" style="margin-top:8px; font-size:0.85em;"></div>
+    </div>
+    <script>
+    async function hokusaiNotionRetryPending() {{
+      const out = document.getElementById('notion-dashboard-result');
+      out.textContent = '同期再送中...';
+      try {{
+        const r = await fetch('/api/notion-dashboard/retry-pending', {{method: 'POST'}});
+        const j = await r.json();
+        if (j.success) {{
+          out.textContent = `再送完了: 成功 ${{j.succeeded}} 件 / 失敗 ${{j.failed}} 件 / permanent ${{j.moved_to_error}} 件`;
+        }} else {{
+          out.textContent = '再送失敗: ' + (j.error || '不明');
+        }}
+      }} catch (e) {{
+        out.textContent = '再送中にエラー: ' + e.message;
+      }}
+    }}
+    async function hokusaiNotionSyncServiceStatus() {{
+      const out = document.getElementById('notion-dashboard-result');
+      out.textContent = 'Service Status を反映中...';
+      try {{
+        const r = await fetch('/api/notion-dashboard/sync-service-status', {{method: 'POST'}});
+        const j = await r.json();
+        if (j.success) {{
+          out.textContent = 'Service Status を Notion に反映しました';
+        }} else {{
+          out.textContent = '反映失敗: ' + (j.error || '不明');
+        }}
+      }} catch (e) {{
+        out.textContent = '反映中にエラー: ' + e.message;
+      }}
+    }}
+    </script>
+    """
+
+
 CHECKLIST_PATH = Path(__file__).parent.parent / "hokusai" / "review_checklist.md"
 CONFIGS_DIR = Path(__file__).parent.parent / "configs"
 PORT = 8765
@@ -6655,10 +6745,86 @@ def render_html(content: str, title: str = "HOKUS AI Dashboard") -> str:
 </html>"""
 
 
+def _basic_auth_required() -> tuple[bool, str | None, str | None, str]:
+    """BASIC 認証の有効状態と期待値を返す。
+
+    Returns:
+        (enabled, expected_username, expected_password, realm)
+        enabled=False の場合は他のフィールドは None でも構わない。
+    """
+    try:
+        from hokusai.config import get_config
+
+        cfg = get_config().web_dashboard.auth
+    except Exception:
+        return (False, None, None, "HOKUSAI Operations Console")
+
+    if not cfg.enabled:
+        return (False, None, None, cfg.realm)
+
+    username = os.environ.get(cfg.username_env, "").strip()
+    password = os.environ.get(cfg.password_env, "")
+    if not username or not password:
+        # 認証は有効だが、環境変数未設定で実質ロックダウン
+        # ここでは「有効」として扱い、認証失敗を 401 で返す
+        return (True, None, None, cfg.realm)
+    return (True, username, password, cfg.realm)
+
+
+def _check_basic_auth(handler) -> bool:
+    """リクエストに正しい BASIC 認証ヘッダがあれば True、なければ 401 を返して False。"""
+    enabled, expected_user, expected_pw, realm = _basic_auth_required()
+    if not enabled:
+        return True
+
+    auth_header = handler.headers.get("Authorization", "")
+    if not auth_header.startswith("Basic "):
+        _send_basic_auth_challenge(handler, realm)
+        return False
+
+    import base64
+
+    try:
+        decoded = base64.b64decode(auth_header[len("Basic "):]).decode("utf-8")
+        provided_user, _, provided_pw = decoded.partition(":")
+    except Exception:
+        _send_basic_auth_challenge(handler, realm)
+        return False
+
+    if expected_user is None or expected_pw is None:
+        # 認証情報が環境変数で設定されていないので、ロックダウン状態
+        _send_basic_auth_challenge(handler, realm)
+        return False
+
+    # タイミング攻撃対策に hmac.compare_digest を使う
+    import hmac as _hmac
+
+    user_ok = _hmac.compare_digest(provided_user, expected_user)
+    pw_ok = _hmac.compare_digest(provided_pw, expected_pw)
+    if user_ok and pw_ok:
+        return True
+
+    _send_basic_auth_challenge(handler, realm)
+    return False
+
+
+def _send_basic_auth_challenge(handler, realm: str) -> None:
+    """401 Unauthorized + WWW-Authenticate ヘッダを返す。"""
+    handler.send_response(401)
+    handler.send_header("WWW-Authenticate", f'Basic realm="{realm}"')
+    handler.send_header("Content-Type", "text/plain; charset=utf-8")
+    handler.end_headers()
+    handler.wfile.write(
+        "401 Unauthorized: Operations Console access requires authentication.\n".encode("utf-8")
+    )
+
+
 class DashboardHandler(SimpleHTTPRequestHandler):
     """ダッシュボード用HTTPハンドラ"""
 
     def do_GET(self):
+        if not _check_basic_auth(self):
+            return
         parsed = urlparse(self.path)
         query = parse_qs(parsed.query)
 
@@ -6757,6 +6923,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 </script>
                 """
             content = f"""
+            {render_notion_dashboard_panel()}
             {render_step_controls(config_files)}
             <div class="card">
                 <a href="/rulebook">レビュールールブックを表示 →</a>
@@ -6857,6 +7024,8 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         """POSTリクエストを処理する"""
+        if not _check_basic_auth(self):
+            return
         parsed = urlparse(self.path)
 
         if parsed.path == "/api/workflow/start-step":
@@ -6891,6 +7060,10 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._handle_pr_review_action_post()
         elif parsed.path == "/api/workflow/retry-notion":
             self._handle_retry_notion_post()
+        elif parsed.path == "/api/notion-dashboard/retry-pending":
+            self._handle_notion_retry_pending_post()
+        elif parsed.path == "/api/notion-dashboard/sync-service-status":
+            self._handle_notion_sync_service_status_post()
         elif parsed.path.startswith("/api/prompts/"):
             from urllib.parse import unquote
             prompt_id = unquote(parsed.path[len("/api/prompts/"):])
@@ -6903,6 +7076,46 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         content_length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(content_length)
         return json.loads(body.decode("utf-8"))
+
+    def _handle_notion_retry_pending_post(self):
+        """Notion 同期 outbox の保留分を再送する。"""
+        try:
+            dispatcher = _get_notion_dispatcher()
+            if not dispatcher.is_configured():
+                self._send_json_response({
+                    "success": False,
+                    "error": "Notion ダッシュボード同期が有効化されていません",
+                })
+                return
+            result = dispatcher.retry_pending()
+            self._send_json_response({"success": True, **result})
+        except Exception as e:
+            self._send_json_response(
+                {"success": False, "error": f"{type(e).__name__}"},
+                status_code=500,
+            )
+
+    def _handle_notion_sync_service_status_post(self):
+        """connection_status の最新結果を Notion Service Status ページに反映する。"""
+        try:
+            from hokusai.integrations.notion_dashboard import (
+                sync_service_status_to_notion,
+            )
+
+            dispatcher = _get_notion_dispatcher()
+            if not dispatcher.is_configured():
+                self._send_json_response({
+                    "success": False,
+                    "error": "Notion ダッシュボード同期が有効化されていません",
+                })
+                return
+            ok = sync_service_status_to_notion(dispatcher)
+            self._send_json_response({"success": ok})
+        except Exception as e:
+            self._send_json_response(
+                {"success": False, "error": f"{type(e).__name__}"},
+                status_code=500,
+            )
 
     def _handle_start_step_post(self):
         """stepモードでワークフローを開始する。"""

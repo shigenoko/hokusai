@@ -86,6 +86,52 @@ class SQLiteStore:
                 ON checkpoints(workflow_id, phase)
             """)
 
+            # Notion ダッシュボード同期の outbox / error queue
+            # 同期失敗イベントを保持し、復旧の正本として使う。
+            # idempotency_key は同一イベントの重複送信を抑止する。
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS notion_sync_outbox (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    idempotency_key TEXT NOT NULL UNIQUE,
+                    workflow_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT,
+                    created_at TEXT NOT NULL,
+                    next_attempt_at TEXT NOT NULL
+                )
+            """)
+
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_outbox_next_attempt
+                ON notion_sync_outbox(next_attempt_at)
+            """)
+
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_outbox_workflow
+                ON notion_sync_outbox(workflow_id)
+            """)
+
+            # 永続的な失敗（max_retry_attempts 超過）を記録する別テーブル
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS notion_sync_errors (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    idempotency_key TEXT NOT NULL,
+                    workflow_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    error TEXT NOT NULL,
+                    attempts INTEGER NOT NULL,
+                    failed_at TEXT NOT NULL
+                )
+            """)
+
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_sync_errors_workflow
+                ON notion_sync_errors(workflow_id)
+            """)
+
             conn.commit()
 
     def save_workflow(self, workflow_id: str, state: dict[str, Any]) -> None:
@@ -558,5 +604,154 @@ class SQLiteStore:
 
         # 保存
         self.save_workflow(workflow_id, state)
+        return True, "PR ステータスを更新しました: " + ", ".join(changes)
 
-        return True, f"PR #{pr_number} を更新: {', '.join(changes)}"
+    # =========================================================================
+    # Notion ダッシュボード同期 outbox / error queue
+    # =========================================================================
+
+    def enqueue_notion_sync(
+        self,
+        idempotency_key: str,
+        workflow_id: str,
+        event_type: str,
+        payload: dict[str, Any],
+    ) -> bool:
+        """同期失敗イベントを outbox に追加する。
+
+        既に同じ idempotency_key が存在する場合は何もしない（冪等）。
+
+        Returns:
+            新規追加された場合 True、既存（重複）の場合 False
+        """
+        now = datetime.now().isoformat()
+        payload_json = json.dumps(payload, ensure_ascii=False, default=str)
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT OR IGNORE INTO notion_sync_outbox (
+                    idempotency_key, workflow_id, event_type, payload_json,
+                    attempts, last_error, created_at, next_attempt_at
+                ) VALUES (?, ?, ?, ?, 0, NULL, ?, ?)
+                """,
+                (idempotency_key, workflow_id, event_type, payload_json, now, now),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def list_pending_notion_sync(self, limit: int = 100) -> list[dict[str, Any]]:
+        """送信待ちの outbox エントリを古い順に取得する。"""
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute(
+                """
+                SELECT id, idempotency_key, workflow_id, event_type, payload_json,
+                       attempts, last_error, created_at, next_attempt_at
+                FROM notion_sync_outbox
+                ORDER BY next_attempt_at ASC, id ASC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+            rows = cursor.fetchall()
+            return [
+                {
+                    "id": row["id"],
+                    "idempotency_key": row["idempotency_key"],
+                    "workflow_id": row["workflow_id"],
+                    "event_type": row["event_type"],
+                    "payload": json.loads(row["payload_json"]),
+                    "attempts": row["attempts"],
+                    "last_error": row["last_error"],
+                    "created_at": row["created_at"],
+                    "next_attempt_at": row["next_attempt_at"],
+                }
+                for row in rows
+            ]
+
+    def mark_notion_sync_succeeded(self, idempotency_key: str) -> None:
+        """outbox エントリを送信成功として削除する。"""
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM notion_sync_outbox WHERE idempotency_key = ?",
+                (idempotency_key,),
+            )
+            conn.commit()
+
+    def mark_notion_sync_failed(
+        self,
+        idempotency_key: str,
+        error: str,
+        next_attempt_at: str,
+    ) -> None:
+        """outbox エントリの試行回数とエラーを更新する。"""
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE notion_sync_outbox
+                SET attempts = attempts + 1,
+                    last_error = ?,
+                    next_attempt_at = ?
+                WHERE idempotency_key = ?
+                """,
+                (error, next_attempt_at, idempotency_key),
+            )
+            conn.commit()
+
+    def move_notion_sync_to_error(
+        self,
+        idempotency_key: str,
+        error: str,
+    ) -> None:
+        """outbox エントリを permanent error として errors テーブルに移す。"""
+        now = datetime.now().isoformat()
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                """
+                SELECT idempotency_key, workflow_id, event_type, payload_json, attempts
+                FROM notion_sync_outbox
+                WHERE idempotency_key = ?
+                """,
+                (idempotency_key,),
+            ).fetchone()
+            if row is None:
+                return
+            conn.execute(
+                """
+                INSERT INTO notion_sync_errors (
+                    idempotency_key, workflow_id, event_type, payload_json,
+                    error, attempts, failed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    row["idempotency_key"],
+                    row["workflow_id"],
+                    row["event_type"],
+                    row["payload_json"],
+                    error,
+                    row["attempts"],
+                    now,
+                ),
+            )
+            conn.execute(
+                "DELETE FROM notion_sync_outbox WHERE idempotency_key = ?",
+                (idempotency_key,),
+            )
+            conn.commit()
+
+    def count_notion_sync_pending(self) -> int:
+        """outbox の保留件数。"""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM notion_sync_outbox"
+            ).fetchone()
+            return int(row[0]) if row else 0
+
+    def count_notion_sync_errors(self) -> int:
+        """permanent error の件数。"""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM notion_sync_errors"
+            ).fetchone()
+            return int(row[0]) if row else 0

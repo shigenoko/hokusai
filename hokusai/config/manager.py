@@ -11,9 +11,11 @@ from .loaders import (
     _parse_cross_review_config,
     _parse_git_hosting_config,
     _parse_notifications_config,
+    _parse_notion_dashboard_config,
     _parse_repositories,
     _parse_review_checklist,
     _parse_task_backend_config,
+    _parse_web_dashboard_config,
     load_config_from_file,
 )
 from .models import DEFAULT_STATUS_MAPPING, WorkflowConfig
@@ -95,8 +97,14 @@ def create_config_from_env_and_file(
     # notifications をパース（Slack 等）
     notifications = _parse_notifications_config(config_dict)
 
+    # notion_dashboard をパース
+    notion_dashboard = _parse_notion_dashboard_config(config_dict)
+
+    # web_dashboard をパース（Operations Console アクセス制限）
+    web_dashboard = _parse_web_dashboard_config(config_dict)
+
     # 不要なキーを削除
-    for key in ["task_backend", "git_hosting", "status_mapping", "review_checklist", "devin_check", "cross_review", "repositories", "notifications"]:
+    for key in ["task_backend", "git_hosting", "status_mapping", "review_checklist", "devin_check", "cross_review", "repositories", "notifications", "notion_dashboard", "web_dashboard"]:
         config_dict.pop(key, None)
 
     return WorkflowConfig(
@@ -108,6 +116,8 @@ def create_config_from_env_and_file(
         cross_review=cross_review,
         repositories=repositories,
         notifications=notifications,
+        notion_dashboard=notion_dashboard,
+        web_dashboard=web_dashboard,
         **config_dict,
     )
 

@@ -91,6 +91,7 @@ def build_text_payload(
     workflow_id = str(state.get("workflow_id", "")) or "unknown"
     task_url = str(state.get("task_url", "")) or ""
     current_phase = state.get("current_phase")
+    notion_dashboard_url = str(state.get("notion_dashboard_url", "")) or ""
 
     lines: list[str] = [header, ""]
     lines.append(f"Workflow: {workflow_id}")
@@ -98,6 +99,8 @@ def build_text_payload(
         lines.append(f"Task: {task_url}")
     if current_phase is not None:
         lines.append(f"Phase: {current_phase}")
+    if notion_dashboard_url:
+        lines.append(f"Dashboard: <{notion_dashboard_url}|Notion で開く>")
 
     if event == "waiting_for_human":
         if reason:

@@ -13,9 +13,15 @@ from .models import (
     CrossReviewConfig,
     GitHostingConfig,
     NotificationConfig,
+    NotionDashboardConfig,
+    NotionSyncOutboxConfig,
+    NotionSyncRateLimitConfig,
+    NotionSyncRetryConfig,
     RepositoryConfig,
     SlackNotificationConfig,
     TaskBackendConfig,
+    WebDashboardAuthConfig,
+    WebDashboardConfig,
 )
 
 
@@ -213,6 +219,188 @@ def _parse_notifications_config(config_dict: dict) -> NotificationConfig:
             webhook_url_env=webhook_url_env,
             events=events,
             timeout=timeout,
+        )
+    )
+
+
+def _parse_notion_dashboard_config(config_dict: dict) -> NotionDashboardConfig:
+    """notion_dashboard 設定をパース
+
+    設定例:
+        notion_dashboard:
+          enabled: true
+          api_token_env: HOKUSAI_NOTION_API_TOKEN
+          workflows_db_id_env: HOKUSAI_NOTION_WORKFLOWS_DB_ID
+          pull_requests_db_id_env: HOKUSAI_NOTION_PR_DB_ID
+          service_status_page_id_env: HOKUSAI_NOTION_SERVICE_STATUS_PAGE_ID
+          sync_outbox:
+            enabled: true
+            max_retry_attempts: 10
+          retry:
+            max_attempts: 3
+            backoff_seconds: 5
+          rate_limit:
+            requests_per_second: 2
+            debounce_ms: 5000
+
+    バリデーション方針:
+    - notion_dashboard が dict でなければデフォルト
+    - enabled は bool のみ採用
+    - 各 _env キーは空文字以外の str のみ採用、それ以外はデフォルトに戻す
+    - max_retry_attempts は 1 以上の int、それ以外はデフォルト
+    - max_attempts は 1〜10 にクランプ
+    - backoff_seconds は 0.5〜60 にクランプ
+    - requests_per_second は 0.1〜10 にクランプ
+    - debounce_ms は 0〜30000 にクランプ
+    """
+    nd_raw = config_dict.get("notion_dashboard")
+    if not isinstance(nd_raw, dict):
+        return NotionDashboardConfig()
+
+    defaults = NotionDashboardConfig()
+
+    enabled = nd_raw.get("enabled", defaults.enabled)
+    if not isinstance(enabled, bool):
+        enabled = defaults.enabled
+
+    def _str_or_default(value: object, default: str) -> str:
+        return value if isinstance(value, str) and value.strip() else default
+
+    api_token_env = _str_or_default(nd_raw.get("api_token_env"), defaults.api_token_env)
+    workflows_db_id_env = _str_or_default(
+        nd_raw.get("workflows_db_id_env"), defaults.workflows_db_id_env
+    )
+    pull_requests_db_id_env = _str_or_default(
+        nd_raw.get("pull_requests_db_id_env"), defaults.pull_requests_db_id_env
+    )
+    service_status_page_id_env = _str_or_default(
+        nd_raw.get("service_status_page_id_env"), defaults.service_status_page_id_env
+    )
+
+    sync_outbox = _parse_sync_outbox(nd_raw.get("sync_outbox"))
+    retry = _parse_retry(nd_raw.get("retry"))
+    rate_limit = _parse_rate_limit(nd_raw.get("rate_limit"))
+
+    return NotionDashboardConfig(
+        enabled=enabled,
+        api_token_env=api_token_env,
+        workflows_db_id_env=workflows_db_id_env,
+        pull_requests_db_id_env=pull_requests_db_id_env,
+        service_status_page_id_env=service_status_page_id_env,
+        sync_outbox=sync_outbox,
+        retry=retry,
+        rate_limit=rate_limit,
+    )
+
+
+def _parse_sync_outbox(raw: object) -> NotionSyncOutboxConfig:
+    defaults = NotionSyncOutboxConfig()
+    if not isinstance(raw, dict):
+        return defaults
+
+    enabled = raw.get("enabled", defaults.enabled)
+    if not isinstance(enabled, bool):
+        enabled = defaults.enabled
+
+    max_retry = raw.get("max_retry_attempts", defaults.max_retry_attempts)
+    if not isinstance(max_retry, int) or isinstance(max_retry, bool) or max_retry < 1:
+        max_retry = defaults.max_retry_attempts
+    elif max_retry > 100:
+        max_retry = 100
+
+    return NotionSyncOutboxConfig(enabled=enabled, max_retry_attempts=max_retry)
+
+
+def _parse_retry(raw: object) -> NotionSyncRetryConfig:
+    defaults = NotionSyncRetryConfig()
+    if not isinstance(raw, dict):
+        return defaults
+
+    max_attempts = raw.get("max_attempts", defaults.max_attempts)
+    if (
+        not isinstance(max_attempts, int)
+        or isinstance(max_attempts, bool)
+        or max_attempts < 1
+    ):
+        max_attempts = defaults.max_attempts
+    elif max_attempts > 10:
+        max_attempts = 10
+
+    backoff = raw.get("backoff_seconds", defaults.backoff_seconds)
+    if isinstance(backoff, bool) or not isinstance(backoff, (int, float)):
+        backoff = defaults.backoff_seconds
+    else:
+        backoff = float(backoff)
+        if backoff < 0.5:
+            backoff = 0.5
+        elif backoff > 60:
+            backoff = 60.0
+
+    return NotionSyncRetryConfig(max_attempts=max_attempts, backoff_seconds=backoff)
+
+
+def _parse_rate_limit(raw: object) -> NotionSyncRateLimitConfig:
+    defaults = NotionSyncRateLimitConfig()
+    if not isinstance(raw, dict):
+        return defaults
+
+    rps = raw.get("requests_per_second", defaults.requests_per_second)
+    if isinstance(rps, bool) or not isinstance(rps, (int, float)):
+        rps = defaults.requests_per_second
+    else:
+        rps = float(rps)
+        if rps < 0.1:
+            rps = 0.1
+        elif rps > 10:
+            rps = 10.0
+
+    debounce = raw.get("debounce_ms", defaults.debounce_ms)
+    if not isinstance(debounce, int) or isinstance(debounce, bool) or debounce < 0:
+        debounce = defaults.debounce_ms
+    elif debounce > 30000:
+        debounce = 30000
+
+    return NotionSyncRateLimitConfig(requests_per_second=rps, debounce_ms=debounce)
+
+
+def _parse_web_dashboard_config(config_dict: dict) -> WebDashboardConfig:
+    """web_dashboard 設定をパース
+
+    設定例:
+        web_dashboard:
+          auth:
+            enabled: true
+            username_env: HOKUSAI_OPS_USERNAME
+            password_env: HOKUSAI_OPS_PASSWORD
+            realm: "HOKUSAI Operations Console"
+    """
+    raw = config_dict.get("web_dashboard")
+    if not isinstance(raw, dict):
+        return WebDashboardConfig()
+
+    auth_raw = raw.get("auth")
+    if not isinstance(auth_raw, dict):
+        return WebDashboardConfig()
+
+    defaults = WebDashboardAuthConfig()
+
+    enabled = auth_raw.get("enabled", defaults.enabled)
+    if not isinstance(enabled, bool):
+        enabled = defaults.enabled
+
+    def _str_or_default(value: object, default: str) -> str:
+        return value if isinstance(value, str) and value.strip() else default
+
+    return WebDashboardConfig(
+        auth=WebDashboardAuthConfig(
+            enabled=enabled,
+            username_env=_str_or_default(
+                auth_raw.get("username_env"), defaults.username_env
+            ),
+            password_env=_str_or_default(
+                auth_raw.get("password_env"), defaults.password_env
+            ),
+            realm=_str_or_default(auth_raw.get("realm"), defaults.realm),
         )
     )
 
