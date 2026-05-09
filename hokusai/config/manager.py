@@ -9,7 +9,9 @@ from pathlib import Path
 
 from .loaders import (
     _parse_cross_review_config,
+    _parse_figma_config,
     _parse_git_hosting_config,
+    _parse_miro_config,
     _parse_notifications_config,
     _parse_notion_dashboard_config,
     _parse_repositories,
@@ -103,8 +105,25 @@ def create_config_from_env_and_file(
     # web_dashboard をパース（Operations Console アクセス制限）
     web_dashboard = _parse_web_dashboard_config(config_dict)
 
+    # figma / miro をパース（design integration）
+    figma = _parse_figma_config(config_dict)
+    miro = _parse_miro_config(config_dict)
+
     # 不要なキーを削除
-    for key in ["task_backend", "git_hosting", "status_mapping", "review_checklist", "devin_check", "cross_review", "repositories", "notifications", "notion_dashboard", "web_dashboard"]:
+    for key in [
+        "task_backend",
+        "git_hosting",
+        "status_mapping",
+        "review_checklist",
+        "devin_check",
+        "cross_review",
+        "repositories",
+        "notifications",
+        "notion_dashboard",
+        "web_dashboard",
+        "figma",
+        "miro",
+    ]:
         config_dict.pop(key, None)
 
     return WorkflowConfig(
@@ -118,6 +137,8 @@ def create_config_from_env_and_file(
         notifications=notifications,
         notion_dashboard=notion_dashboard,
         web_dashboard=web_dashboard,
+        figma=figma,
+        miro=miro,
         **config_dict,
     )
 

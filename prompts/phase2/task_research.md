@@ -2,6 +2,8 @@
 
 タスクURL: {task_url}
 
+{design_context}
+
 ## 調査手順
 
 1. NotionタスクURL を mcp__notion__notion-fetch で読み取り、タスク名・要件・関連エンティティを把握する

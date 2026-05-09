@@ -5,6 +5,8 @@
 {builtin_checklist}
 {project_checklist_section}
 
+{design_context}
+
 ---
 
 ## 出力形式

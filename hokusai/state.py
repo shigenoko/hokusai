@@ -207,6 +207,19 @@ class WorkflowState(TypedDict):
     # === Notion接続状態 ===
     notion_connected: Optional[bool]  # True=接続成功, False=未接続(スキップ), None=未確認
 
+    # === Figma / Miro 連携（design integration） ===
+    miro_url: Optional[str]  # Notion タスクから抽出した Miro URL
+    figma_url: Optional[str]  # Notion タスクから抽出した Figma URL
+    miro_board_id: Optional[str]  # パース済み Miro Board ID
+    figma_file_key: Optional[str]  # パース済み Figma File Key
+    figma_target_node_id: Optional[str]  # パース済み Figma 対象 Node ID
+    miro_context: Optional[dict]  # Miro から取得・要約した共通コンテキスト
+    figma_context: Optional[dict]  # Figma から取得・要約した共通コンテキスト
+    design_integration_status: Optional[str]  # not_configured / synced / partial / failed
+    design_review_required: bool  # デザイン確認が必要か
+    design_review_result: Optional[str]  # pending / approved / changes_requested
+    design_sync_errors: list  # Miro / Figma 同期時の警告・エラー
+
     # === メタデータ ===
     created_at: str
     updated_at: str
@@ -334,6 +347,18 @@ def create_initial_state(
         cherry_picked_from=None,
         cherry_picked_commits=[],
         notion_connected=os.environ.get("HOKUSAI_SKIP_NOTION") != "1",
+        # Figma / Miro 連携
+        miro_url=None,
+        figma_url=None,
+        miro_board_id=None,
+        figma_file_key=None,
+        figma_target_node_id=None,
+        miro_context=None,
+        figma_context=None,
+        design_integration_status=None,
+        design_review_required=False,
+        design_review_result=None,
+        design_sync_errors=[],
         created_at=now,
         updated_at=now,
         total_retry_count=0,

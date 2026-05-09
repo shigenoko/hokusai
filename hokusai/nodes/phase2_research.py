@@ -54,9 +54,19 @@ def phase2_research_node(state: WorkflowState) -> WorkflowState:
         config = get_config()
         claude = ClaudeCodeClient()
 
+        # design context を解決して state に保存（後続 phase でも参照する）
+        from ..utils.design_helpers import (
+            ensure_design_context,
+            format_design_context_section,
+        )
+        ensure_design_context(state)
+        design_section = format_design_context_section(state)
+
         # [1/3] 直接プロンプトで調査を実行（Notion書き込み遮断）
         print("📋 Phase 2 [1/3] 調査実行中...")
-        research_prompt = _build_task_research_prompt(state["task_url"])
+        research_prompt = _build_task_research_prompt(
+            state["task_url"], design_context=design_section
+        )
         logger.info(f"直接プロンプトで調査を実行: {state['task_url']}")
         raw_output = claude.execute_prompt(
             prompt=research_prompt,
@@ -424,7 +434,7 @@ def _build_research_retry_prompt(
     )
 
 
-def _build_task_research_prompt(task_url: str) -> str:
+def _build_task_research_prompt(task_url: str, *, design_context: str = "") -> str:
     """Phase 2 調査用の直接プロンプトを構築する
 
     slash skill ではなく execute_prompt() で直接実行するためのプロンプト。
@@ -433,4 +443,8 @@ def _build_task_research_prompt(task_url: str) -> str:
     """
     from ..prompts import get_prompt
 
-    return get_prompt("phase2.task_research", task_url=task_url)
+    return get_prompt(
+        "phase2.task_research",
+        task_url=task_url,
+        design_context=design_context,
+    )

@@ -11,7 +11,11 @@ import yaml
 from .models import (
     SLACK_NOTIFICATION_EVENTS,
     CrossReviewConfig,
+    DesignRateLimitConfig,
+    DesignRetryConfig,
+    FigmaIntegrationConfig,
     GitHostingConfig,
+    MiroIntegrationConfig,
     NotificationConfig,
     NotionDashboardConfig,
     NotionSyncOutboxConfig,
@@ -402,6 +406,199 @@ def _parse_web_dashboard_config(config_dict: dict) -> WebDashboardConfig:
             ),
             realm=_str_or_default(auth_raw.get("realm"), defaults.realm),
         )
+    )
+
+
+def _parse_design_retry(raw: object) -> DesignRetryConfig:
+    defaults = DesignRetryConfig()
+    if not isinstance(raw, dict):
+        return defaults
+
+    max_attempts = raw.get("max_attempts", defaults.max_attempts)
+    if (
+        not isinstance(max_attempts, int)
+        or isinstance(max_attempts, bool)
+        or max_attempts < 1
+    ):
+        max_attempts = defaults.max_attempts
+    elif max_attempts > 10:
+        max_attempts = 10
+
+    backoff = raw.get("backoff_seconds", defaults.backoff_seconds)
+    if isinstance(backoff, bool) or not isinstance(backoff, (int, float)):
+        backoff = defaults.backoff_seconds
+    else:
+        backoff = float(backoff)
+        if backoff < 0.5:
+            backoff = 0.5
+        elif backoff > 60:
+            backoff = 60.0
+
+    return DesignRetryConfig(max_attempts=max_attempts, backoff_seconds=backoff)
+
+
+def _parse_design_rate_limit(raw: object) -> DesignRateLimitConfig:
+    defaults = DesignRateLimitConfig()
+    if not isinstance(raw, dict):
+        return defaults
+
+    rps = raw.get("requests_per_second", defaults.requests_per_second)
+    if isinstance(rps, bool) or not isinstance(rps, (int, float)):
+        rps = defaults.requests_per_second
+    else:
+        rps = float(rps)
+        if rps < 0.1:
+            rps = 0.1
+        elif rps > 10:
+            rps = 10.0
+
+    return DesignRateLimitConfig(requests_per_second=rps)
+
+
+def _parse_figma_config(config_dict: dict) -> FigmaIntegrationConfig:
+    """figma 設定をパース
+
+    設定例:
+        figma:
+          enabled: true
+          api_token_env: HOKUSAI_FIGMA_API_TOKEN
+          fetch_comments: true
+          export_images: true
+          cache_ttl_seconds: 1800
+          timeout: 10.0
+          on_failure: warn
+          retry:
+            max_attempts: 3
+            backoff_seconds: 5
+          rate_limit:
+            requests_per_second: 1.5
+    """
+    raw = config_dict.get("figma")
+    if not isinstance(raw, dict):
+        return FigmaIntegrationConfig()
+
+    defaults = FigmaIntegrationConfig()
+
+    enabled = raw.get("enabled", defaults.enabled)
+    if not isinstance(enabled, bool):
+        enabled = defaults.enabled
+
+    def _str_or_default(value: object, default: str) -> str:
+        return value if isinstance(value, str) and value.strip() else default
+
+    api_token_env = _str_or_default(raw.get("api_token_env"), defaults.api_token_env)
+
+    fetch_comments = raw.get("fetch_comments", defaults.fetch_comments)
+    if not isinstance(fetch_comments, bool):
+        fetch_comments = defaults.fetch_comments
+
+    export_images = raw.get("export_images", defaults.export_images)
+    if not isinstance(export_images, bool):
+        export_images = defaults.export_images
+
+    cache_ttl = raw.get("cache_ttl_seconds", defaults.cache_ttl_seconds)
+    if not isinstance(cache_ttl, int) or isinstance(cache_ttl, bool) or cache_ttl < 0:
+        cache_ttl = defaults.cache_ttl_seconds
+    elif cache_ttl > 86400:
+        cache_ttl = 86400
+
+    timeout_raw = raw.get("timeout", defaults.timeout)
+    if isinstance(timeout_raw, bool) or not isinstance(timeout_raw, (int, float)):
+        timeout = defaults.timeout
+    else:
+        timeout = float(timeout_raw)
+        if timeout < 1.0:
+            timeout = 1.0
+        elif timeout > 60.0:
+            timeout = 60.0
+
+    on_failure = raw.get("on_failure", defaults.on_failure)
+    if on_failure not in {"warn", "block", "skip"}:
+        on_failure = defaults.on_failure
+
+    return FigmaIntegrationConfig(
+        enabled=enabled,
+        api_token_env=api_token_env,
+        fetch_comments=fetch_comments,
+        export_images=export_images,
+        cache_ttl_seconds=cache_ttl,
+        timeout=timeout,
+        on_failure=on_failure,
+        retry=_parse_design_retry(raw.get("retry")),
+        rate_limit=_parse_design_rate_limit(raw.get("rate_limit")),
+    )
+
+
+def _parse_miro_config(config_dict: dict) -> MiroIntegrationConfig:
+    """miro 設定をパース
+
+    設定例:
+        miro:
+          enabled: true
+          api_token_env: HOKUSAI_MIRO_API_TOKEN
+          default_team_id_env: HOKUSAI_MIRO_TEAM_ID
+          use_mcp: false
+          cache_ttl_seconds: 1800
+          timeout: 10.0
+          on_failure: warn
+          retry:
+            max_attempts: 3
+            backoff_seconds: 5
+          rate_limit:
+            requests_per_second: 1.5
+    """
+    raw = config_dict.get("miro")
+    if not isinstance(raw, dict):
+        return MiroIntegrationConfig()
+
+    defaults = MiroIntegrationConfig()
+
+    enabled = raw.get("enabled", defaults.enabled)
+    if not isinstance(enabled, bool):
+        enabled = defaults.enabled
+
+    def _str_or_default(value: object, default: str) -> str:
+        return value if isinstance(value, str) and value.strip() else default
+
+    api_token_env = _str_or_default(raw.get("api_token_env"), defaults.api_token_env)
+    default_team_id_env = _str_or_default(
+        raw.get("default_team_id_env"), defaults.default_team_id_env
+    )
+
+    use_mcp = raw.get("use_mcp", defaults.use_mcp)
+    if not isinstance(use_mcp, bool):
+        use_mcp = defaults.use_mcp
+
+    cache_ttl = raw.get("cache_ttl_seconds", defaults.cache_ttl_seconds)
+    if not isinstance(cache_ttl, int) or isinstance(cache_ttl, bool) or cache_ttl < 0:
+        cache_ttl = defaults.cache_ttl_seconds
+    elif cache_ttl > 86400:
+        cache_ttl = 86400
+
+    timeout_raw = raw.get("timeout", defaults.timeout)
+    if isinstance(timeout_raw, bool) or not isinstance(timeout_raw, (int, float)):
+        timeout = defaults.timeout
+    else:
+        timeout = float(timeout_raw)
+        if timeout < 1.0:
+            timeout = 1.0
+        elif timeout > 60.0:
+            timeout = 60.0
+
+    on_failure = raw.get("on_failure", defaults.on_failure)
+    if on_failure not in {"warn", "block", "skip"}:
+        on_failure = defaults.on_failure
+
+    return MiroIntegrationConfig(
+        enabled=enabled,
+        api_token_env=api_token_env,
+        default_team_id_env=default_team_id_env,
+        use_mcp=use_mcp,
+        cache_ttl_seconds=cache_ttl,
+        timeout=timeout,
+        on_failure=on_failure,
+        retry=_parse_design_retry(raw.get("retry")),
+        rate_limit=_parse_design_rate_limit(raw.get("rate_limit")),
     )
 
 

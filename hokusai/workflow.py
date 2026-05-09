@@ -1071,6 +1071,21 @@ def _build_notion_payload(state: dict, **overrides: object) -> dict:
         "last_updated": datetime_now_iso(),
         "revision": str(retry_count),
     }
+
+    # Figma / Miro 連携情報。空値はスキップして送らない（DB 側に当該プロパティが
+    # 存在しない場合の property_not_found エラーを避けるため、Notion 側で
+    # 値あり時のみマッピングする方針）。
+    if state.get("miro_url"):
+        payload["miro_url"] = state.get("miro_url")
+    if state.get("figma_url"):
+        payload["figma_url"] = state.get("figma_url")
+    if state.get("design_integration_status"):
+        payload["design_integration_status"] = state.get("design_integration_status")
+    if state.get("design_review_required") is not None:
+        payload["design_review_required"] = bool(state.get("design_review_required"))
+    if state.get("design_review_result"):
+        payload["design_review_result"] = state.get("design_review_result")
+
     payload.update(overrides)
     return payload
 

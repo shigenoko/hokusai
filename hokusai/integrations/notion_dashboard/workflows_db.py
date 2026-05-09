@@ -194,6 +194,33 @@ class WorkflowsDBClient:
             summary = str(payload["sync_errors"] or "")
             props["Sync Errors"] = _rich_text(summary)
 
+        # Figma / Miro 連携プロパティ。DB 側に存在しない場合は Notion 側で
+        # property_not_found となるため、空値はスキップして送らない。
+        if "miro_url" in payload and payload["miro_url"]:
+            props["Miro URL"] = {"url": str(payload["miro_url"])}
+        if "figma_url" in payload and payload["figma_url"]:
+            props["Figma URL"] = {"url": str(payload["figma_url"])}
+        if "design_integration_status" in payload and payload["design_integration_status"]:
+            props["Design Status"] = {
+                "select": {"name": str(payload["design_integration_status"])}
+            }
+        if "design_review_required" in payload and isinstance(
+            payload["design_review_required"], bool
+        ):
+            props["Design Review Required"] = {
+                "checkbox": bool(payload["design_review_required"])
+            }
+        if "design_review_result" in payload and payload["design_review_result"]:
+            props["Design Review Result"] = {
+                "select": {"name": str(payload["design_review_result"])}
+            }
+        if "miro_last_synced_at" in payload and payload["miro_last_synced_at"]:
+            props["Miro Last Synced At"] = _date(str(payload["miro_last_synced_at"]))
+        if "figma_last_synced_at" in payload and payload["figma_last_synced_at"]:
+            props["Figma Last Synced At"] = _date(str(payload["figma_last_synced_at"]))
+        if "design_notes" in payload and payload["design_notes"]:
+            props["Design Notes"] = _rich_text(str(payload["design_notes"])[:2000])
+
         return props
 
 

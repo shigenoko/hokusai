@@ -118,6 +118,58 @@ class NotionSyncRateLimitConfig:
 
 
 @dataclass
+class DesignRetryConfig:
+    """Figma / Miro API リトライ設定（既存 NotionSyncRetryConfig と同じ値域）"""
+
+    max_attempts: int = 3
+    backoff_seconds: float = 5.0
+
+
+@dataclass
+class DesignRateLimitConfig:
+    """Figma / Miro API レートリミット設定"""
+
+    requests_per_second: float = 1.5
+
+
+@dataclass
+class FigmaIntegrationConfig:
+    """Figma 連携設定。
+
+    MVP は read-only。書き戻し（コメント投稿）は Phase E で追加。
+    Token は環境変数経由でのみ扱う。YAML 直書きは _detect_token_like_values で警告。
+    """
+
+    enabled: bool = False
+    api_token_env: str = "HOKUSAI_FIGMA_API_TOKEN"
+    fetch_comments: bool = True
+    export_images: bool = True
+    cache_ttl_seconds: int = 1800
+    timeout: float = 10.0
+    on_failure: str = "warn"  # warn | block | skip
+    retry: DesignRetryConfig = field(default_factory=DesignRetryConfig)
+    rate_limit: DesignRateLimitConfig = field(default_factory=DesignRateLimitConfig)
+
+
+@dataclass
+class MiroIntegrationConfig:
+    """Miro 連携設定。
+
+    MVP は read-only。書き戻し（カード/コメント投稿）は Phase E で追加。
+    """
+
+    enabled: bool = False
+    api_token_env: str = "HOKUSAI_MIRO_API_TOKEN"
+    default_team_id_env: str = "HOKUSAI_MIRO_TEAM_ID"
+    use_mcp: bool = False
+    cache_ttl_seconds: int = 1800
+    timeout: float = 10.0
+    on_failure: str = "warn"  # warn | block | skip
+    retry: DesignRetryConfig = field(default_factory=DesignRetryConfig)
+    rate_limit: DesignRateLimitConfig = field(default_factory=DesignRateLimitConfig)
+
+
+@dataclass
 class WebDashboardAuthConfig:
     """HOKUSAI Web Dashboard（Operations Console）の BASIC 認証設定。
 
@@ -244,6 +296,12 @@ class WorkflowConfig:
 
     # HOKUSAI Web Dashboard（Operations Console）設定
     web_dashboard: WebDashboardConfig = field(default_factory=WebDashboardConfig)
+
+    # Figma 連携設定
+    figma: FigmaIntegrationConfig = field(default_factory=FigmaIntegrationConfig)
+
+    # Miro 連携設定
+    miro: MiroIntegrationConfig = field(default_factory=MiroIntegrationConfig)
 
     # 複数リポジトリ設定（Phase 7で全リポジトリをレビュー）
     # 空の場合はproject_rootのみをレビュー

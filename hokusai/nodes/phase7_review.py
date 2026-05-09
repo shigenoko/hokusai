@@ -31,12 +31,15 @@ def _load_builtin_checklist() -> str:
     return ""
 
 
-def _build_review_prompt(project_checklist: dict[str, dict]) -> str:
+def _build_review_prompt(
+    project_checklist: dict[str, dict], state: dict | None = None
+) -> str:
     """レビュー用のプロンプトを構築
 
     Args:
         project_checklist: プロジェクト固有ルール
             {"P01": {"name": "...", "description": "..."}, ...}
+        state: WorkflowState（指定時、Figma / Miro design context をプロンプトに含める）
     """
     from ..prompts import get_prompt
 
@@ -59,10 +62,16 @@ def _build_review_prompt(project_checklist: dict[str, dict]) -> str:
             parts.append("")
         project_checklist_section = "\n".join(parts)
 
+    design_context = ""
+    if state is not None:
+        from ..utils.design_helpers import format_design_context_section
+        design_context = format_design_context_section(state)
+
     return get_prompt(
         "phase7.final_review",
         builtin_checklist=builtin_checklist,
         project_checklist_section=project_checklist_section,
+        design_context=design_context,
     )
 
 
@@ -383,7 +392,7 @@ def phase7_review_node(state: WorkflowState) -> WorkflowState:
 
     try:
         config = get_config()
-        review_prompt = _build_review_prompt(config.review_checklist)
+        review_prompt = _build_review_prompt(config.review_checklist, state=state)
         repositories = resolve_runtime_repositories(state, config)
 
         print(f"📋 レビューチェックリストを使用してレビューを実行中... ({len(repositories)}リポジトリ)")

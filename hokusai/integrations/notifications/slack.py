@@ -135,6 +135,25 @@ def build_text_payload(
                 else:
                     lines.append(f"- {label}")
 
+    # Figma / Miro 連携リンクを末尾に追加（waiting_for_human / pr_created で有用）
+    miro_url = state.get("miro_url")
+    figma_url = state.get("figma_url")
+    if miro_url or figma_url:
+        lines.append("")
+        lines.append("Design:")
+        if miro_url:
+            lines.append(f"- Miro: <{miro_url}|Miro Board>")
+        if figma_url:
+            lines.append(f"- Figma: <{figma_url}|Figma File>")
+        if state.get("design_review_required"):
+            lines.append("- ⚠️ デザイン確認が必要です")
+        sync_errors = state.get("design_sync_errors") or []
+        if sync_errors and event in ("workflow_failed", "waiting_for_human"):
+            first = sync_errors[0]
+            src = first.get("source", "?") if isinstance(first, dict) else "?"
+            err = first.get("error", "") if isinstance(first, dict) else str(first)
+            lines.append(f"- 連携エラー: {src}: {err[:120]}")
+
     text = "\n".join(line for line in lines if line is not None)
     return {"text": text}
 

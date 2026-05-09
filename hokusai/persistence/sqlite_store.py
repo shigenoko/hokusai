@@ -132,6 +132,42 @@ class SQLiteStore:
                 ON notion_sync_errors(workflow_id)
             """)
 
+            # Figma / Miro 取得結果のキャッシュ。MVP では fetch ごとに
+            # cache_ttl_seconds を比較して上書き保存する。
+            # cache_key:
+            #   figma: "figma:<file_key>:<node_id_or_root>"
+            #   miro:  "miro:<board_id>"
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS figma_file_cache (
+                    cache_key TEXT PRIMARY KEY,
+                    file_key TEXT NOT NULL,
+                    node_id TEXT,
+                    payload_json TEXT NOT NULL,
+                    fetched_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL
+                )
+            """)
+
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_figma_cache_file
+                ON figma_file_cache(file_key)
+            """)
+
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS miro_board_cache (
+                    cache_key TEXT PRIMARY KEY,
+                    board_id TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    fetched_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL
+                )
+            """)
+
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_miro_cache_board
+                ON miro_board_cache(board_id)
+            """)
+
             conn.commit()
 
     def save_workflow(self, workflow_id: str, state: dict[str, Any]) -> None:
@@ -755,3 +791,112 @@ class SQLiteStore:
                 "SELECT COUNT(*) FROM notion_sync_errors"
             ).fetchone()
             return int(row[0]) if row else 0
+
+    # ============================================================
+    # Figma / Miro 取得結果のキャッシュ操作
+    #
+    # Phase A 段階の MVP では: get → expires_at <= now なら miss、
+    # それ以外は payload を返す。put は同じ cache_key の上書き。
+    # ここでは TTL 計算は呼び出し側に任せ、本ストアは保存と取得のみ提供する。
+    # ============================================================
+
+    def get_figma_cache(self, cache_key: str) -> dict[str, Any] | None:
+        """Figma キャッシュを取得（期限切れは None を返す）。"""
+        now = datetime.now().isoformat()
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                """
+                SELECT cache_key, file_key, node_id, payload_json, fetched_at, expires_at
+                FROM figma_file_cache
+                WHERE cache_key = ? AND expires_at > ?
+                """,
+                (cache_key, now),
+            ).fetchone()
+            if row is None:
+                return None
+            return {
+                "cache_key": row["cache_key"],
+                "file_key": row["file_key"],
+                "node_id": row["node_id"],
+                "payload": json.loads(row["payload_json"]),
+                "fetched_at": row["fetched_at"],
+                "expires_at": row["expires_at"],
+            }
+
+    def put_figma_cache(
+        self,
+        cache_key: str,
+        file_key: str,
+        node_id: str | None,
+        payload: dict[str, Any],
+        expires_at: str,
+    ) -> None:
+        """Figma キャッシュを upsert する。"""
+        now = datetime.now().isoformat()
+        payload_json = json.dumps(payload, ensure_ascii=False, default=str)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO figma_file_cache (
+                    cache_key, file_key, node_id, payload_json, fetched_at, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(cache_key) DO UPDATE SET
+                    file_key = excluded.file_key,
+                    node_id = excluded.node_id,
+                    payload_json = excluded.payload_json,
+                    fetched_at = excluded.fetched_at,
+                    expires_at = excluded.expires_at
+                """,
+                (cache_key, file_key, node_id, payload_json, now, expires_at),
+            )
+            conn.commit()
+
+    def get_miro_cache(self, cache_key: str) -> dict[str, Any] | None:
+        """Miro キャッシュを取得（期限切れは None を返す）。"""
+        now = datetime.now().isoformat()
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                """
+                SELECT cache_key, board_id, payload_json, fetched_at, expires_at
+                FROM miro_board_cache
+                WHERE cache_key = ? AND expires_at > ?
+                """,
+                (cache_key, now),
+            ).fetchone()
+            if row is None:
+                return None
+            return {
+                "cache_key": row["cache_key"],
+                "board_id": row["board_id"],
+                "payload": json.loads(row["payload_json"]),
+                "fetched_at": row["fetched_at"],
+                "expires_at": row["expires_at"],
+            }
+
+    def put_miro_cache(
+        self,
+        cache_key: str,
+        board_id: str,
+        payload: dict[str, Any],
+        expires_at: str,
+    ) -> None:
+        """Miro キャッシュを upsert する。"""
+        now = datetime.now().isoformat()
+        payload_json = json.dumps(payload, ensure_ascii=False, default=str)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO miro_board_cache (
+                    cache_key, board_id, payload_json, fetched_at, expires_at
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(cache_key) DO UPDATE SET
+                    board_id = excluded.board_id,
+                    payload_json = excluded.payload_json,
+                    fetched_at = excluded.fetched_at,
+                    expires_at = excluded.expires_at
+                """,
+                (cache_key, board_id, payload_json, now, expires_at),
+            )
+            conn.commit()

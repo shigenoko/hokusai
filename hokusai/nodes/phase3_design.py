@@ -95,10 +95,15 @@ def phase3_design_node(state: WorkflowState) -> WorkflowState:
         # [1/3] 直接プロンプトで設計チェックを実行（Notion書き込み遮断）
         print("📋 Phase 3 [1/3] 設計チェック実行中...")
         cross_review_context = format_cross_review_for_prompt(state, source_phase=2)
+
+        from ..utils.design_helpers import format_design_context_section
+        design_context = format_design_context_section(state)
+
         design_prompt = _build_design_check_prompt(
             task_url=state["task_url"],
             research_result=research_result,
             cross_review_context=cross_review_context,
+            design_context=design_context,
         )
         if cross_review_context:
             logger.info(f"直接プロンプトで設計チェックを実行: {state['task_url']} (+Phase 2 クロスレビュー指摘)")
@@ -379,6 +384,7 @@ def _build_design_check_prompt(
     task_url: str,
     research_result: str,
     cross_review_context: str = "",
+    design_context: str = "",
 ) -> str:
     """Phase 3 設計チェック用の直接プロンプトを構築する
 
@@ -402,6 +408,7 @@ def _build_design_check_prompt(
         task_url=task_url,
         research_result=research_result,
         cross_review_section=cross_review_section,
+        design_context=design_context,
     )
 
 
