@@ -15,13 +15,21 @@ Phase 2/3/4 の子ページ自体は既存の Notion MCP 経由（save_to_subpag
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Any
 
 from ...logging_config import get_logger
-from .client import NotionAPIClient
+from .client import NotionAPIClient, NotionAPIError
 
 logger = get_logger("integrations.notion_dashboard.workflows_db")
+
+# Notion API が property_not_found エラーを返す際のメッセージから、対象プロパティ名を
+# 抽出するための正規表現。Notion のメッセージ例:
+#   "<NAME> is not a property that exists. ..."
+#   "Could not find property with name or id: \"<NAME>\". ..."
+_PROPERTY_NAME_PATTERN_QUOTED = re.compile(r'"([^"]+)"')
+_PROPERTY_NAME_PATTERN_PREFIX = re.compile(r"^([^\s]+)\s+is not a property")
 
 
 # ワークフローイベントの種別。同期 dispatcher が発行するイベント名と対応する。
@@ -65,6 +73,12 @@ class WorkflowsDBClient:
         Raises:
             ValueError: workflow_id が含まれない場合
             NotionAPIError / NotionRateLimitError: API 呼び出し失敗
+
+        Note:
+            Notion DB 側に該当プロパティが存在しない場合 (property_not_found) は、
+            該当プロパティを除去して最大 5 回まで再試行する。これにより、
+            Workflows DB スキーマが古い環境（Figma/Miro 系プロパティ未追加など）
+            でも、存在するプロパティのみで同期が進む。
         """
         workflow_id = payload.get("workflow_id")
         if not workflow_id:
@@ -72,15 +86,58 @@ class WorkflowsDBClient:
 
         existing_page_id = self._find_page_id(workflow_id)
         properties = self._build_properties(event_type, payload)
+        return self._submit_with_property_pruning(existing_page_id, properties)
 
-        if existing_page_id is None:
-            # 新規作成: Name / Workflow ID / Started At を最低限必須として埋める
-            return self._api.create_page({
-                "parent": {"database_id": self._database_id},
-                "properties": properties,
-            })
+    def _submit_with_property_pruning(
+        self,
+        existing_page_id: str | None,
+        properties: dict,
+        max_attempts: int = 6,
+    ) -> dict:
+        """create / update を試行し、property_not_found なら原因プロパティを除去して再試行。
 
-        return self._api.update_page(existing_page_id, {"properties": properties})
+        Notion DB スキーマの差異（プロパティが追加されていない環境）を吸収するため、
+        エラーから推定される原因プロパティをペイロードから外して同期を継続させる。
+        無限ループ回避のために最大試行回数を持つ。
+        """
+        attempts = 0
+        current_props = dict(properties)
+        while True:
+            attempts += 1
+            try:
+                if existing_page_id is None:
+                    return self._api.create_page({
+                        "parent": {"database_id": self._database_id},
+                        "properties": current_props,
+                    })
+                return self._api.update_page(
+                    existing_page_id, {"properties": current_props}
+                )
+            except NotionAPIError as exc:
+                if not _is_property_not_found(exc):
+                    raise
+                if attempts >= max_attempts:
+                    logger.warning(
+                        "property_not_found リトライ上限に到達: 残プロパティ数=%d",
+                        len(current_props),
+                    )
+                    raise
+                missing = _extract_missing_property(exc.message, current_props)
+                if missing is None:
+                    # メッセージから推定できなかった場合は安全のため打ち切る
+                    logger.warning(
+                        "property_not_found 検知だが対象プロパティを特定できず: %s",
+                        exc.message[:200],
+                    )
+                    raise
+                logger.info(
+                    "Workflows DB に '%s' プロパティが存在しないため除外して再試行",
+                    missing,
+                )
+                current_props.pop(missing, None)
+                if not current_props:
+                    logger.warning("除外後にプロパティが空になったため処理を中断")
+                    raise
 
     def get_workflow_page_url(self, workflow_id: str) -> str | None:
         """workflow_id に対応する Notion ページ URL を返す。
@@ -234,3 +291,37 @@ def _rich_text(text: str) -> dict:
 
 def _date(iso_string: str) -> dict:
     return {"date": {"start": iso_string}}
+
+
+def _is_property_not_found(exc: NotionAPIError) -> bool:
+    """Notion API エラーが property_not_found 由来か判定する。"""
+    if exc.code == "validation_error" and "property" in exc.message.lower():
+        return True
+    msg = exc.message.lower()
+    return "property" in msg and ("not a property" in msg or "could not find property" in msg)
+
+
+def _extract_missing_property(message: str, current_props: dict) -> str | None:
+    """エラーメッセージから対象プロパティ名を抽出する。
+
+    以下の順で試行する:
+    1. ダブルクォートで囲まれた名前（"Design Status" 等）
+    2. メッセージ先頭の単語が is not a property... と続くパターン
+    3. 現在送ろうとしているプロパティ名のいずれかがメッセージに含まれているか
+    """
+    # 1. クォート抽出
+    m = _PROPERTY_NAME_PATTERN_QUOTED.search(message)
+    if m and m.group(1) in current_props:
+        return m.group(1)
+
+    # 2. 先頭単語パターン
+    m = _PROPERTY_NAME_PATTERN_PREFIX.match(message)
+    if m and m.group(1) in current_props:
+        return m.group(1)
+
+    # 3. 現在送るプロパティのうち、メッセージに含まれるもの
+    for name in current_props:
+        if name in message:
+            return name
+
+    return None

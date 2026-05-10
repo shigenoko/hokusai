@@ -341,6 +341,79 @@ def test_workflows_db_rejects_empty_database_id():
 
 
 # ---------------------------------------------------------------------------
+# property_not_found リトライ（DB スキーマ差異の吸収）
+# ---------------------------------------------------------------------------
+
+
+class _PropertyNotFoundRetryAPI(_RecordingAPI):
+    """update_page / create_page で property_not_found を返してから成功するスタブ。"""
+
+    def __init__(self, *, query_result, missing_props: list[str]):
+        super().__init__(query_result=query_result)
+        self._missing_queue = list(missing_props)
+
+    def update_page(self, page_id: str, payload: dict) -> dict:
+        self.calls.append(("update", {"page_id": page_id, **payload}))
+        if self._missing_queue:
+            from hokusai.integrations.notion_dashboard.client import NotionAPIError
+
+            missing = self._missing_queue.pop(0)
+            raise NotionAPIError(
+                400,
+                f'"{missing}" is not a property that exists.',
+                code="validation_error",
+            )
+        return {"id": page_id}
+
+
+def test_workflows_db_retries_when_property_not_found():
+    """DB スキーマに無いプロパティを除外して再試行する。"""
+    api = _PropertyNotFoundRetryAPI(
+        query_result=[{"id": "page-1"}],
+        missing_props=["Design Status", "Miro URL"],
+    )
+    client = WorkflowsDBClient(api=api, database_id="db1")
+    client.apply_event("phase_changed", {
+        "workflow_id": "wf-1",
+        "task_title": "Test",
+        "status": "running",
+        "current_phase": 5,
+        "design_integration_status": "ok",
+        "miro_url": "https://miro.com/x",
+    })
+    # 3 回目の update_page で成功（property を 2 件除外して再試行）
+    update_calls = [c for c in api.calls if c[0] == "update"]
+    assert len(update_calls) == 3
+    final_props = update_calls[-1][1]["properties"]
+    assert "Design Status" not in final_props
+    assert "Miro URL" not in final_props
+    # 既存プロパティは残っている
+    assert "Status" in final_props
+    assert "Workflow ID" in final_props
+
+
+def test_workflows_db_propagates_other_errors():
+    """property_not_found 以外のエラーは即座に伝播する。"""
+    from hokusai.integrations.notion_dashboard.client import NotionAPIError
+
+    class _UnauthorizedAPI(_RecordingAPI):
+        def update_page(self, page_id: str, payload: dict) -> dict:
+            self.calls.append(("update", {"page_id": page_id, **payload}))
+            raise NotionAPIError(401, "Unauthorized", code="unauthorized")
+
+    api = _UnauthorizedAPI(query_result=[{"id": "page-1"}])
+    client = WorkflowsDBClient(api=api, database_id="db1")
+    with pytest.raises(NotionAPIError) as exc_info:
+        client.apply_event("phase_changed", {
+            "workflow_id": "wf-1",
+            "status": "running",
+        })
+    assert exc_info.value.status == 401
+    update_calls = [c for c in api.calls if c[0] == "update"]
+    assert len(update_calls) == 1, "401 はリトライしないので 1 回のみ"
+
+
+# ---------------------------------------------------------------------------
 # NotionSyncDispatcher
 # ---------------------------------------------------------------------------
 
@@ -802,6 +875,62 @@ def test_build_notion_payload_handles_missing_phase_info():
     p = workflow_module._build_notion_payload({"workflow_id": "wf-2"})
     assert p["workflow_id"] == "wf-2"
     assert p["revision"] == "0"
+
+
+def test_build_notion_payload_excludes_design_when_no_url():
+    """design_integration_status=no_url の state では design 系キーを送らない。
+
+    既存 DB に Design Review Required 等が無い環境で property_not_found を
+    起こさないための安全策。
+    """
+    state = {
+        "workflow_id": "wf-3",
+        "design_integration_status": "no_url",
+        "design_review_required": False,
+    }
+    p = workflow_module._build_notion_payload(state)
+    assert "design_integration_status" not in p
+    assert "design_review_required" not in p
+    assert "miro_url" not in p
+    assert "figma_url" not in p
+
+
+def test_build_notion_payload_excludes_design_when_not_configured():
+    """design_integration_status=not_configured では design 系キーを送らない。"""
+    state = {
+        "workflow_id": "wf-4",
+        "design_integration_status": "not_configured",
+        "design_review_required": False,
+    }
+    p = workflow_module._build_notion_payload(state)
+    for key in ("design_integration_status", "design_review_required", "miro_url", "figma_url"):
+        assert key not in p
+
+
+def test_build_notion_payload_includes_design_when_ok():
+    """design_integration_status=ok では design 系キーを送る。"""
+    state = {
+        "workflow_id": "wf-5",
+        "design_integration_status": "ok",
+        "design_review_required": True,
+        "figma_url": "https://www.figma.com/file/Abc12345DEF/Test",
+    }
+    p = workflow_module._build_notion_payload(state)
+    assert p["design_integration_status"] == "ok"
+    assert p["design_review_required"] is True
+    assert p["figma_url"] == "https://www.figma.com/file/Abc12345DEF/Test"
+
+
+def test_build_notion_payload_includes_design_when_failed():
+    """design_integration_status=failed でも送る（失敗が運用上見える必要がある）。"""
+    state = {
+        "workflow_id": "wf-6",
+        "design_integration_status": "failed",
+        "design_review_required": False,
+        "figma_url": "https://www.figma.com/file/Abc12345DEF/Test",
+    }
+    p = workflow_module._build_notion_payload(state)
+    assert p["design_integration_status"] == "failed"
 
 
 def _make_runner():

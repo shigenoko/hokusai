@@ -1072,11 +1072,19 @@ def _build_notion_payload(state: dict, **overrides: object) -> dict:
         "revision": str(retry_count),
     }
 
-    # Figma / Miro 連携情報。連携が動いている（design_integration_status がある）
-    # 場合のみ payload に含める。連携を使わない実行で常にフィールドを送ると、
-    # 既存 DB に該当プロパティが無い環境では property_not_found で失敗する。
-    if state.get("design_integration_status"):
-        payload["design_integration_status"] = state.get("design_integration_status")
+    # Figma / Miro 連携情報。実際にデザイン情報が取得できた／取得を試みて失敗した
+    # 場合のみ payload に含める。`no_url`（URL なし）や `not_configured`（連携無効）
+    # を含む全実行で常にフィールドを送ると、既存 DB に該当プロパティが無い環境で
+    # property_not_found で失敗するため除外する。
+    integration_status = state.get("design_integration_status")
+    has_design_data = (
+        integration_status not in (None, "no_url", "not_configured")
+        or state.get("miro_url")
+        or state.get("figma_url")
+    )
+    if has_design_data:
+        if integration_status:
+            payload["design_integration_status"] = integration_status
         if state.get("miro_url"):
             payload["miro_url"] = state.get("miro_url")
         if state.get("figma_url"):

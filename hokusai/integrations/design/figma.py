@@ -265,11 +265,15 @@ def _extract_figma_screens(
         if found:
             start = found
 
+    # BFS は deque + popleft で O(n)。list.pop(0) だと各取り出しが O(n) になり、
+    # ノード数が増えると visited 上限以内でも体感遅延が出る。
+    from collections import deque
+
     screens: list[dict[str, Any]] = []
-    stack: list[dict[str, Any]] = [start]
+    queue: deque[dict[str, Any]] = deque([start])
     visited = 0
-    while stack and len(screens) < limit:
-        node = stack.pop(0)
+    while queue and len(screens) < limit:
+        node = queue.popleft()
         visited += 1
         if visited > 2000:
             break
@@ -280,7 +284,7 @@ def _extract_figma_screens(
             screens.append(_screen_from_node(node))
         children = node.get("children")
         if isinstance(children, list):
-            stack.extend(children)
+            queue.extend(children)
     return screens
 
 

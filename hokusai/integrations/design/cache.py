@@ -52,10 +52,11 @@ class DesignCache:
     # ------- Figma -------
 
     def get_figma(self, file_key: str, node_id: str | None) -> dict[str, Any] | None:
+        cache_key = _figma_cache_key(file_key, node_id)
         try:
-            row = self._store.get_figma_cache(_figma_cache_key(file_key, node_id))
+            row = self._store.get_figma_cache(cache_key)
         except Exception as exc:
-            logger.warning("figma cache get failed (key=%s): %s", file_key, exc)
+            logger.warning("figma cache get failed (cache_key=%s): %s", cache_key, exc)
             return None
         return row["payload"] if row else None
 
@@ -66,24 +67,26 @@ class DesignCache:
         payload: dict[str, Any],
         ttl_seconds: int,
     ) -> None:
+        cache_key = _figma_cache_key(file_key, node_id)
         try:
             self._store.put_figma_cache(
-                cache_key=_figma_cache_key(file_key, node_id),
+                cache_key=cache_key,
                 file_key=file_key,
                 node_id=node_id,
                 payload=payload,
                 expires_at=_expires_at(ttl_seconds),
             )
         except Exception as exc:
-            logger.warning("figma cache put failed (key=%s): %s", file_key, exc)
+            logger.warning("figma cache put failed (cache_key=%s): %s", cache_key, exc)
 
     # ------- Miro -------
 
     def get_miro(self, board_id: str) -> dict[str, Any] | None:
+        cache_key = _miro_cache_key(board_id)
         try:
-            row = self._store.get_miro_cache(_miro_cache_key(board_id))
+            row = self._store.get_miro_cache(cache_key)
         except Exception as exc:
-            logger.warning("miro cache get failed (key=%s): %s", board_id, exc)
+            logger.warning("miro cache get failed (cache_key=%s): %s", cache_key, exc)
             return None
         return row["payload"] if row else None
 
@@ -93,12 +96,13 @@ class DesignCache:
         payload: dict[str, Any],
         ttl_seconds: int,
     ) -> None:
+        cache_key = _miro_cache_key(board_id)
         try:
             self._store.put_miro_cache(
-                cache_key=_miro_cache_key(board_id),
+                cache_key=cache_key,
                 board_id=board_id,
                 payload=payload,
                 expires_at=_expires_at(ttl_seconds),
             )
         except Exception as exc:
-            logger.warning("miro cache put failed (key=%s): %s", board_id, exc)
+            logger.warning("miro cache put failed (cache_key=%s): %s", cache_key, exc)

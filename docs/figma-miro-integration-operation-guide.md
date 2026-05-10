@@ -120,10 +120,31 @@ Notion タスク本文に Figma / Miro の URL を貼り付けてください。
 - TTL: 既定 30 分（`cache_ttl_seconds`）
 - 保存先: `~/.hokusai/workflow.db` の `figma_file_cache` / `miro_board_cache`
 - 期限切れは自動的に再取得されます。
-- 強制リフレッシュは MVP では未提供（DB を直接削除するか、TTL を短くしてください）。
+
+### 強制リフレッシュ
+
+#### 推奨: Operations Console 経由
+
+```bash
+# Figma キャッシュをクリア
+curl -X POST http://localhost:8765/api/figma/refresh-cache
+
+# Miro キャッシュをクリア
+curl -X POST http://localhost:8765/api/miro/refresh-cache
+```
+
+レスポンス例:
+```json
+{ "success": true, "source": "figma", "deleted_rows": 12 }
+```
+
+これで `figma_file_cache` / `miro_board_cache` の全行が削除され、次回 fetch で必ず実 API へ問い合わせが行われます。`connection_status` のキャッシュも同時にクリアされます。
+
+#### 手動クリア（緊急時）
+
+API 経由が使えない場合は SQLite を直接操作してください:
 
 ```sql
--- 強制クリア例
 DELETE FROM figma_file_cache;
 DELETE FROM miro_board_cache;
 ```

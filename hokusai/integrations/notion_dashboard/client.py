@@ -32,9 +32,10 @@ NOTION_API_VERSION = "2022-06-28"
 class NotionAPIError(Exception):
     """Notion API エラー（4xx 系のうち再送しても無駄なもの）"""
 
-    def __init__(self, status: int, message: str):
+    def __init__(self, status: int, message: str, code: str = ""):
         self.status = status
         self.message = message
+        self.code = code
         super().__init__(f"Notion API error {status}: {message}")
 
 
@@ -175,7 +176,7 @@ class NotionAPIClient:
 
             # API token を含む可能性のある詳細はログに出さず、status と message のみ
             safe_message = message or code or "(no detail)"
-            raise NotionAPIError(status, safe_message) from None
+            raise NotionAPIError(status, safe_message, code=str(code)) from None
 
     @staticmethod
     def _parse_retry_after(headers: Any) -> float:

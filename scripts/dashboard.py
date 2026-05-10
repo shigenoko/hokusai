@@ -7129,6 +7129,8 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 
         Args:
             source: "figma" または "miro"
+
+        エラーレスポンスは他 API と統一された `{"success": False, "errors": [...]}` 形式。
         """
         try:
             from hokusai.config import get_config
@@ -7137,23 +7139,23 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             cfg = get_config()
             if source == "figma":
                 if not cfg.figma.enabled:
-                    self._send_json_response({
-                        "success": False,
-                        "error": "Figma 連携は無効化されています",
-                    })
+                    self._send_json_response(
+                        {"success": False, "errors": ["Figma 連携は無効化されています"]},
+                        status_code=409,
+                    )
                     return
                 table = "figma_file_cache"
             elif source == "miro":
                 if not cfg.miro.enabled:
-                    self._send_json_response({
-                        "success": False,
-                        "error": "Miro 連携は無効化されています",
-                    })
+                    self._send_json_response(
+                        {"success": False, "errors": ["Miro 連携は無効化されています"]},
+                        status_code=409,
+                    )
                     return
                 table = "miro_board_cache"
             else:
                 self._send_json_response(
-                    {"success": False, "error": f"unknown source: {source}"},
+                    {"success": False, "errors": [f"unknown source: {source}"]},
                     status_code=400,
                 )
                 return
@@ -7176,7 +7178,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             })
         except Exception as e:
             self._send_json_response(
-                {"success": False, "error": f"{type(e).__name__}: {e}"},
+                {"success": False, "errors": [f"{type(e).__name__}: {e}"]},
                 status_code=500,
             )
 
