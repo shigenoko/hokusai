@@ -28,12 +28,7 @@ from ...logging_config import get_logger
 from .cache import DesignCache
 from .figma import FigmaAPIError, FigmaClient, FigmaRateLimitError
 from .miro import MiroAPIError, MiroClient, MiroRateLimitError
-from .url_parser import (
-    ParsedFigmaUrl,
-    ParsedMiroUrl,
-    parse_figma_url,
-    parse_miro_url,
-)
+from .url_parser import parse_figma_url, parse_miro_url
 
 logger = get_logger("integrations.design.context")
 

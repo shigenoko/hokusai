@@ -18,12 +18,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..integrations.design import (
-    DesignContextResolver,
-    DesignResolution,
-    extract_figma_urls,
-    extract_miro_urls,
-)
+from ..integrations.design import DesignContextResolver, DesignResolution
 from ..integrations.design.url_parser import parse_figma_url, parse_miro_url
 from ..logging_config import get_logger
 
