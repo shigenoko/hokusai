@@ -60,6 +60,25 @@ def phase2_research_node(state: WorkflowState) -> WorkflowState:
             format_design_context_section,
         )
         ensure_design_context(state)
+
+        # on_failure: block で design 取得が失敗した場合、ensure_design_context()
+        # は state["waiting_for_human"]=True と human_input_request をセットする。
+        # その状態で Phase 2 を続行すると LLM 呼び出し / Notion 書き込みが無駄に
+        # 走り、後段の waiting_for_human 判定でも理由が不正確になるため、ここで
+        # 早期 return する。reason は design 専用 audit log に記録。
+        if state.get("waiting_for_human"):
+            reason = state.get("human_input_request") or "design block"
+            state = add_audit_log(
+                state,
+                2,
+                "design_context_block",
+                "warning",
+                details={"reason": reason},
+            )
+            logger.warning("Phase 2 を design 取得失敗で停止: %s", reason)
+            print("⏸️  Phase 2 停止: デザイン情報取得失敗で human-in-the-loop へ")
+            return state
+
         design_section = format_design_context_section(state)
 
         # [1/3] 直接プロンプトで調査を実行（Notion書き込み遮断）

@@ -7145,6 +7145,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             from hokusai.persistence.sqlite_store import SQLiteStore
 
             cfg = get_config()
+            store = SQLiteStore(cfg.database_path)
             if source == "figma":
                 if not cfg.figma.enabled:
                     self._send_json_response(
@@ -7152,7 +7153,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                         status_code=409,
                     )
                     return
-                table = "figma_file_cache"
+                deleted = store.clear_figma_cache()
             elif source == "miro":
                 if not cfg.miro.enabled:
                     self._send_json_response(
@@ -7160,19 +7161,13 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                         status_code=409,
                     )
                     return
-                table = "miro_board_cache"
+                deleted = store.clear_miro_cache()
             else:
                 self._send_json_response(
                     {"success": False, "errors": [f"unknown source: {source}"]},
                     status_code=400,
                 )
                 return
-
-            store = SQLiteStore(cfg.database_path)
-            with store._connect() as conn:
-                cursor = conn.execute(f"DELETE FROM {table}")
-                deleted = cursor.rowcount
-                conn.commit()
 
             # connection_status のキャッシュもクリア（次回 GET で再評価される）
             from hokusai.integrations import connection_status as _cs

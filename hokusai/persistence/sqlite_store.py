@@ -900,3 +900,24 @@ class SQLiteStore:
                 (cache_key, board_id, payload_json, now, expires_at),
             )
             conn.commit()
+
+    def clear_figma_cache(self) -> int:
+        """Figma キャッシュテーブルを全削除し、削除行数を返す。
+
+        Operations Console の「キャッシュ再取得」経路から呼ばれる公開 API。
+        外部から `_connect()` 等の private API に依存せずキャッシュをクリア
+        できるようにするため SQLiteStore 側に集約する。
+        """
+        with self._connect() as conn:
+            cursor = conn.execute("DELETE FROM figma_file_cache")
+            deleted = cursor.rowcount
+            conn.commit()
+            return deleted
+
+    def clear_miro_cache(self) -> int:
+        """Miro キャッシュテーブルを全削除し、削除行数を返す。"""
+        with self._connect() as conn:
+            cursor = conn.execute("DELETE FROM miro_board_cache")
+            deleted = cursor.rowcount
+            conn.commit()
+            return deleted

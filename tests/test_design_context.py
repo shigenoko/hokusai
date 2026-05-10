@@ -460,3 +460,83 @@ class TestFetchNotionTaskBody:
         assert called["_request"] == 0  # private メソッドは呼ばれない
         assert result is not None
         assert "https://www.figma.com/x" in result
+
+
+class TestSQLiteStoreCacheClearAPI:
+    """SQLiteStore に追加した公開キャッシュクリア API の動作確認。"""
+
+    def test_clear_figma_cache_deletes_all_rows(self, tmp_path):
+        from datetime import datetime, timedelta
+
+        from hokusai.persistence.sqlite_store import SQLiteStore
+
+        s = SQLiteStore(tmp_path / "t.db")
+        expires = (datetime.now() + timedelta(seconds=60)).isoformat()
+        s.put_figma_cache("k1", "fk1", None, {"x": 1}, expires)
+        s.put_figma_cache("k2", "fk2", None, {"x": 2}, expires)
+
+        assert s.clear_figma_cache() == 2
+        # 2 回目は 0
+        assert s.clear_figma_cache() == 0
+        # 取得確認
+        assert s.get_figma_cache("k1") is None
+
+    def test_clear_miro_cache_deletes_all_rows(self, tmp_path):
+        from datetime import datetime, timedelta
+
+        from hokusai.persistence.sqlite_store import SQLiteStore
+
+        s = SQLiteStore(tmp_path / "t.db")
+        expires = (datetime.now() + timedelta(seconds=60)).isoformat()
+        s.put_miro_cache("m1", "bid1", {"y": 1}, expires)
+
+        assert s.clear_miro_cache() == 1
+        assert s.clear_miro_cache() == 0
+
+
+class TestPhase2DesignBlock:
+    """Phase 2 で design 取得失敗 (on_failure: block) 時に早期 return する動作。"""
+
+    def test_phase2_returns_early_when_design_block(self, monkeypatch):
+        """waiting_for_human=True 状態で Phase 2 が LLM 呼び出し前に return する。"""
+        from unittest.mock import patch
+
+        from hokusai.nodes.phase2_research import phase2_research_node
+
+        # ensure_design_context が waiting_for_human をセットするモック
+        def fake_ensure(state, **kwargs):
+            state["waiting_for_human"] = True
+            state["human_input_request"] = "Figma 取得失敗で停止"
+            state["design_integration_status"] = "failed"
+
+        # Claude / config はモック化
+        with patch(
+            "hokusai.utils.design_helpers.ensure_design_context",
+            side_effect=fake_ensure,
+        ), patch(
+            "hokusai.nodes.phase2_research.ClaudeCodeClient"
+        ) as claude_cls:
+            state = {
+                "task_url": "https://example.com/task",
+                "task_title": "test",
+                "phases": {2: {"status": "pending", "started_at": None,
+                              "completed_at": None, "error_message": None,
+                              "retry_count": 0}},
+                "current_phase": 2,
+                "audit_log": [],
+                "updated_at": "2026-05-10T00:00:00",
+                "waiting_for_human": False,
+                "human_input_request": None,
+            }
+            result = phase2_research_node(state)
+
+            # Claude は呼ばれない（早期 return）
+            claude_cls.return_value.execute_prompt.assert_not_called()
+
+        # waiting_for_human が立ったまま return された
+        assert result["waiting_for_human"] is True
+        # design 専用の audit log が積まれている
+        assert any(
+            entry.get("action") == "design_context_block"
+            for entry in result.get("audit_log", [])
+        )
