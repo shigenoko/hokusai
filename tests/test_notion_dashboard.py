@@ -192,6 +192,40 @@ def test_notion_api_client_create_page_success(monkeypatch):
     assert result["id"] == "page-123"
 
 
+def test_notion_api_client_retrieve_page_uses_correct_path(monkeypatch):
+    """retrieve_page() が GET /v1/pages/{page_id} を呼ぶ。"""
+    captured = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["method"] = req.get_method()
+        captured["url"] = req.full_url
+        return _FakeResponse({"id": "page-1", "properties": {"Name": {"title": []}}})
+
+    monkeypatch.setattr(client_module.urllib.request, "urlopen", fake_urlopen)
+    api = NotionAPIClient(api_token="secret", requests_per_second=100)
+    result = api.retrieve_page("page-1")
+    assert result["id"] == "page-1"
+    assert captured["method"] == "GET"
+    assert captured["url"].endswith("/pages/page-1")
+
+
+def test_notion_api_client_list_block_children_uses_correct_path(monkeypatch):
+    """list_block_children() が GET /v1/blocks/{id}/children を呼ぶ。"""
+    captured = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["method"] = req.get_method()
+        captured["url"] = req.full_url
+        return _FakeResponse({"results": []})
+
+    monkeypatch.setattr(client_module.urllib.request, "urlopen", fake_urlopen)
+    api = NotionAPIClient(api_token="secret", requests_per_second=100)
+    result = api.list_block_children("page-1")
+    assert "results" in result
+    assert captured["method"] == "GET"
+    assert captured["url"].endswith("/blocks/page-1/children")
+
+
 def test_notion_api_client_4xx_error_raises_immediately(monkeypatch):
     def fail(req, timeout=None):
         raise _make_http_error(401, "unauthorized")

@@ -353,3 +353,110 @@ class TestResolver:
         res = r.resolve(figma_url="https://www.figma.com/file/Abc12345DEF/D")
         assert res.figma.status == "skipped"
         assert res.block is False
+
+
+class TestFetchNotionTaskBody:
+    """_fetch_notion_task_body() の動作確認。
+
+    Notion Dashboard 設定の retry / rate_limit が NotionAPIClient に渡ること、
+    private `_request()` ではなく公開メソッド `retrieve_page` /
+    `list_block_children` 経由で呼ばれることを確認する。
+    """
+
+    def test_passes_retry_and_rate_limit_config(self, monkeypatch):
+        from unittest.mock import patch
+
+        from hokusai.config import set_config
+        from hokusai.config.models import (
+            NotionDashboardConfig,
+            NotionSyncRateLimitConfig,
+            NotionSyncRetryConfig,
+            WorkflowConfig,
+        )
+        from hokusai.utils.design_helpers import _fetch_notion_task_body
+
+        # 明示的な設定値を持つ config を注入
+        cfg = WorkflowConfig(
+            notion_dashboard=NotionDashboardConfig(
+                enabled=True,
+                api_token_env="_TEST_NOTION_TOKEN",
+                retry=NotionSyncRetryConfig(max_attempts=7, backoff_seconds=2.5),
+                rate_limit=NotionSyncRateLimitConfig(requests_per_second=3.0),
+            ),
+        )
+        set_config(cfg)
+        monkeypatch.setenv("_TEST_NOTION_TOKEN", "ntn_test")
+
+        captured_init = {}
+
+        class _FakeClient:
+            def __init__(self, token, *, max_attempts, backoff_seconds, requests_per_second):
+                captured_init["token"] = token
+                captured_init["max_attempts"] = max_attempts
+                captured_init["backoff_seconds"] = backoff_seconds
+                captured_init["requests_per_second"] = requests_per_second
+
+            def retrieve_page(self, page_id):
+                return {"properties": {}}
+
+            def list_block_children(self, block_id):
+                return {"results": []}
+
+        with patch(
+            "hokusai.integrations.notion_dashboard.client.NotionAPIClient", _FakeClient
+        ):
+            _fetch_notion_task_body(
+                "https://www.notion.so/Title-3599a8b82c7181d29a2ee1bbd99ae7bc"
+            )
+
+        assert captured_init["token"] == "ntn_test"
+        assert captured_init["max_attempts"] == 7
+        assert captured_init["backoff_seconds"] == 2.5
+        assert captured_init["requests_per_second"] == 3.0
+
+    def test_uses_public_methods_not_private_request(self, monkeypatch):
+        """retrieve_page / list_block_children を呼び、_request は使わない。"""
+        from unittest.mock import patch
+
+        from hokusai.config import set_config
+        from hokusai.config.models import NotionDashboardConfig, WorkflowConfig
+        from hokusai.utils.design_helpers import _fetch_notion_task_body
+
+        cfg = WorkflowConfig(
+            notion_dashboard=NotionDashboardConfig(
+                enabled=True, api_token_env="_TEST_NOTION_TOKEN_2"
+            ),
+        )
+        set_config(cfg)
+        monkeypatch.setenv("_TEST_NOTION_TOKEN_2", "ntn_test")
+
+        called = {"retrieve_page": 0, "list_block_children": 0, "_request": 0}
+
+        class _FakeClient:
+            def __init__(self, token, **kwargs):
+                pass
+
+            def retrieve_page(self, page_id):
+                called["retrieve_page"] += 1
+                return {"properties": {"Figma URL": {"type": "url", "url": "https://www.figma.com/x"}}}
+
+            def list_block_children(self, block_id):
+                called["list_block_children"] += 1
+                return {"results": []}
+
+            def _request(self, *args, **kwargs):
+                called["_request"] += 1
+                return {}
+
+        with patch(
+            "hokusai.integrations.notion_dashboard.client.NotionAPIClient", _FakeClient
+        ):
+            result = _fetch_notion_task_body(
+                "https://www.notion.so/Title-3599a8b82c7181d29a2ee1bbd99ae7bc"
+            )
+
+        assert called["retrieve_page"] == 1
+        assert called["list_block_children"] == 1
+        assert called["_request"] == 0  # private メソッドは呼ばれない
+        assert result is not None
+        assert "https://www.figma.com/x" in result

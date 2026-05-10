@@ -135,13 +135,22 @@ def _fetch_notion_task_body(task_url: str | None) -> str | None:
 
         from ..integrations.notion_dashboard.client import NotionAPIClient
 
-        api = NotionAPIClient(api_token)
+        # Notion Dashboard 設定の retry / rate_limit を尊重する。
+        # dispatcher と同じ設定を共有することで、Notion 側のスロットリングや
+        # 環境差を一箇所で吸収できる。timeout は NotionAPIClient のデフォルト
+        # （10.0 秒）を使用。
+        api = NotionAPIClient(
+            api_token,
+            max_attempts=nd.retry.max_attempts,
+            backoff_seconds=nd.retry.backoff_seconds,
+            requests_per_second=nd.rate_limit.requests_per_second,
+        )
 
         parts: list[str] = []
 
         # 1. ページ properties（DB カスタムプロパティに URL が入っているケース）
         try:
-            page = api._request("GET", f"/pages/{page_id}")
+            page = api.retrieve_page(page_id)
             properties = page.get("properties") if isinstance(page, dict) else None
             if isinstance(properties, dict):
                 props_text = _properties_to_text(properties)
@@ -153,7 +162,7 @@ def _fetch_notion_task_body(task_url: str | None) -> str | None:
         # 2. 子ブロック（本文に URL が貼られているケース）
         # 1 階層のみ（必要に応じて再帰取得は将来拡張）
         try:
-            result = api._request("GET", f"/blocks/{page_id}/children")
+            result = api.list_block_children(page_id)
             blocks = result.get("results") if isinstance(result, dict) else None
             if isinstance(blocks, list):
                 blocks_text = _blocks_to_text(blocks)

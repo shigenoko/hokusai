@@ -89,6 +89,17 @@ class NotionAPIClient:
     def retrieve_database(self, database_id: str) -> dict:
         return self._request("GET", f"/databases/{database_id}")
 
+    def retrieve_page(self, page_id: str) -> dict:
+        """Notion ページのプロパティ等を取得する（GET /v1/pages/{page_id}）。"""
+        return self._request("GET", f"/pages/{page_id}")
+
+    def list_block_children(self, block_id: str) -> dict:
+        """指定ブロック直下の子ブロック一覧を取得する（GET /v1/blocks/{id}/children）。
+
+        ページ ID も block_id として使える（Notion API の慣習）。
+        """
+        return self._request("GET", f"/blocks/{block_id}/children")
+
     def append_block_children(self, block_id: str, children: list[dict]) -> dict:
         return self._request(
             "PATCH", f"/blocks/{block_id}/children", body={"children": children}
