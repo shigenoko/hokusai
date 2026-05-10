@@ -494,6 +494,121 @@ class TestSQLiteStoreCacheClearAPI:
         assert s.clear_miro_cache() == 0
 
 
+class TestEnsureDesignContextRetry:
+    """ensure_design_context() の早期スキップ / 再試行ロジック。
+
+    failed / no_url は人間が URL を追加したり token を直して
+    `hokusai continue` する経路で復帰可能にする必要がある。
+    """
+
+    def _make_resolver_mock(self, status: str = "ok"):
+        from unittest.mock import MagicMock
+
+        from hokusai.integrations.design import DesignContextResolver
+        from hokusai.integrations.design.context import (
+            DesignResolution,
+            ResolutionStatus,
+        )
+
+        m = MagicMock(spec=DesignContextResolver)
+        m.resolve.return_value = DesignResolution(
+            figma=ResolutionStatus(
+                source="figma", status=status, url=None, context=None
+            ),
+            miro=ResolutionStatus(
+                source="miro", status="not_configured", url=None, context=None
+            ),
+            integration_status=status,
+            sync_errors=[],
+            block=False,
+        )
+        return m
+
+    def test_skips_when_status_is_ok(self):
+        from hokusai.utils.design_helpers import ensure_design_context
+
+        resolver = self._make_resolver_mock("ok")
+        state = {"task_url": "u", "design_integration_status": "ok"}
+        ensure_design_context(state, resolver=resolver, auto_fetch_task_body=False)
+        assert resolver.resolve.call_count == 0
+
+    def test_skips_when_status_is_partial(self):
+        from hokusai.utils.design_helpers import ensure_design_context
+
+        resolver = self._make_resolver_mock("partial")
+        state = {"task_url": "u", "design_integration_status": "partial"}
+        ensure_design_context(state, resolver=resolver, auto_fetch_task_body=False)
+        assert resolver.resolve.call_count == 0
+
+    def test_skips_when_status_is_skipped(self):
+        from hokusai.utils.design_helpers import ensure_design_context
+
+        resolver = self._make_resolver_mock("skipped")
+        state = {"task_url": "u", "design_integration_status": "skipped"}
+        ensure_design_context(state, resolver=resolver, auto_fetch_task_body=False)
+        assert resolver.resolve.call_count == 0
+
+    def test_skips_when_status_is_not_configured(self):
+        from hokusai.utils.design_helpers import ensure_design_context
+
+        resolver = self._make_resolver_mock("not_configured")
+        state = {"task_url": "u", "design_integration_status": "not_configured"}
+        ensure_design_context(state, resolver=resolver, auto_fetch_task_body=False)
+        assert resolver.resolve.call_count == 0
+
+    def test_retries_when_status_is_failed(self):
+        """failed → 再 resolve（人間がトークンを直して continue するケース）。"""
+        from hokusai.utils.design_helpers import ensure_design_context
+
+        resolver = self._make_resolver_mock("ok")
+        state = {
+            "task_url": "u",
+            "design_integration_status": "failed",
+            "design_sync_errors": [{"source": "figma", "error": "old"}],
+            "design_per_source_status": {"figma": {"status": "failed", "error": "x"}},
+        }
+        ensure_design_context(state, resolver=resolver, auto_fetch_task_body=False)
+        assert resolver.resolve.call_count == 1
+        # 前回の sync_errors / per_source_status は再 resolve 前にクリアされる
+        # （クリア後に新しい結果で上書きされるので、最終的には resolve の戻り値どおり）
+
+    def test_retries_when_status_is_no_url(self):
+        """no_url → 再 resolve（人間が URL を追加したケース）。"""
+        from hokusai.utils.design_helpers import ensure_design_context
+
+        resolver = self._make_resolver_mock("ok")
+        state = {"task_url": "u", "design_integration_status": "no_url"}
+        ensure_design_context(state, resolver=resolver, auto_fetch_task_body=False)
+        assert resolver.resolve.call_count == 1
+
+    def test_force_overrides_terminal_status(self):
+        """force=True なら ok / partial / skipped でも再 resolve を強制。"""
+        from hokusai.utils.design_helpers import ensure_design_context
+
+        resolver = self._make_resolver_mock("ok")
+        state = {"task_url": "u", "design_integration_status": "ok"}
+        ensure_design_context(
+            state, resolver=resolver, auto_fetch_task_body=False, force=True
+        )
+        assert resolver.resolve.call_count == 1
+
+    def test_retry_clears_previous_errors(self):
+        """failed からの再試行時に前回の sync_errors / per_source_status をクリアする。"""
+        from hokusai.utils.design_helpers import ensure_design_context
+
+        resolver = self._make_resolver_mock("ok")
+        state = {
+            "task_url": "u",
+            "design_integration_status": "failed",
+            "design_sync_errors": [{"source": "figma", "error": "old error"}],
+            "design_per_source_status": {"figma": {"status": "failed", "error": "x"}},
+        }
+        ensure_design_context(state, resolver=resolver, auto_fetch_task_body=False)
+        # 古い error は残らない（resolve 結果で上書き、または空のまま）
+        new_errors = state.get("design_sync_errors") or []
+        assert all(e.get("error") != "old error" for e in new_errors)
+
+
 class TestPhase2DesignBlock:
     """Phase 2 で design 取得失敗 (on_failure: block) 時に早期 return する動作。"""
 

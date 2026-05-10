@@ -30,6 +30,16 @@ logger = get_logger("utils.design_helpers")
 # 例: https://www.notion.so/Title-3599a8b82c7181d29a2ee1bbd99ae7bc → 3599a8...
 _NOTION_PAGE_ID_RE = re.compile(r"([0-9a-fA-F]{32})(?:[?#]|$)")
 
+# resolve をスキップする「終了状態」のステータス。
+# failed / no_url は人間が URL を追加したり token を直して `hokusai continue`
+# する経路で復帰可能としたいので、ここには含めない（再試行する）。
+_TERMINAL_INTEGRATION_STATUSES = frozenset({
+    "ok",
+    "partial",
+    "skipped",
+    "not_configured",
+})
+
 
 def ensure_design_context(
     state: dict,
@@ -37,22 +47,38 @@ def ensure_design_context(
     text_sources: list[str | None] | None = None,
     resolver: DesignContextResolver | None = None,
     auto_fetch_task_body: bool = True,
+    force: bool = False,
 ) -> dict:
     """state に miro_context / figma_context が無ければ resolve して埋める。
 
-    既に design_integration_status が set されていれば再 resolve しない。
-    text_sources は呼び出し側が任意のテキストを渡せる（例: タスク本文）。
+    再 resolve のスキップ条件:
+    - `design_integration_status` が `ok` / `partial` / `skipped` /
+      `not_configured` の場合はスキップ（取得が完了している、または
+      意図的に有効化されていない状態）。
+    - `failed` / `no_url` は **再試行する**。これにより:
+      - `failed`（token / 権限 / 一時的な API 障害）→ 直してから
+        `hokusai continue` で復帰可能。
+      - `no_url` → 後から人間が Notion タスクに URL を追加した場合の
+        反映が可能。
+    - `force=True` を渡すと、上記すべてに優先して再 resolve する。
 
+    text_sources は呼び出し側が任意のテキストを渡せる（例: タスク本文）。
     auto_fetch_task_body=True（既定）の場合、Notion Dashboard の API トークン
     が設定されていれば task_url から本文を取得して text_sources に追加する。
-    Notion 連携が未設定な環境では何もせず、URL は state に既にセットされた
-    `figma_url` / `miro_url` か、`text_sources` 引数経由でのみ抽出される。
 
     Returns:
         更新された state（in-place 変更も行うが、呼び出し側の安全のため返す）。
     """
-    if state.get("design_integration_status"):
+    current_status = state.get("design_integration_status")
+    if not force and current_status in _TERMINAL_INTEGRATION_STATUSES:
         return state
+
+    # 再試行に入る前に、前回の sync_errors / per_source_status をクリアする。
+    # 残しておくと get_design_resolution() の fallback で前回の failed が
+    # 残留したまま新しい結果と混在するため。
+    if current_status in ("failed", "no_url"):
+        state["design_sync_errors"] = []
+        state["design_per_source_status"] = {}
 
     sources: list[str | None] = []
     if text_sources:
