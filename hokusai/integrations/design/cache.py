@@ -47,7 +47,23 @@ class DesignCache:
     """
 
     def __init__(self, store: SQLiteStore | None = None):
-        self._store = store or SQLiteStore()
+        # store 未指定時は WorkflowConfig.database_path を使って SQLiteStore を
+        # 生成する。SQLiteStore() の素のデフォルト（~/.hokusai/workflow.db）に
+        # 落とすと、database_path をカスタムした環境で design キャッシュだけ
+        # 別 DB に書かれてしまい、ダッシュボード経由の clear_*_cache() が
+        # 効かなくなる問題を回避する。
+        if store is None:
+            try:
+                from ...config import get_config
+
+                cfg = get_config()
+                store = SQLiteStore(cfg.database_path)
+            except Exception as exc:  # config 読み込み失敗時はデフォルトで継続
+                logger.warning(
+                    "design cache: config 取得失敗のためデフォルト DB を使用: %s", exc
+                )
+                store = SQLiteStore()
+        self._store = store
 
     # ------- Figma -------
 

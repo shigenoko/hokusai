@@ -609,6 +609,57 @@ class TestEnsureDesignContextRetry:
         assert all(e.get("error") != "old error" for e in new_errors)
 
 
+class TestDatabasePathConsistency:
+    """DesignCache / DesignContextResolver が WorkflowConfig.database_path を尊重する。
+
+    custom database_path を設定した環境で design キャッシュだけ別 DB に書かれて
+    しまうと、ダッシュボード経由の clear_*_cache が効かなくなる問題を防ぐ。
+    """
+
+    def test_design_cache_uses_config_database_path(self, tmp_path):
+        from hokusai.config import reset_config, set_config
+        from hokusai.config.models import WorkflowConfig
+        from hokusai.integrations.design import DesignCache
+
+        custom_db = tmp_path / "custom.db"
+        cfg = WorkflowConfig(
+            data_dir=tmp_path,
+            database_path=custom_db,
+            checkpoint_db_path=tmp_path / "cp.db",
+        )
+        set_config(cfg)
+        try:
+            # store 未指定で初期化 → config の database_path が使われる
+            cache = DesignCache()
+            assert str(cache._store.db_path) == str(custom_db)
+        finally:
+            reset_config()
+
+    def test_resolver_get_cache_uses_config_database_path(self, tmp_path):
+        from hokusai.config import reset_config
+        from hokusai.config.models import (
+            FigmaIntegrationConfig,
+            MiroIntegrationConfig,
+            WorkflowConfig,
+        )
+        from hokusai.integrations.design.context import DesignContextResolver
+
+        custom_db = tmp_path / "resolver.db"
+        cfg = WorkflowConfig(
+            data_dir=tmp_path,
+            database_path=custom_db,
+            checkpoint_db_path=tmp_path / "cp.db",
+            figma=FigmaIntegrationConfig(enabled=True),
+            miro=MiroIntegrationConfig(enabled=False),
+        )
+        try:
+            resolver = DesignContextResolver(config=cfg)
+            cache = resolver._get_cache()
+            assert str(cache._store.db_path) == str(custom_db)
+        finally:
+            reset_config()
+
+
 class TestPhase2DesignBlock:
     """Phase 2 で design 取得失敗 (on_failure: block) 時に早期 return する動作。"""
 

@@ -226,7 +226,14 @@ class DesignContextResolver:
 
     def _get_cache(self) -> DesignCache:
         if self._cache is None:
-            self._cache = DesignCache()
+            # resolver の config がある場合は、その database_path を使って
+            # SQLiteStore を生成する。これにより WorkflowConfig.database_path を
+            # カスタムした環境でも、design キャッシュが他の永続化と同じ DB に
+            # 書かれる（ダッシュボードの clear_*_cache が確実に効く）。
+            from ...persistence.sqlite_store import SQLiteStore
+
+            cfg = self._config or self._load_config()
+            self._cache = DesignCache(SQLiteStore(cfg.database_path))
         return self._cache
 
     def _resolve_figma(

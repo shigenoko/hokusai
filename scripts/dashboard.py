@@ -7142,10 +7142,13 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         """
         try:
             from hokusai.config import get_config
-            from hokusai.persistence.sqlite_store import SQLiteStore
 
+            # ファイル内の他ハンドラと同じ store を使う（_get_store() は DB_PATH
+            # ベースのシングルトン）。cfg.database_path を直接開くと、ダッシュ
+            # ボードの他経路と DB が分離してキャッシュクリアが効かない可能性が
+            # あるため、ここでも _get_store() に統一する。
             cfg = get_config()
-            store = SQLiteStore(cfg.database_path)
+            store = _get_store()
             if source == "figma":
                 if not cfg.figma.enabled:
                     self._send_json_response(
