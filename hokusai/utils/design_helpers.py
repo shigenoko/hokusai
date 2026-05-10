@@ -83,12 +83,20 @@ def ensure_design_context(
         )
     except Exception as exc:
         logger.warning("design context resolve failed: %s", exc)
+        error_text = f"{type(exc).__name__}: {exc}"
         state["design_integration_status"] = "failed"
         state["design_sync_errors"] = state.get("design_sync_errors") or []
         state["design_sync_errors"].append({
             "source": "resolver",
-            "error": f"{type(exc).__name__}: {exc}",
+            "error": error_text,
         })
+        # resolver 自体の例外は per-source の取得を一切実施できなかったことを意味する。
+        # 後段の get_design_resolution() / render_markdown() が「figma/miro どちらも
+        # 失敗」として扱えるよう、両 source に failed の per-source status を記録する。
+        state["design_per_source_status"] = {
+            "figma": {"status": "failed", "error": error_text},
+            "miro": {"status": "failed", "error": error_text},
+        }
         return state
 
     _apply_resolution(state, resolution)

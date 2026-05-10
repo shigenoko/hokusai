@@ -256,6 +256,90 @@ class TestResolver:
         assert "Figma" in md
         assert "Miro" in md
 
+    def test_node_id_passed_as_colon_format_to_api(self, cache, monkeypatch):
+        """URL の hyphen 形式 node-id が API 呼び出し時に colon 形式に変換されている。
+
+        Figma REST API は colon 区切りを要求するため、URL → API 経路で
+        全箇所同じ ID 形式に揃っていることを保証する。
+        """
+        from unittest.mock import MagicMock
+
+        from hokusai.integrations.design import FigmaClient, MiroClient
+
+        monkeypatch.setenv("_F_TEST", "figd_x")
+        fc = MagicMock(spec=FigmaClient)
+        fc.get_file_nodes.return_value = {
+            "name": "D",
+            "lastModified": "t",
+            "nodes": {
+                "12:34": {
+                    "document": {"id": "12:34", "type": "FRAME", "name": "L", "children": []}
+                }
+            },
+        }
+        fc.get_comments.return_value = []
+        fc.get_image_urls.return_value = {"12:34": "https://example.com/img.png"}
+        mc = MagicMock(spec=MiroClient)
+
+        cfg = WorkflowConfig(
+            figma=FigmaIntegrationConfig(enabled=True, api_token_env="_F_TEST"),
+            miro=MiroIntegrationConfig(enabled=False),
+        )
+        r = DesignContextResolver(config=cfg, cache=cache, figma_client=fc, miro_client=mc)
+        # URL は hyphen 形式
+        r.resolve(figma_url="https://www.figma.com/design/Abc12345DEF/X?node-id=12-34")
+
+        # get_file_nodes には colon 形式で渡されている
+        fc.get_file_nodes.assert_called_once()
+        node_ids_arg = fc.get_file_nodes.call_args[0][1]
+        assert node_ids_arg == ["12:34"]
+
+        # 画像 export も colon 形式
+        fc.get_image_urls.assert_called_once()
+        img_node_ids = fc.get_image_urls.call_args[0][1]
+        assert img_node_ids == ["12:34"]
+
+    def test_resolver_exception_records_per_source_failure(self, cache, monkeypatch):
+        """resolver 自体の例外時、両 source に failed の per-source status が記録される。
+
+        ensure_design_context() の except 経路でも get_design_resolution() が
+        各 source を failed として復元できることを確認する。
+        """
+        from hokusai.utils.design_helpers import (
+            ensure_design_context,
+            format_design_context_section,
+            get_design_resolution,
+        )
+
+        class _BrokenResolver:
+            def resolve(self, **kwargs):
+                raise RuntimeError("resolver 内部エラー")
+
+        state = {
+            "task_url": "https://example.com",
+            "task_title": "test",
+            "figma_url": "https://www.figma.com/file/Abc12345DEF/X",
+            "miro_url": "https://miro.com/app/board/uXjV12345=/x",
+            "design_integration_status": None,
+            "design_sync_errors": [],
+        }
+        ensure_design_context(state, resolver=_BrokenResolver(), auto_fetch_task_body=False)
+
+        assert state["design_integration_status"] == "failed"
+        per_source = state.get("design_per_source_status") or {}
+        assert per_source.get("figma", {}).get("status") == "failed"
+        assert per_source.get("miro", {}).get("status") == "failed"
+
+        # 復元結果も両方 failed
+        res = get_design_resolution(state)
+        assert res is not None
+        assert res.figma.status == "failed"
+        assert res.miro.status == "failed"
+
+        # Markdown に両方の取得エラーが出る
+        md = format_design_context_section(state)
+        assert md.count("取得エラー") == 2
+
     def test_skip_on_failure(self, cache, figma_mock, miro_mock, monkeypatch):
         monkeypatch.delenv("_F_TEST", raising=False)
         cfg = WorkflowConfig(

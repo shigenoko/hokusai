@@ -15,8 +15,27 @@ class TestFigmaUrlParser:
         u = "https://www.figma.com/file/AbCdEf123456/My-Design?node-id=12-34"
         r = parse_figma_url(u)
         assert r.file_key == "AbCdEf123456"
-        assert r.node_id == "12-34"
+        # Figma URL は hyphen 区切り（"12-34"）だが、REST API 用に
+        # colon 区切り（"12:34"）に正規化される。
+        assert r.node_id == "12:34"
         assert r.title == "My-Design"
+
+    def test_node_id_normalized_to_colon_format(self):
+        """URL の hyphen 形式 node-id が colon 形式に正規化される。
+
+        Figma REST API（/files/{key}/nodes, /images/{key}）は colon 区切り
+        を要求するので、parser 段階で統一しておく。
+        """
+        cases = [
+            ("https://www.figma.com/design/AbCdEf123456/X?node-id=0-1", "0:1"),
+            ("https://www.figma.com/design/AbCdEf123456/X?node-id=12-34", "12:34"),
+            ("https://www.figma.com/design/AbCdEf123456/X?node-id=123-456", "123:456"),
+            # 既に colon 形式の場合はそのまま（hyphen 置換しても結果同じ）
+            ("https://www.figma.com/design/AbCdEf123456/X?node-id=12:34", "12:34"),
+        ]
+        for url, expected in cases:
+            r = parse_figma_url(url)
+            assert r.node_id == expected, f"{url} → expected {expected}, got {r.node_id}"
 
     def test_design_url_without_node_id(self):
         u = "https://www.figma.com/design/Xyz789AbCDef/Title"

@@ -33,9 +33,12 @@ class ParsedFigmaUrl:
     """Figma URL から抽出したリソース情報。
 
     file_key: 必須。`/file/<key>/...` などから抽出。
-    node_id:  任意。クエリパラメータ `node-id` から抽出（`:` を含む形）。
-              Figma の API は `0-1` のようなハイフン区切りを返すこと
-              もあるため、抽出時は元の表現を保ったまま渡す。
+    node_id:  任意。クエリパラメータ `node-id` から抽出し、API 用の
+              colon 区切り形式（例: `12:34`）に正規化される。
+              Figma URL では `node-id=12-34` のように hyphen 区切りで
+              表示されるが、Figma REST API（/files/{key}/nodes、
+              /images/{key}）は colon 区切りを要求するため、抽出時に
+              統一しておく。https://developers.figma.com/docs/plugins/api/properties/nodes-id/
     title:    任意。URL から抽出されるスラッグ部分（説明用）。
     """
 
@@ -91,7 +94,9 @@ def parse_figma_url(url: str) -> ParsedFigmaUrl:
         qs = parse_qs(parsed.query)
         raw = qs.get("node-id", [None])[0]
         if raw:
-            node_id = raw
+            # Figma URL は hyphen 区切り（"12-34"）だが、REST API は colon 区切り
+            # （"12:34"）を要求する。抽出時に正規化して全箇所で同じ ID を使う。
+            node_id = raw.replace("-", ":")
 
     return ParsedFigmaUrl(file_key=file_key, node_id=node_id, title=title)
 
