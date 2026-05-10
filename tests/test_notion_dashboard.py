@@ -392,6 +392,57 @@ def test_workflows_db_retries_when_property_not_found():
     assert "Workflow ID" in final_props
 
 
+def test_is_property_not_found_only_matches_missing_phrases():
+    """validation_error 全般ではなく、欠落を示す文言のみで検知する。"""
+    from hokusai.integrations.notion_dashboard.client import NotionAPIError
+    from hokusai.integrations.notion_dashboard.workflows_db import (
+        _is_property_not_found,
+    )
+
+    # 欠落系: True
+    assert _is_property_not_found(
+        NotionAPIError(400, '"Design Status" is not a property that exists.', code="validation_error")
+    )
+    assert _is_property_not_found(
+        NotionAPIError(400, "Could not find property with name or id: 'X'.", code="validation_error")
+    )
+
+    # 型不一致など他の validation_error: False
+    assert not _is_property_not_found(
+        NotionAPIError(400, "body.properties.X.url should be a string", code="validation_error")
+    )
+    assert not _is_property_not_found(
+        NotionAPIError(400, "Invalid property value", code="validation_error")
+    )
+
+
+def test_extract_missing_property_case_insensitive_and_spaces():
+    """大小文字差や空白を含むプロパティ名でも対象を特定できる。"""
+    from hokusai.integrations.notion_dashboard.workflows_db import (
+        _extract_missing_property,
+    )
+
+    current = {"Design Status": {}, "Miro URL": {}, "Name": {}}
+
+    # クォート + 大小文字差
+    assert _extract_missing_property(
+        '"design status" is not a property that exists.', current
+    ) == "Design Status"
+
+    # 空白を含む prefix（最短一致）
+    assert _extract_missing_property(
+        "Design Status is not a property that exists.", current
+    ) == "Design Status"
+
+    # 大小文字差 + メッセージ含有チェック
+    assert _extract_missing_property(
+        "the property miro url cannot be found", current
+    ) == "Miro URL"
+
+    # 含まれない場合は None
+    assert _extract_missing_property("Unrelated error", current) is None
+
+
 def test_workflows_db_propagates_other_errors():
     """property_not_found 以外のエラーは即座に伝播する。"""
     from hokusai.integrations.notion_dashboard.client import NotionAPIError

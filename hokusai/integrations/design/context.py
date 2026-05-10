@@ -256,8 +256,13 @@ class DesignContextResolver:
         cache = self._get_cache()
         cached = cache.get_figma(parsed.file_key, parsed.node_id)
         if cached is not None:
+            # キャッシュ復元時も warnings の有無で partial / ok を判定する。
+            # 初回取得で partial だった context を ok 扱いにすると、
+            # design_review_required や Notion Dashboard の Design Status が
+            # 不正確になるため、保存されている warnings を尊重する。
+            cache_status = "partial" if cached.get("warnings") else "ok"
             return ResolutionStatus(
-                source="figma", status="ok", url=url, context=cached
+                source="figma", status=cache_status, url=url, context=cached
             )
 
         client = self._figma_client_override or FigmaClient(
@@ -335,8 +340,10 @@ class DesignContextResolver:
         cache = self._get_cache()
         cached = cache.get_miro(parsed.board_id)
         if cached is not None:
+            # キャッシュ復元時も warnings の有無で partial / ok を判定する（Figma 側と同様）
+            cache_status = "partial" if cached.get("warnings") else "ok"
             return ResolutionStatus(
-                source="miro", status="ok", url=url, context=cached
+                source="miro", status=cache_status, url=url, context=cached
             )
 
         client = self._miro_client_override or MiroClient(

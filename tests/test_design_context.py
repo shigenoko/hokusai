@@ -120,6 +120,92 @@ class TestResolver:
         assert figma_mock.get_file.call_count == 0
         assert miro_mock.get_board.call_count == 0
 
+    def test_cache_hit_preserves_partial_status(self, cache, monkeypatch):
+        """warnings 入りの context をキャッシュから復元すると status=partial になる。
+
+        初回 partial が二回目以降 ok に格上げされて、Notion Dashboard の
+        Design Status や design_review_required の判定が狂う問題を防ぐ。
+        """
+        monkeypatch.setenv("_F_TEST", "figd_x")
+        monkeypatch.setenv("_M_TEST", "tok")
+
+        # warnings 入り context を直接キャッシュへ書く
+        cache.put_figma(
+            "Abc12345DEF",
+            None,
+            {
+                "source": "figma",
+                "url": "https://www.figma.com/file/Abc12345DEF/D",
+                "title": "D",
+                "summary": "...",
+                "screens": [],
+                "comments": [],
+                "warnings": ["Figma のスクリーン情報を抽出できませんでした"],
+            },
+            ttl_seconds=3600,
+        )
+        cache.put_miro(
+            "uXjV12345=",
+            {
+                "source": "miro",
+                "url": "https://miro.com/app/board/uXjV12345=/x",
+                "title": "B",
+                "summary": "...",
+                "screens": [],
+                "warnings": ["Miro item を取得できませんでした"],
+            },
+            ttl_seconds=3600,
+        )
+
+        # API クライアントは呼ばれないはず
+        from unittest.mock import MagicMock
+
+        from hokusai.integrations.design import FigmaClient, MiroClient
+
+        fc = MagicMock(spec=FigmaClient)
+        mc = MagicMock(spec=MiroClient)
+
+        r = DesignContextResolver(
+            config=_config(), cache=cache, figma_client=fc, miro_client=mc,
+        )
+        res = r.resolve(
+            figma_url="https://www.figma.com/file/Abc12345DEF/D",
+            miro_url="https://miro.com/app/board/uXjV12345=/x",
+        )
+        assert res.figma.status == "partial"
+        assert res.miro.status == "partial"
+
+    def test_cache_hit_preserves_ok_status(self, cache, monkeypatch):
+        """warnings なしの cached context は status=ok のまま復元される。"""
+        monkeypatch.setenv("_F_TEST", "figd_x")
+
+        cache.put_figma(
+            "Abc12345DEF",
+            None,
+            {
+                "source": "figma",
+                "title": "D",
+                "summary": "...",
+                "screens": [{"name": "Login"}],
+                "comments": [],
+                "warnings": [],
+            },
+            ttl_seconds=3600,
+        )
+        from unittest.mock import MagicMock
+
+        from hokusai.integrations.design import FigmaClient, MiroClient
+
+        fc = MagicMock(spec=FigmaClient)
+        mc = MagicMock(spec=MiroClient)
+        cfg = WorkflowConfig(
+            figma=FigmaIntegrationConfig(enabled=True, api_token_env="_F_TEST"),
+            miro=MiroIntegrationConfig(enabled=False),
+        )
+        r = DesignContextResolver(config=cfg, cache=cache, figma_client=fc, miro_client=mc)
+        res = r.resolve(figma_url="https://www.figma.com/file/Abc12345DEF/D")
+        assert res.figma.status == "ok"
+
     def test_failure_block(self, cache, figma_mock, miro_mock, monkeypatch):
         # token 無し → failed
         monkeypatch.delenv("_F_TEST", raising=False)

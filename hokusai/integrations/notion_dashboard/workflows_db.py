@@ -28,8 +28,10 @@ logger = get_logger("integrations.notion_dashboard.workflows_db")
 # 抽出するための正規表現。Notion のメッセージ例:
 #   "<NAME> is not a property that exists. ..."
 #   "Could not find property with name or id: \"<NAME>\". ..."
+# プロパティ名は空白を含み得る（例: "Design Status"）ため、prefix パターンは最短一致で
+# "is not a property" の直前まで全部キャプチャする。
 _PROPERTY_NAME_PATTERN_QUOTED = re.compile(r'"([^"]+)"')
-_PROPERTY_NAME_PATTERN_PREFIX = re.compile(r"^([^\s]+)\s+is not a property")
+_PROPERTY_NAME_PATTERN_PREFIX = re.compile(r"^(.+?)\s+is not a property", re.IGNORECASE)
 
 
 # ワークフローイベントの種別。同期 dispatcher が発行するイベント名と対応する。
@@ -76,9 +78,10 @@ class WorkflowsDBClient:
 
         Note:
             Notion DB 側に該当プロパティが存在しない場合 (property_not_found) は、
-            該当プロパティを除去して最大 5 回まで再試行する。これにより、
-            Workflows DB スキーマが古い環境（Figma/Miro 系プロパティ未追加など）
-            でも、存在するプロパティのみで同期が進む。
+            該当プロパティを除去して同期を再試行する。最大 6 回まで試行
+            （= 初回 1 + リトライ 5）。これにより、Workflows DB スキーマが古い環境
+            （Figma/Miro 系プロパティ未追加など）でも、存在するプロパティのみで
+            同期が進む。
         """
         workflow_id = payload.get("workflow_id")
         if not workflow_id:
@@ -294,34 +297,54 @@ def _date(iso_string: str) -> dict:
 
 
 def _is_property_not_found(exc: NotionAPIError) -> bool:
-    """Notion API エラーが property_not_found 由来か判定する。"""
-    if exc.code == "validation_error" and "property" in exc.message.lower():
-        return True
+    """Notion API エラーが property_not_found（プロパティ欠落）由来か判定する。
+
+    `validation_error` 全般を property_not_found 扱いすると、型不一致や不正な値
+    （例: `body.properties.X.url` が壊れている等）まで pruning 対象になり、
+    実在するプロパティが除去されて誤って同期成功扱いされるリスクがある。
+    そのため「欠落を示す文言」に限定して判定する。
+    """
     msg = exc.message.lower()
-    return "property" in msg and ("not a property" in msg or "could not find property" in msg)
+    return ("not a property" in msg) or ("could not find property" in msg)
 
 
 def _extract_missing_property(message: str, current_props: dict) -> str | None:
     """エラーメッセージから対象プロパティ名を抽出する。
 
-    以下の順で試行する:
-    1. ダブルクォートで囲まれた名前（"Design Status" 等）
-    2. メッセージ先頭の単語が is not a property... と続くパターン
+    Notion のメッセージは表記ゆれ（quote 有無、空白を含む名前、大小文字差）が
+    あり得るため、以下の順で頑健に試行する:
+
+    1. ダブルクォートで囲まれた名前（"Design Status" 等）— current_props と一致した時のみ
+    2. `<name> is not a property` の prefix パターン（最短一致、空白含む名前を許容）
     3. 現在送ろうとしているプロパティ名のいずれかがメッセージに含まれているか
+       （大小文字非依存。Notion のエラー文が小文字化される実装に備える）
     """
+    msg_lower = message.lower()
+
     # 1. クォート抽出
     m = _PROPERTY_NAME_PATTERN_QUOTED.search(message)
-    if m and m.group(1) in current_props:
-        return m.group(1)
+    if m:
+        candidate = m.group(1)
+        if candidate in current_props:
+            return candidate
+        # 大小文字差を吸収
+        for name in current_props:
+            if name.lower() == candidate.lower():
+                return name
 
-    # 2. 先頭単語パターン
+    # 2. 先頭パターン（"Design Status is not a property..." → "Design Status"）
     m = _PROPERTY_NAME_PATTERN_PREFIX.match(message)
-    if m and m.group(1) in current_props:
-        return m.group(1)
+    if m:
+        candidate = m.group(1).strip()
+        if candidate in current_props:
+            return candidate
+        for name in current_props:
+            if name.lower() == candidate.lower():
+                return name
 
-    # 3. 現在送るプロパティのうち、メッセージに含まれるもの
+    # 3. 現在送るプロパティのうち、メッセージに含まれるもの（大小文字非依存）
     for name in current_props:
-        if name in message:
+        if name.lower() in msg_lower:
             return name
 
     return None
