@@ -450,6 +450,41 @@ def test_is_property_not_found_only_matches_missing_phrases():
     )
 
 
+def test_is_property_not_found_requires_status_and_code():
+    """status=400 + code=validation_error の両方が満たされる必要がある。
+
+    文字列マッチだけだと、別 status / code のエラーで文言が偶然含まれた場合に
+    誤って pruning リトライに入ってしまう。
+    """
+    from hokusai.integrations.notion_dashboard.client import NotionAPIError
+    from hokusai.integrations.notion_dashboard.workflows_db import (
+        _is_property_not_found,
+    )
+
+    missing_msg = '"X" is not a property that exists.'
+
+    # 401 unauthorized で文言が偶然含まれていても False
+    assert not _is_property_not_found(
+        NotionAPIError(401, missing_msg, code="unauthorized")
+    )
+    # 404 で文言が含まれていても False
+    assert not _is_property_not_found(
+        NotionAPIError(404, missing_msg, code="object_not_found")
+    )
+    # 400 だが code が validation_error 以外なら False
+    assert not _is_property_not_found(
+        NotionAPIError(400, missing_msg, code="invalid_request")
+    )
+    # 400 で code 空でも False（古い実装互換）
+    assert not _is_property_not_found(
+        NotionAPIError(400, missing_msg, code="")
+    )
+    # 3 条件すべて満たした時のみ True
+    assert _is_property_not_found(
+        NotionAPIError(400, missing_msg, code="validation_error")
+    )
+
+
 def test_extract_missing_property_case_insensitive_and_spaces():
     """大小文字差や空白を含むプロパティ名でも対象を特定できる。"""
     from hokusai.integrations.notion_dashboard.workflows_db import (

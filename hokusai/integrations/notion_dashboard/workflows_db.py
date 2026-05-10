@@ -299,11 +299,19 @@ def _date(iso_string: str) -> dict:
 def _is_property_not_found(exc: NotionAPIError) -> bool:
     """Notion API エラーが property_not_found（プロパティ欠落）由来か判定する。
 
-    `validation_error` 全般を property_not_found 扱いすると、型不一致や不正な値
-    （例: `body.properties.X.url` が壊れている等）まで pruning 対象になり、
-    実在するプロパティが除去されて誤って同期成功扱いされるリスクがある。
-    そのため「欠落を示す文言」に限定して判定する。
+    判定条件は AND で 3 つ:
+    1. HTTP status が 400（Bad Request）
+    2. error code が "validation_error"
+    3. メッセージに欠落を示す文言（"not a property" / "could not find property"）
+
+    文字列マッチだけだと、別 code の 4xx で文言が偶然含まれた場合に誤判定する。
+    また `validation_error` 全般を property_not_found 扱いすると、型不一致や
+    不正な値（例: `body.properties.X.url` が壊れている等）まで pruning 対象に
+    なり、実在するプロパティが除去されて誤って同期成功扱いされるリスクがある。
+    そのため status + code + 文言の 3 段で絞り込む。
     """
+    if exc.status != 400 or exc.code != "validation_error":
+        return False
     msg = exc.message.lower()
     return ("not a property" in msg) or ("could not find property" in msg)
 

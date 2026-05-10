@@ -7130,7 +7130,15 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         Args:
             source: "figma" または "miro"
 
-        エラーレスポンスは他 API と統一された `{"success": False, "errors": [...]}` 形式。
+        エラーレスポンスはこのエンドポイント固有の仕様として
+        `{"success": False, "errors": [...]}` 形式を返す（`errors` は配列）。
+        ステータスコード:
+        - 連携無効: 409
+        - 不明な source: 400
+        - 内部エラー: 500
+        （注: 同 dashboard.py 内の他 POST ハンドラには `error` 単一キー形式の
+         レスポンスを返すものがあるが、このエンドポイントは統一された配列形式
+         を採用している。今後追加するエンドポイントでも配列形式が推奨。）
         """
         try:
             from hokusai.config import get_config
