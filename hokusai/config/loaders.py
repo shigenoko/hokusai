@@ -38,6 +38,15 @@ def load_config_from_file(config_path: Path) -> dict:
         return yaml.safe_load(f) or {}
 
 
+def _str_or_default(value: object, default: str) -> str:
+    """value が「中身のある文字列」ならそれを返し、そうでなければ default を返す。
+
+    各パーサ関数で繰り返し使われるバリデーション。空文字や非 str を弾いて
+    プロパティの env 名・realm 名などのデフォルトに戻す目的で使用する。
+    """
+    return value if isinstance(value, str) and value.strip() else default
+
+
 def _parse_task_backend_config(config_dict: dict) -> TaskBackendConfig:
     """task_backend 設定をパース"""
     tb_config = config_dict.get("task_backend", {})
@@ -267,9 +276,6 @@ def _parse_notion_dashboard_config(config_dict: dict) -> NotionDashboardConfig:
     if not isinstance(enabled, bool):
         enabled = defaults.enabled
 
-    def _str_or_default(value: object, default: str) -> str:
-        return value if isinstance(value, str) and value.strip() else default
-
     api_token_env = _str_or_default(nd_raw.get("api_token_env"), defaults.api_token_env)
     workflows_db_id_env = _str_or_default(
         nd_raw.get("workflows_db_id_env"), defaults.workflows_db_id_env
@@ -392,9 +398,6 @@ def _parse_web_dashboard_config(config_dict: dict) -> WebDashboardConfig:
     if not isinstance(enabled, bool):
         enabled = defaults.enabled
 
-    def _str_or_default(value: object, default: str) -> str:
-        return value if isinstance(value, str) and value.strip() else default
-
     return WebDashboardConfig(
         auth=WebDashboardAuthConfig(
             enabled=enabled,
@@ -483,9 +486,6 @@ def _parse_figma_config(config_dict: dict) -> FigmaIntegrationConfig:
     if not isinstance(enabled, bool):
         enabled = defaults.enabled
 
-    def _str_or_default(value: object, default: str) -> str:
-        return value if isinstance(value, str) and value.strip() else default
-
     api_token_env = _str_or_default(raw.get("api_token_env"), defaults.api_token_env)
 
     fetch_comments = raw.get("fetch_comments", defaults.fetch_comments)
@@ -556,9 +556,6 @@ def _parse_miro_config(config_dict: dict) -> MiroIntegrationConfig:
     enabled = raw.get("enabled", defaults.enabled)
     if not isinstance(enabled, bool):
         enabled = defaults.enabled
-
-    def _str_or_default(value: object, default: str) -> str:
-        return value if isinstance(value, str) and value.strip() else default
 
     api_token_env = _str_or_default(raw.get("api_token_env"), defaults.api_token_env)
     default_team_id_env = _str_or_default(
