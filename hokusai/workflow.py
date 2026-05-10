@@ -1072,19 +1072,20 @@ def _build_notion_payload(state: dict, **overrides: object) -> dict:
         "revision": str(retry_count),
     }
 
-    # Figma / Miro 連携情報。空値はスキップして送らない（DB 側に当該プロパティが
-    # 存在しない場合の property_not_found エラーを避けるため、Notion 側で
-    # 値あり時のみマッピングする方針）。
-    if state.get("miro_url"):
-        payload["miro_url"] = state.get("miro_url")
-    if state.get("figma_url"):
-        payload["figma_url"] = state.get("figma_url")
+    # Figma / Miro 連携情報。連携が動いている（design_integration_status がある）
+    # 場合のみ payload に含める。連携を使わない実行で常にフィールドを送ると、
+    # 既存 DB に該当プロパティが無い環境では property_not_found で失敗する。
     if state.get("design_integration_status"):
         payload["design_integration_status"] = state.get("design_integration_status")
-    if state.get("design_review_required") is not None:
-        payload["design_review_required"] = bool(state.get("design_review_required"))
-    if state.get("design_review_result"):
-        payload["design_review_result"] = state.get("design_review_result")
+        if state.get("miro_url"):
+            payload["miro_url"] = state.get("miro_url")
+        if state.get("figma_url"):
+            payload["figma_url"] = state.get("figma_url")
+        # design_review_required は bool なので明示的に送る（True/False の両方が意味を持つ）
+        if isinstance(state.get("design_review_required"), bool):
+            payload["design_review_required"] = bool(state.get("design_review_required"))
+        if state.get("design_review_result"):
+            payload["design_review_result"] = state.get("design_review_result")
 
     payload.update(overrides)
     return payload

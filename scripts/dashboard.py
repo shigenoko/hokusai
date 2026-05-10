@@ -7065,6 +7065,10 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._handle_notion_retry_pending_post()
         elif parsed.path == "/api/notion-dashboard/sync-service-status":
             self._handle_notion_sync_service_status_post()
+        elif parsed.path == "/api/figma/refresh-cache":
+            self._handle_design_cache_refresh_post("figma")
+        elif parsed.path == "/api/miro/refresh-cache":
+            self._handle_design_cache_refresh_post("miro")
         elif parsed.path.startswith("/api/prompts/"):
             from urllib.parse import unquote
             prompt_id = unquote(parsed.path[len("/api/prompts/"):])
@@ -7115,6 +7119,64 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         except Exception as e:
             self._send_json_response(
                 {"success": False, "error": f"{type(e).__name__}"},
+                status_code=500,
+            )
+
+    def _handle_design_cache_refresh_post(self, source: str):
+        """Figma / Miro の SQLite キャッシュをクリアして次回 fetch を強制する。
+
+        Operations Console から「キャッシュ再取得」を実行する経路。
+
+        Args:
+            source: "figma" または "miro"
+        """
+        try:
+            from hokusai.config import get_config
+            from hokusai.persistence.sqlite_store import SQLiteStore
+
+            cfg = get_config()
+            if source == "figma":
+                if not cfg.figma.enabled:
+                    self._send_json_response({
+                        "success": False,
+                        "error": "Figma 連携は無効化されています",
+                    })
+                    return
+                table = "figma_file_cache"
+            elif source == "miro":
+                if not cfg.miro.enabled:
+                    self._send_json_response({
+                        "success": False,
+                        "error": "Miro 連携は無効化されています",
+                    })
+                    return
+                table = "miro_board_cache"
+            else:
+                self._send_json_response(
+                    {"success": False, "error": f"unknown source: {source}"},
+                    status_code=400,
+                )
+                return
+
+            store = SQLiteStore(cfg.database_path)
+            with store._connect() as conn:
+                cursor = conn.execute(f"DELETE FROM {table}")
+                deleted = cursor.rowcount
+                conn.commit()
+
+            # connection_status のキャッシュもクリア（次回 GET で再評価される）
+            from hokusai.integrations import connection_status as _cs
+
+            _cs.clear_cache()
+
+            self._send_json_response({
+                "success": True,
+                "source": source,
+                "deleted_rows": deleted,
+            })
+        except Exception as e:
+            self._send_json_response(
+                {"success": False, "error": f"{type(e).__name__}: {e}"},
                 status_code=500,
             )
 

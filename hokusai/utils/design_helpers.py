@@ -96,10 +96,16 @@ def ensure_design_context(
 
 
 def _fetch_notion_task_body(task_url: str | None) -> str | None:
-    """Notion API で task ページの本文ブロックを Markdown 風テキストに連結して返す。
+    """Notion API で task ページの本文ブロックと DB プロパティを取得して連結する。
 
     Notion Dashboard の API トークンが設定されている場合のみ動作する。失敗時は
     None を返し、呼び出し側の挙動を変えない（フォールバック責任は呼び出し側）。
+
+    取得対象:
+    - ページ properties（url / rich_text / title 等のテキスト系プロパティ）
+      → DB のカスタムプロパティに Figma URL / Miro URL が入っているケースに対応
+    - 子ブロック（paragraph / bulleted_list_item 等）
+      → ページ本文に貼られた URL に対応
     """
     if not task_url or "notion.so" not in task_url:
         return None
@@ -122,14 +128,33 @@ def _fetch_notion_task_body(task_url: str | None) -> str | None:
         from ..integrations.notion_dashboard.client import NotionAPIClient
 
         api = NotionAPIClient(api_token)
-        # Notion API: GET /v1/blocks/{page_id}/children でトップレベルブロックを取得
-        # 1 階層のみ（Figma/Miro URL はトップレベルの paragraph に貼られるのが通常）
-        # 必要に応じて再帰取得は将来拡張
-        result = api._request("GET", f"/blocks/{page_id}/children")
-        blocks = result.get("results") if isinstance(result, dict) else []
-        if not isinstance(blocks, list):
-            return None
-        return _blocks_to_text(blocks)
+
+        parts: list[str] = []
+
+        # 1. ページ properties（DB カスタムプロパティに URL が入っているケース）
+        try:
+            page = api._request("GET", f"/pages/{page_id}")
+            properties = page.get("properties") if isinstance(page, dict) else None
+            if isinstance(properties, dict):
+                props_text = _properties_to_text(properties)
+                if props_text:
+                    parts.append(props_text)
+        except Exception as exc:
+            logger.debug("notion page properties fetch skipped: %s", exc)
+
+        # 2. 子ブロック（本文に URL が貼られているケース）
+        # 1 階層のみ（必要に応じて再帰取得は将来拡張）
+        try:
+            result = api._request("GET", f"/blocks/{page_id}/children")
+            blocks = result.get("results") if isinstance(result, dict) else None
+            if isinstance(blocks, list):
+                blocks_text = _blocks_to_text(blocks)
+                if blocks_text:
+                    parts.append(blocks_text)
+        except Exception as exc:
+            logger.debug("notion blocks fetch skipped: %s", exc)
+
+        return "\n".join(parts) if parts else None
     except Exception as exc:
         logger.debug("notion task body fetch skipped: %s", exc)
         return None
@@ -164,6 +189,33 @@ def _blocks_to_text(blocks: list[dict[str, Any]]) -> str:
         )
         if text:
             lines.append(text)
+    return "\n".join(lines)
+
+
+def _properties_to_text(properties: dict[str, Any]) -> str:
+    """Notion ページの properties 辞書から URL / text 系の値をテキスト化する。
+
+    URL カラムや、rich_text に貼られた Figma / Miro リンクを抽出するため、
+    extract_*_urls() が見つけられる形で `name: value` 形式で連結する。
+    """
+    lines: list[str] = []
+    for name, prop in properties.items():
+        if not isinstance(prop, dict):
+            continue
+        ptype = prop.get("type")
+        value: str | None = None
+        if ptype == "url":
+            value = prop.get("url") if isinstance(prop.get("url"), str) else None
+        elif ptype in ("rich_text", "title"):
+            arr = prop.get(ptype)
+            if isinstance(arr, list):
+                value = "".join(
+                    (r.get("plain_text") or "")
+                    for r in arr
+                    if isinstance(r, dict)
+                )
+        if value:
+            lines.append(f"{name}: {value}")
     return "\n".join(lines)
 
 
@@ -308,9 +360,14 @@ def _apply_resolution(state: dict, resolution: DesignResolution) -> None:
         existing = state.get("design_sync_errors") or []
         existing.extend(resolution.sync_errors)
         state["design_sync_errors"] = existing
+    # Figma コメントは「未解決」のもののみカウント。解決済みは無視する。
+    figma_ctx = resolution.figma.context or {}
+    unresolved_comments = [
+        c for c in (figma_ctx.get("comments") or [])
+        if isinstance(c, dict) and not c.get("resolved")
+    ]
     state["design_review_required"] = bool(
-        (resolution.figma.context and resolution.figma.context.get("comments")) or
-        resolution.figma.status == "partial"
+        unresolved_comments or resolution.figma.status == "partial"
     )
 
     # on_failure: block 設定の場合、ワークフローを Waiting for Human に遷移させる

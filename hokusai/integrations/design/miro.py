@@ -234,13 +234,24 @@ def _build_miro_screens(
         return ""
 
     if frames:
-        for frame in frames[:limit]:
-            data = frame.get("data") if isinstance(frame.get("data"), dict) else {}
-            name = data.get("title") or frame.get("id") or ""
+        # parent.id ベースで、各フレームに属するアイテムを振り分ける。
+        # parent が無いアイテムは「フレーム外」として別 screen にまとめる。
+        frame_ids = {f.get("id") for f in frames if isinstance(f, dict) and f.get("id")}
+        by_frame: dict[str, list[dict[str, Any]]] = {fid: [] for fid in frame_ids if fid}
+        unparented: list[dict[str, Any]] = []
+        for it in others:
+            parent = it.get("parent") if isinstance(it.get("parent"), dict) else {}
+            parent_id = parent.get("id")
+            if parent_id and parent_id in frame_ids:
+                by_frame[parent_id].append(it)
+            else:
+                unparented.append(it)
+
+        def _collect(items_for_screen: list[dict[str, Any]]) -> dict[str, list[str]]:
             texts: list[str] = []
             notes: list[str] = []
             components: list[str] = []
-            for it in others:
+            for it in items_for_screen:
                 if len(texts) >= 20 and len(notes) >= 10 and len(components) >= 10:
                     break
                 t = it.get("type")
@@ -253,14 +264,33 @@ def _build_miro_screens(
                     texts.append(txt)
                 elif t in ("shape", "card") and len(components) < 10:
                     components.append(txt)
+            return {"texts": texts, "notes": notes, "components": components}
+
+        for frame in frames[:limit]:
+            data = frame.get("data") if isinstance(frame.get("data"), dict) else {}
+            name = data.get("title") or frame.get("id") or ""
+            buckets = _collect(by_frame.get(frame.get("id"), []))
             screens.append({
                 "name": name,
                 "node_id": frame.get("id", ""),
                 "description": "",
-                "texts": texts,
-                "components": components,
-                "notes": notes,
+                "texts": buckets["texts"],
+                "components": buckets["components"],
+                "notes": buckets["notes"],
             })
+
+        # フレーム外アイテムが残っていれば、別 screen として最後に追加（容量に余裕がある場合）
+        if unparented and len(screens) < limit:
+            buckets = _collect(unparented)
+            if buckets["texts"] or buckets["notes"] or buckets["components"]:
+                screens.append({
+                    "name": "(unparented items)",
+                    "node_id": "",
+                    "description": "",
+                    "texts": buckets["texts"],
+                    "components": buckets["components"],
+                    "notes": buckets["notes"],
+                })
         return screens
 
     # frame が無い board は items を 1 つの screen に圧縮
