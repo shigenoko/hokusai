@@ -1,7 +1,7 @@
 """Notion 初期セットアップ（hokusai notion-setup）のテスト
 
-setup.py の setup_notion_workspace() が、Workflows DB / Pull Requests DB /
-Service Status ページを正しい payload で作成するかを検証する。
+setup.py の setup_notion_workspace() が、Workflows DB / Pull Requests DB を
+正しい payload で作成するかを検証する。
 """
 
 from __future__ import annotations
@@ -16,27 +16,24 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from hokusai.integrations.notion_dashboard.setup import (
     NotionSetupError,
     PULL_REQUESTS_DB_TITLE,
-    SERVICE_STATUS_PAGE_TITLE,
     WORKFLOWS_DB_TITLE,
     setup_notion_workspace,
 )
 
 
 class _RecordingClient:
-    """NotionAPIClient の最小モック。create_database / create_page を記録"""
+    """NotionAPIClient の最小モック。create_database を記録"""
 
     def __init__(
         self,
         *,
         workflows_id: str = "wf-db-id",
         pr_id: str = "pr-db-id",
-        page_id: str = "svc-page-id",
         fail_on: str | None = None,
     ):
         self.calls: list[tuple[str, dict]] = []
         self._workflows_id = workflows_id
         self._pr_id = pr_id
-        self._page_id = page_id
         self._fail_on = fail_on
 
     def create_database(self, payload: dict) -> dict:
@@ -49,12 +46,6 @@ class _RecordingClient:
         if "Workflows" in title:
             return {"id": self._workflows_id}
         return {"id": self._pr_id}
-
-    def create_page(self, payload: dict) -> dict:
-        self.calls.append(("create_page", payload))
-        if self._fail_on == "service_status":
-            raise RuntimeError("service status page creation failed")
-        return {"id": self._page_id}
 
 
 # ---------------------------------------------------------------------------
@@ -73,22 +64,21 @@ def test_setup_rejects_empty_parent_page_id():
 
 
 # ---------------------------------------------------------------------------
-# 正常系: 3 つのリソース作成
+# 正常系: 2 つのリソース作成
 # ---------------------------------------------------------------------------
 
 
-def test_setup_creates_three_resources_in_order():
+def test_setup_creates_two_resources_in_order():
     client = _RecordingClient()
     result = setup_notion_workspace(
         "token", "parent-page-id", api_client=client
     )
 
     actions = [c[0] for c in client.calls]
-    # Workflows DB → Pull Requests DB → Service Status ページの順
-    assert actions == ["create_database", "create_database", "create_page"]
+    # Workflows DB → Pull Requests DB の順
+    assert actions == ["create_database", "create_database"]
     assert result["workflows_db_id"] == "wf-db-id"
     assert result["pull_requests_db_id"] == "pr-db-id"
-    assert result["service_status_page_id"] == "svc-page-id"
 
 
 def test_setup_workflows_db_payload_includes_description_warning():
@@ -222,23 +212,6 @@ def test_setup_pr_db_status_select_has_five_options():
     assert set(names) == {"Draft", "Open", "Approved", "Merged", "Closed"}
 
 
-def test_setup_service_status_page_payload():
-    client = _RecordingClient()
-    setup_notion_workspace("token", "parent", api_client=client)
-
-    page_payload = client.calls[2][1]
-    title = page_payload["properties"]["title"]["title"][0]["text"]["content"]
-    assert title == SERVICE_STATUS_PAGE_TITLE
-    assert page_payload["parent"] == {
-        "type": "page_id",
-        "page_id": "parent",
-    }
-    # 説明 paragraph が含まれている
-    children = page_payload["children"]
-    assert len(children) >= 1
-    assert children[0]["type"] == "paragraph"
-
-
 # ---------------------------------------------------------------------------
 # 失敗系
 # ---------------------------------------------------------------------------
@@ -259,21 +232,12 @@ def test_setup_raises_when_pr_db_fails():
         setup_notion_workspace("token", "parent", api_client=client)
 
 
-def test_setup_raises_when_service_status_page_fails():
-    client = _RecordingClient(fail_on="service_status")
-    with pytest.raises(NotionSetupError, match="Service Status"):
-        setup_notion_workspace("token", "parent", api_client=client)
-
-
 def test_setup_raises_when_response_missing_id(monkeypatch):
     """API レスポンスに id が無いケース"""
 
     class _BadClient:
         def create_database(self, payload):
             return {}  # id なし
-
-        def create_page(self, payload):
-            return {"id": "p"}
 
     with pytest.raises(NotionSetupError, match="id が含まれません"):
         setup_notion_workspace("token", "parent", api_client=_BadClient())
@@ -310,7 +274,6 @@ def test_cli_handler_prints_export_lines_on_success(capsys, monkeypatch):
         return {
             "workflows_db_id": "wf123",
             "pull_requests_db_id": "pr456",
-            "service_status_page_id": "svc789",
         }
 
     monkeypatch.setattr(nd, "setup_notion_workspace", _fake_setup)
@@ -329,10 +292,8 @@ def test_cli_handler_prints_export_lines_on_success(capsys, monkeypatch):
     assert rc == 0
     assert "wf123" in out
     assert "pr456" in out
-    assert "svc789" in out
     assert "HOKUSAI_NOTION_WORKFLOWS_DB_ID" in out
     assert "HOKUSAI_NOTION_PR_DB_ID" in out
-    assert "HOKUSAI_NOTION_SERVICE_STATUS_PAGE_ID" in out
 
 
 def test_cli_handler_returns_one_on_setup_error(capsys, monkeypatch):
@@ -406,7 +367,6 @@ def sample_ids():
     return {
         "workflows_db_id": "wf-id-12345",
         "pull_requests_db_id": "pr-id-67890",
-        "service_status_page_id": "svc-id-abcde",
     }
 
 
@@ -427,7 +387,6 @@ def test_persist_env_vars_appends_when_no_marker(tmp_path, sample_ids):
     assert "HOKUSAI Notion Dashboard" in content
     assert "wf-id-12345" in content
     assert "pr-id-67890" in content
-    assert "svc-id-abcde" in content
 
 
 def test_persist_env_vars_creates_backup(tmp_path, sample_ids):
@@ -466,7 +425,6 @@ def test_persist_env_vars_replaces_existing_block(tmp_path, sample_ids):
     new_ids = {
         "workflows_db_id": "wf-NEW",
         "pull_requests_db_id": "pr-NEW",
-        "service_status_page_id": "svc-NEW",
     }
     result = persist_env_vars(rc, new_ids)
 
@@ -478,7 +436,6 @@ def test_persist_env_vars_replaces_existing_block(tmp_path, sample_ids):
     # 新しい ID に書き換わっている
     assert "wf-NEW" in content
     assert "pr-NEW" in content
-    assert "svc-NEW" in content
     # マーカーブロックは 1 つだけ
     assert content.count("HOKUSAI Notion Dashboard (managed by") == 1
 
@@ -508,7 +465,6 @@ def test_persist_env_vars_preserves_existing_content_around_block(tmp_path, samp
         "# Last updated: 2026-01-01\n"
         'export HOKUSAI_NOTION_WORKFLOWS_DB_ID="old-1"\n'
         'export HOKUSAI_NOTION_PR_DB_ID="old-2"\n'
-        'export HOKUSAI_NOTION_SERVICE_STATUS_PAGE_ID="old-3"\n'
         "# === END HOKUSAI Notion Dashboard ===\n"
         "export AFTER=2\n"
     )
@@ -539,7 +495,6 @@ def test_cli_handler_persist_writes_to_rc(capsys, monkeypatch, tmp_path):
         return {
             "workflows_db_id": "wfNEW",
             "pull_requests_db_id": "prNEW",
-            "service_status_page_id": "svcNEW",
         }
 
     monkeypatch.setattr(
@@ -565,7 +520,6 @@ def test_cli_handler_persist_writes_to_rc(capsys, monkeypatch, tmp_path):
     content = rc.read_text()
     assert "wfNEW" in content
     assert "prNEW" in content
-    assert "svcNEW" in content
 
 
 def test_cli_handler_persist_disabled_shows_hint(capsys, monkeypatch):
@@ -578,7 +532,6 @@ def test_cli_handler_persist_disabled_shows_hint(capsys, monkeypatch):
         return {
             "workflows_db_id": "x",
             "pull_requests_db_id": "y",
-            "service_status_page_id": "z",
         }
 
     monkeypatch.setattr(

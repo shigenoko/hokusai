@@ -205,13 +205,6 @@ def main():
         help="既に認証済みでも再認証を実行する",
     )
 
-    # sync-service-status コマンド: connection_status の結果を Notion へ反映
-    # 主に cron / launchd から定期実行される想定
-    subparsers.add_parser(
-        "sync-service-status",
-        help="connection_status の結果を Notion Service Status ページに反映",
-    )
-
     # notion-setup コマンド: Notion 上に HOKUSAI 用 DB / ページを一括作成
     notion_setup_parser = subparsers.add_parser(
         "notion-setup",
@@ -267,9 +260,6 @@ def main():
 
     if args.step:
         print_step_mode()
-
-    # sync-service-status コマンド: 設定読み込み後に Notion 反映を実行
-    # config 読み込みは下で行うため、ここでは早期処理せず通常フローへ流す
 
     # notion-setup コマンドは config を必要とせず、Notion API token のみで動く
     # （セットアップ時点では config の DB ID 環境変数はまだ存在しない想定）
@@ -388,9 +378,6 @@ def main():
                 print(f"✗ {message}")
                 sys.exit(1)
 
-        elif args.command == "sync-service-status":
-            sys.exit(_handle_sync_service_status())
-
     except KeyboardInterrupt:
         print_interrupted()
         sys.exit(130)
@@ -452,15 +439,11 @@ def _handle_notion_setup(args) -> int:
     print("作成されたリソース:")
     print(f"  Workflows DB:          {result['workflows_db_id']}")
     print(f"  Pull Requests DB:      {result['pull_requests_db_id']}")
-    print(f"  Service Status ページ: {result['service_status_page_id']}")
     print()
     print("以下を環境変数に設定してください（~/.zshrc などに追記推奨）:")
     print()
     print(f'  export HOKUSAI_NOTION_WORKFLOWS_DB_ID="{result["workflows_db_id"]}"')
     print(f'  export HOKUSAI_NOTION_PR_DB_ID="{result["pull_requests_db_id"]}"')
-    print(
-        f'  export HOKUSAI_NOTION_SERVICE_STATUS_PAGE_ID="{result["service_status_page_id"]}"'
-    )
 
     # --persist 指定時は rc ファイルへ書き込む
     if getattr(args, "persist", False):
@@ -497,50 +480,9 @@ def _handle_notion_setup(args) -> int:
     print()
     print("次のステップ:")
     print("  1. YAML 設定で notion_dashboard.enabled: true を有効化")
-    print("  2. hokusai sync-service-status で動作確認")
-    print("  3. docs/notion-dashboard-operation-guide.md を参照")
+    print("  2. docs/notion-dashboard-operation-guide.md を参照")
     print("=" * 70)
     return 0
-
-
-def _handle_sync_service_status() -> int:
-    """connection_status の結果を Notion Service Status ページに反映する。
-
-    cron / launchd から定期実行される想定。Notion 同期が無効、または環境変数
-    未設定なら skipped を表示して 0 を返す（cron で error にしない）。
-
-    Returns:
-        終了コード（0=成功 / skip、1=失敗）
-    """
-    from .config import get_config
-    from .integrations.notion_dashboard import (
-        NotionSyncDispatcher,
-        sync_service_status_to_notion,
-    )
-    from .persistence import SQLiteStore
-
-    config = get_config()
-    if not config.notion_dashboard.enabled:
-        print("notion_dashboard.enabled=false のためスキップしました")
-        return 0
-
-    store = SQLiteStore(config.database_path)
-    dispatcher = NotionSyncDispatcher(store=store, config=config.notion_dashboard)
-
-    if not dispatcher.is_configured():
-        print(
-            "Notion 同期の環境変数が未設定のためスキップしました "
-            f"(api_token={config.notion_dashboard.api_token_env}, "
-            f"workflows_db={config.notion_dashboard.workflows_db_id_env})"
-        )
-        return 0
-
-    ok = sync_service_status_to_notion(dispatcher)
-    if ok:
-        print("✓ Service Status を Notion に反映しました")
-        return 0
-    print("✗ Service Status の Notion 反映に失敗しました")
-    return 1
 
 
 def _handle_cleanup(args, config):

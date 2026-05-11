@@ -712,6 +712,43 @@ def test_dispatcher_retry_pending_succeeds(store: SQLiteStore, monkeypatch):
     assert store.count_notion_sync_pending() == 0
 
 
+def test_dispatcher_retry_pending_drains_legacy_service_status_entries(
+    store: SQLiteStore, monkeypatch
+):
+    """旧 Service Status sync が outbox に積んだ service_status_checked エントリは、
+    アップグレード後の retry_pending() で no-op として drain される。
+
+    Why: workflow_id を持たないエントリを apply_event に渡すと ValueError で
+    永続的にスタックするため、後方互換の no-op を入れている。
+    """
+    monkeypatch.setenv("TEST_TOKEN", "secret")
+    monkeypatch.setenv("TEST_DB", "db1")
+
+    # 旧バージョンが outbox に書いた状態を再現
+    store.enqueue_notion_sync(
+        "legacy-svc-1",
+        "_service_status",
+        "service_status_checked",
+        {"services": [{"id": "gh", "status": "connected"}]},
+    )
+    assert store.count_notion_sync_pending() == 1
+
+    disp = NotionSyncDispatcher(store=store, config=_make_config())
+    # _get_workflows_client が呼ばれないことを保証（service_status_checked は
+    # _send_to_notion の冒頭で no-op 終了するため、Workflows DB へは到達しないはず）
+    monkeypatch.setattr(
+        NotionSyncDispatcher,
+        "_get_workflows_client",
+        lambda self: (_ for _ in ()).throw(AssertionError("should not be called")),
+    )
+
+    result = disp.retry_pending()
+    assert result["succeeded"] == 1
+    assert result["failed"] == 0
+    assert result["moved_to_error"] == 0
+    assert store.count_notion_sync_pending() == 0
+
+
 def test_dispatcher_retry_pending_moves_to_error_after_max_attempts(
     store: SQLiteStore, monkeypatch
 ):
@@ -1207,193 +1244,6 @@ def test_safe_notion_dispatch_swallows_exceptions():
 
 
 # ---------------------------------------------------------------------------
-# Phase C: ServiceStatusPageClient
-# ---------------------------------------------------------------------------
-
-
-from hokusai.integrations.notion_dashboard.service_status import (
-    ServiceStatusPageClient,
-    sync_service_status_to_notion,
-)
-
-
-class _RecordingAPIWithRequest(_RecordingAPI):
-    """ServiceStatusPageClient が _request を直接呼ぶため stub を追加"""
-
-    def __init__(self, *, query_result=None, list_children_result=None):
-        super().__init__(query_result=query_result)
-        self._list_children_result = list_children_result or []
-
-    def _request(self, method: str, path: str, *, body=None) -> dict:
-        self.calls.append((f"{method} {path}", body))
-        if method == "GET" and path.endswith("/children"):
-            return {"results": self._list_children_result}
-        if method == "PATCH" and "/blocks/" in path:
-            return {"archived": True}
-        return {}
-
-    def append_block_children(self, block_id: str, children: list[dict]) -> dict:
-        self.calls.append(("append_blocks", {"block_id": block_id, "children": children}))
-        return {"results": children}
-
-
-def test_service_status_replace_snapshot_archives_existing_and_appends_new():
-    api = _RecordingAPIWithRequest(
-        list_children_result=[{"id": "block-A"}, {"id": "block-B"}]
-    )
-    client = ServiceStatusPageClient(api=api, page_id="page-svc")
-    client.replace_snapshot([
-        {"id": "gh", "label": "GitHub", "status": "connected"},
-        {"id": "glab", "label": "GitLab", "status": "not_authenticated"},
-    ])
-
-    actions = [c[0] for c in api.calls]
-    # children 一覧 → block A を archive → block B を archive → append
-    assert actions[0] == "GET /blocks/page-svc/children"
-    assert actions[1] == "PATCH /blocks/block-A"
-    assert actions[2] == "PATCH /blocks/block-B"
-    assert actions[3] == "append_blocks"
-
-    appended_blocks = api.calls[3][1]["children"]
-    # heading + paragraph (timestamp) + 2 service rows
-    assert len(appended_blocks) == 4
-    assert appended_blocks[0]["type"] == "heading_2"
-    # サービス行に label と display ラベルが含まれる
-    text_a = appended_blocks[2]["bulleted_list_item"]["rich_text"][0]["text"]["content"]
-    text_b = appended_blocks[3]["bulleted_list_item"]["rich_text"][0]["text"]["content"]
-    assert "GitHub" in text_a and "Connected" in text_a
-    assert "GitLab" in text_b and "Not Authenticated" in text_b
-
-
-def test_service_status_replace_snapshot_handles_no_children():
-    api = _RecordingAPIWithRequest(list_children_result=[])
-    client = ServiceStatusPageClient(api=api, page_id="page-svc")
-    client.replace_snapshot([{"id": "gh", "label": "GitHub", "status": "connected"}])
-    actions = [c[0] for c in api.calls]
-    assert "PATCH" not in " ".join(actions)  # archive 呼び出しなし
-    assert any("append_blocks" in a for a in actions)
-
-
-def test_service_status_rejects_empty_page_id():
-    api = _RecordingAPIWithRequest()
-    with pytest.raises(ValueError):
-        ServiceStatusPageClient(api=api, page_id="")
-
-
-# ---------------------------------------------------------------------------
-# Dispatcher: service_status_checked routing
-# ---------------------------------------------------------------------------
-
-
-def test_dispatcher_routes_service_status_checked(store: SQLiteStore, monkeypatch):
-    monkeypatch.setenv("TEST_TOKEN", "secret")
-    monkeypatch.setenv("TEST_DB", "wf-db")
-    monkeypatch.setenv("TEST_SVC_PAGE", "svc-page-id")
-
-    cfg = _make_config()
-    cfg.service_status_page_id_env = "TEST_SVC_PAGE"
-
-    api = _RecordingAPIWithRequest(list_children_result=[])
-
-    class _Disp(NotionSyncDispatcher):
-        def _get_api(self):
-            return api  # type: ignore[return-value]
-
-    disp = _Disp(store=store, config=cfg)
-    result = disp.dispatch(
-        "service_status_checked",
-        {"services": [{"id": "gh", "label": "GitHub", "status": "connected"}]},
-    )
-    assert result is True
-    actions = [c[0] for c in api.calls]
-    assert any("append_blocks" in a for a in actions)
-
-
-def test_dispatcher_service_status_no_workflow_id_required(store: SQLiteStore, monkeypatch):
-    """service_status_checked は workflow_id 無しでも送信される"""
-    monkeypatch.setenv("TEST_TOKEN", "secret")
-    monkeypatch.setenv("TEST_DB", "wf-db")
-    monkeypatch.setenv("TEST_SVC_PAGE", "svc-page-id")
-
-    cfg = _make_config()
-    cfg.service_status_page_id_env = "TEST_SVC_PAGE"
-
-    api = _RecordingAPIWithRequest(list_children_result=[])
-
-    class _Disp(NotionSyncDispatcher):
-        def _get_api(self):
-            return api  # type: ignore[return-value]
-
-    disp = _Disp(store=store, config=cfg)
-    # workflow_id を含まない payload でも True が返る
-    result = disp.dispatch("service_status_checked", {"services": []})
-    assert result is True
-
-
-def test_dispatcher_service_status_skips_when_page_id_unset(store: SQLiteStore, monkeypatch):
-    monkeypatch.setenv("TEST_TOKEN", "secret")
-    monkeypatch.setenv("TEST_DB", "wf-db")
-    monkeypatch.delenv("TEST_SVC_PAGE", raising=False)
-
-    cfg = _make_config()
-    cfg.service_status_page_id_env = "TEST_SVC_PAGE"
-
-    api = _RecordingAPIWithRequest()
-
-    class _Disp(NotionSyncDispatcher):
-        def _get_api(self):
-            return api  # type: ignore[return-value]
-
-    disp = _Disp(store=store, config=cfg)
-    result = disp.dispatch("service_status_checked", {"services": []})
-    # 送信スキップだが、エラーではないので True 扱い
-    assert result is True
-    # API 呼び出しが発生していない
-    assert api.calls == []
-
-
-def test_sync_service_status_to_notion_skips_when_not_configured(store: SQLiteStore):
-    cfg = _make_config(enabled=False)
-    disp = NotionSyncDispatcher(store=store, config=cfg)
-    assert sync_service_status_to_notion(disp) is False
-
-
-def test_sync_service_status_to_notion_dispatches(store: SQLiteStore, monkeypatch):
-    monkeypatch.setenv("TEST_TOKEN", "secret")
-    monkeypatch.setenv("TEST_DB", "wf-db")
-    monkeypatch.setenv("TEST_SVC_PAGE", "svc-page-id")
-
-    cfg = _make_config()
-    cfg.service_status_page_id_env = "TEST_SVC_PAGE"
-
-    api = _RecordingAPIWithRequest(list_children_result=[])
-
-    class _Disp(NotionSyncDispatcher):
-        def _get_api(self):
-            return api  # type: ignore[return-value]
-
-    disp = _Disp(store=store, config=cfg)
-
-    # connection_status をモック
-    from hokusai.integrations import connection_status as cs
-
-    monkeypatch.setattr(
-        cs,
-        "get_all_statuses",
-        lambda *, refresh=False, mode=cs.MODE_SHALLOW: {
-            "services": [
-                {"id": "gh", "label": "GitHub", "status": "connected"},
-            ]
-        },
-    )
-
-    result = sync_service_status_to_notion(disp)
-    assert result is True
-    actions = [c[0] for c in api.calls]
-    assert any("append_blocks" in a for a in actions)
-
-
-# ---------------------------------------------------------------------------
 # Phase E: Notion ページ URL 解決 + Next Action テンプレート
 # ---------------------------------------------------------------------------
 
@@ -1507,102 +1357,6 @@ def test_slack_payload_omits_dashboard_line_when_url_absent():
     state = {"workflow_id": "wf-1", "current_phase": 1}
     payload = build_text_payload("workflow_started", state)
     assert "Dashboard:" not in payload["text"]
-
-
-# ---------------------------------------------------------------------------
-# CLI: sync-service-status
-# ---------------------------------------------------------------------------
-
-
-def test_cli_sync_service_status_skips_when_disabled(capsys, monkeypatch):
-    """notion_dashboard.enabled=false なら 0 を返してスキップ表示"""
-    from hokusai.cli_main import _handle_sync_service_status
-    from hokusai.config import set_config
-    from hokusai.config.models import NotionDashboardConfig, WorkflowConfig
-
-    set_config(WorkflowConfig(notion_dashboard=NotionDashboardConfig(enabled=False)))
-    rc = _handle_sync_service_status()
-    captured = capsys.readouterr()
-    assert rc == 0
-    assert "スキップ" in captured.out
-
-
-def test_cli_sync_service_status_skips_when_env_missing(capsys, monkeypatch, tmp_path):
-    """enabled=true でも環境変数未設定なら 0 + skipped"""
-    from hokusai.cli_main import _handle_sync_service_status
-    from hokusai.config import set_config
-    from hokusai.config.models import NotionDashboardConfig, WorkflowConfig
-
-    monkeypatch.delenv("HOKUSAI_NOTION_API_TOKEN", raising=False)
-    monkeypatch.delenv("HOKUSAI_NOTION_WORKFLOWS_DB_ID", raising=False)
-
-    set_config(WorkflowConfig(
-        data_dir=tmp_path,
-        database_path=tmp_path / "wf.db",
-        notion_dashboard=NotionDashboardConfig(enabled=True),
-    ))
-    rc = _handle_sync_service_status()
-    captured = capsys.readouterr()
-    assert rc == 0
-    assert "未設定" in captured.out
-
-
-def test_cli_sync_service_status_returns_zero_on_success(
-    capsys, monkeypatch, tmp_path
-):
-    """同期成功時は 0 + 成功メッセージ"""
-    from hokusai.cli_main import _handle_sync_service_status
-    from hokusai.config import set_config
-    from hokusai.config.models import NotionDashboardConfig, WorkflowConfig
-
-    set_config(WorkflowConfig(
-        data_dir=tmp_path,
-        database_path=tmp_path / "wf.db",
-        notion_dashboard=NotionDashboardConfig(enabled=True),
-    ))
-
-    # NotionSyncDispatcher.is_configured と sync_service_status_to_notion をスタブ
-    from hokusai.integrations import notion_dashboard as nd
-
-    monkeypatch.setattr(
-        nd, "sync_service_status_to_notion", lambda dispatcher: True
-    )
-    monkeypatch.setattr(
-        nd.NotionSyncDispatcher, "is_configured", lambda self: True
-    )
-
-    rc = _handle_sync_service_status()
-    captured = capsys.readouterr()
-    assert rc == 0
-    assert "✓" in captured.out
-
-
-def test_cli_sync_service_status_returns_one_on_failure(
-    capsys, monkeypatch, tmp_path
-):
-    from hokusai.cli_main import _handle_sync_service_status
-    from hokusai.config import set_config
-    from hokusai.config.models import NotionDashboardConfig, WorkflowConfig
-
-    set_config(WorkflowConfig(
-        data_dir=tmp_path,
-        database_path=tmp_path / "wf.db",
-        notion_dashboard=NotionDashboardConfig(enabled=True),
-    ))
-
-    from hokusai.integrations import notion_dashboard as nd
-
-    monkeypatch.setattr(
-        nd, "sync_service_status_to_notion", lambda dispatcher: False
-    )
-    monkeypatch.setattr(
-        nd.NotionSyncDispatcher, "is_configured", lambda self: True
-    )
-
-    rc = _handle_sync_service_status()
-    captured = capsys.readouterr()
-    assert rc == 1
-    assert "✗" in captured.out
 
 
 # ---------------------------------------------------------------------------

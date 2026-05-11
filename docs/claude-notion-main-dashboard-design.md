@@ -1,6 +1,9 @@
 # Notion メインダッシュボード化 + HOKUSAI Web Dashboard の運用コンソール化 設計書
 
 **作成日**: 2026-05-05
+
+> ⚠️ **2026-05-11 改訂**: Service Status を Notion ページに同期する案は廃止しました（複数ユーザー環境で last-writer-wins になるため）。サービス接続状態は HOKUSAI Operations Console（`scripts/dashboard.py`）でのみ参照します。本書中の Service Status 関連の章は歴史的経緯として残しますが、現行コードには存在しません。
+
 **対象読者**: プロジェクト責任者・テックリード・実装担当エンジニア
 **目的**: ビジネス側を含めた組織横断の情報共有基盤として Notion をメインダッシュボードに、HOKUSAI Web Dashboard を管理者向け運用コンソールとして再定義する
 

@@ -202,7 +202,6 @@ class NotionDashboardConfig:
     api_token_env: str = "HOKUSAI_NOTION_API_TOKEN"
     workflows_db_id_env: str = "HOKUSAI_NOTION_WORKFLOWS_DB_ID"
     pull_requests_db_id_env: str = "HOKUSAI_NOTION_PR_DB_ID"
-    service_status_page_id_env: str = "HOKUSAI_NOTION_SERVICE_STATUS_PAGE_ID"
     sync_outbox: NotionSyncOutboxConfig = field(default_factory=NotionSyncOutboxConfig)
     retry: NotionSyncRetryConfig = field(default_factory=NotionSyncRetryConfig)
     rate_limit: NotionSyncRateLimitConfig = field(default_factory=NotionSyncRateLimitConfig)

@@ -19,7 +19,6 @@ from typing import Any
 from ...logging_config import get_logger
 from .client import NotionAPIClient, NotionAPIError, NotionRateLimitError
 from .pull_requests_db import PullRequestsDBClient
-from .service_status import ServiceStatusPageClient
 from .workflows_db import WorkflowsDBClient
 
 logger = get_logger("integrations.notion_dashboard.dispatcher")
@@ -39,7 +38,6 @@ class NotionSyncDispatcher:
         self._api: NotionAPIClient | None = None
         self._workflows_db: WorkflowsDBClient | None = None
         self._pull_requests_db: PullRequestsDBClient | None = None
-        self._service_status: ServiceStatusPageClient | None = None
 
     def is_configured(self) -> bool:
         """設定が enabled で、必要な環境変数が揃っているかを返す。"""
@@ -79,14 +77,10 @@ class NotionSyncDispatcher:
         if not self.is_configured():
             return False
 
-        # service_status_checked は workflow_id を持たない（システム全体イベント）
-        if event_type != "service_status_checked":
-            workflow_id = payload.get("workflow_id")
-            if not workflow_id:
-                logger.debug(f"Notion 同期: workflow_id 欠落のためスキップ: event={event_type}")
-                return False
-        else:
-            workflow_id = "_service_status"
+        workflow_id = payload.get("workflow_id")
+        if not workflow_id:
+            logger.debug(f"Notion 同期: workflow_id 欠落のためスキップ: event={event_type}")
+            return False
 
         if idempotency_key is None:
             idempotency_key = self._build_idempotency_key(event_type, payload)
@@ -178,8 +172,13 @@ class NotionSyncDispatcher:
             self._handle_pr_created(payload)
             return
 
+        # 後方互換: 旧 Service Status sync が outbox に積んだ
+        # service_status_checked エントリは Notion 連携廃止済みなので
+        # no-op として扱い、retry_pending() で drain できるようにする。
         if event_type == "service_status_checked":
-            self._handle_service_status_checked(payload)
+            logger.info(
+                "service_status_checked は廃止済みのため no-op で drain します"
+            )
             return
 
         # workflow_started / phase_changed / phase_artifact_linked /
@@ -273,20 +272,6 @@ class NotionSyncDispatcher:
                 return int(row[0]) if row else 0
         except Exception:
             return 0
-
-    def _handle_service_status_checked(self, payload: dict[str, Any]) -> None:
-        """サービス接続状態を Service Status ページに反映する。"""
-        page_id = os.environ.get(
-            self._config.service_status_page_id_env, ""
-        ).strip()
-        if not page_id:
-            logger.debug(
-                "Service Status page_id が未設定のため Notion 反映をスキップ"
-            )
-            return
-        services = payload.get("services") or []
-        client = self._get_service_status_client(page_id)
-        client.replace_snapshot(services)
 
     def _handle_pr_created(self, payload: dict[str, Any]) -> None:
         """PR 作成イベントを Pull Requests DB に反映する。
@@ -413,14 +398,6 @@ class NotionSyncDispatcher:
                 database_id=database_id,
             )
         return self._pull_requests_db
-
-    def _get_service_status_client(self, page_id: str) -> ServiceStatusPageClient:
-        if self._service_status is None:
-            self._service_status = ServiceStatusPageClient(
-                api=self._get_api(),
-                page_id=page_id,
-            )
-        return self._service_status
 
     def _get_api(self) -> NotionAPIClient:
         if self._api is None:
