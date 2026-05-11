@@ -609,6 +609,80 @@ class TestEnsureDesignContextRetry:
         assert all(e.get("error") != "old error" for e in new_errors)
 
 
+class TestAggregateStatus:
+    """_aggregate_status() の集約優先順位。
+
+    特に no_url と not_configured の組合せは、後から URL を追加した
+    `hokusai continue` 時の復帰経路を残すために、片側でも no_url なら
+    全体を no_url として扱う必要がある。
+    """
+
+    def test_no_url_plus_not_configured_returns_no_url(self):
+        from hokusai.integrations.design.context import _aggregate_status
+
+        # 片方 no_url、片方 not_configured → no_url（復帰可能）
+        assert _aggregate_status("no_url", "not_configured") == "no_url"
+        assert _aggregate_status("not_configured", "no_url") == "no_url"
+
+    def test_both_no_url(self):
+        from hokusai.integrations.design.context import _aggregate_status
+
+        assert _aggregate_status("no_url", "no_url") == "no_url"
+
+    def test_both_not_configured(self):
+        from hokusai.integrations.design.context import _aggregate_status
+
+        assert _aggregate_status("not_configured", "not_configured") == "not_configured"
+
+    def test_existing_priorities_preserved(self):
+        from hokusai.integrations.design.context import _aggregate_status
+
+        # 既存の優先順位（failed > partial > ok > skipped > no_url > not_configured）
+        assert _aggregate_status("failed", "ok") == "failed"
+        assert _aggregate_status("partial", "ok") == "partial"
+        assert _aggregate_status("ok", "no_url") == "ok"
+        assert _aggregate_status("skipped", "no_url") == "skipped"
+
+
+class TestResolverExceptionSafeError:
+    """ensure_design_context() の例外時に内部詳細が state に流れないこと。
+
+    state は Slack 通知 / LLM プロンプト / Notion 記録などの外部出力に流れる
+    ため、例外メッセージ（ファイルパス等が含まれ得る）を直接保存しない。
+    """
+
+    def test_exception_text_only_class_name_in_state(self):
+        from hokusai.utils.design_helpers import ensure_design_context
+
+        class _BrokenResolver:
+            def resolve(self, **kwargs):
+                raise RuntimeError("/private/path/to/secret.db: access denied")
+
+        state = {
+            "task_url": "https://example.com",
+            "figma_url": "https://www.figma.com/file/Abc12345DEF/X",
+            "design_integration_status": None,
+            "design_sync_errors": [],
+        }
+        ensure_design_context(
+            state, resolver=_BrokenResolver(), auto_fetch_task_body=False
+        )
+
+        per_source = state.get("design_per_source_status") or {}
+        sync_errors = state.get("design_sync_errors") or []
+
+        # state に内部パス / 詳細が漏れていない
+        for err_text in [
+            per_source.get("figma", {}).get("error", ""),
+            per_source.get("miro", {}).get("error", ""),
+            sync_errors[0].get("error", "") if sync_errors else "",
+        ]:
+            assert "/private/path" not in err_text
+            assert "access denied" not in err_text
+            # 例外クラス名のみが保存されている
+            assert err_text == "RuntimeError"
+
+
 class TestDatabasePathConsistency:
     """DesignCache / DesignContextResolver が WorkflowConfig.database_path を尊重する。
 

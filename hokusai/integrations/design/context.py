@@ -414,6 +414,11 @@ def _aggregate_status(figma: str, miro: str) -> str:
         return "ok"
     if figma == "skipped" or miro == "skipped":
         return "skipped"
-    if figma == "no_url" and miro == "no_url":
+    # no_url が片方でもあれば全体を no_url として扱う。
+    # 「連携は有効だが URL が無い」状態を保持しておくことで、
+    # 後から人間が URL を追加して `hokusai continue` した際に
+    # ensure_design_context() で再 resolve が走る経路を残す。
+    # （`not_configured` は terminal なので、ここで返してしまうと復帰不能）
+    if "no_url" in (figma, miro):
         return "no_url"
     return "not_configured"

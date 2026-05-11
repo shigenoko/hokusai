@@ -108,20 +108,23 @@ def ensure_design_context(
             text_sources=sources,
         )
     except Exception as exc:
-        logger.warning("design context resolve failed: %s", exc)
-        error_text = f"{type(exc).__name__}: {exc}"
+        # 内部詳細（{exc} にはファイルパス等が混入し得る）はサーバ側ログに
+        # traceback として残し、state には外部出力（Slack / LLM プロンプト /
+        # Notion）に流れても安全な「例外クラス名のみ」を保存する。
+        logger.exception("design context resolve failed")
+        safe_error = type(exc).__name__
         state["design_integration_status"] = "failed"
         state["design_sync_errors"] = state.get("design_sync_errors") or []
         state["design_sync_errors"].append({
             "source": "resolver",
-            "error": error_text,
+            "error": safe_error,
         })
         # resolver 自体の例外は per-source の取得を一切実施できなかったことを意味する。
         # 後段の get_design_resolution() / render_markdown() が「figma/miro どちらも
         # 失敗」として扱えるよう、両 source に failed の per-source status を記録する。
         state["design_per_source_status"] = {
-            "figma": {"status": "failed", "error": error_text},
-            "miro": {"status": "failed", "error": error_text},
+            "figma": {"status": "failed", "error": safe_error},
+            "miro": {"status": "failed", "error": safe_error},
         }
         return state
 
