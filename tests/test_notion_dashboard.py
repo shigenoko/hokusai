@@ -734,7 +734,8 @@ def test_dispatcher_retry_pending_drains_legacy_service_status_entries(
     assert store.count_notion_sync_pending() == 1
 
     disp = NotionSyncDispatcher(store=store, config=_make_config())
-    # _get_api が外部呼び出しに行かないことを保証（no-op パスを通るはず）
+    # _get_workflows_client が呼ばれないことを保証（service_status_checked は
+    # _send_to_notion の冒頭で no-op 終了するため、Workflows DB へは到達しないはず）
     monkeypatch.setattr(
         NotionSyncDispatcher,
         "_get_workflows_client",
