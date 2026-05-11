@@ -62,7 +62,6 @@ def test_render_notion_dashboard_panel_shows_when_enabled(isolated_dashboard, mo
     html = isolated_dashboard.render_notion_dashboard_panel()
     assert "Notion メインダッシュボード" in html
     assert "同期再送" in html
-    assert "Service Status を Notion へ反映" in html
     # is_configured = False（環境変数未設定）でもパネルは表示される
     assert "設定済み" in html or "設定" in html
 

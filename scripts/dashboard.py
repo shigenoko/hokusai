@@ -101,9 +101,6 @@ def render_notion_dashboard_panel() -> str:
           <button class="btn btn-secondary" onclick="hokusaiNotionRetryPending()">
             同期再送（保留 {pending} 件 / 永続失敗 {errors} 件）
           </button>
-          <button class="btn btn-secondary" onclick="hokusaiNotionSyncServiceStatus()">
-            Service Status を Notion へ反映
-          </button>
         </div>
       </div>
       <div id="notion-dashboard-result" style="margin-top:8px; font-size:0.85em;"></div>
@@ -122,21 +119,6 @@ def render_notion_dashboard_panel() -> str:
         }}
       }} catch (e) {{
         out.textContent = '再送中にエラー: ' + e.message;
-      }}
-    }}
-    async function hokusaiNotionSyncServiceStatus() {{
-      const out = document.getElementById('notion-dashboard-result');
-      out.textContent = 'Service Status を反映中...';
-      try {{
-        const r = await fetch('/api/notion-dashboard/sync-service-status', {{method: 'POST'}});
-        const j = await r.json();
-        if (j.success) {{
-          out.textContent = 'Service Status を Notion に反映しました';
-        }} else {{
-          out.textContent = '反映失敗: ' + (j.error || '不明');
-        }}
-      }} catch (e) {{
-        out.textContent = '反映中にエラー: ' + e.message;
       }}
     }}
     </script>
@@ -7063,8 +7045,6 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._handle_retry_notion_post()
         elif parsed.path == "/api/notion-dashboard/retry-pending":
             self._handle_notion_retry_pending_post()
-        elif parsed.path == "/api/notion-dashboard/sync-service-status":
-            self._handle_notion_sync_service_status_post()
         elif parsed.path == "/api/figma/refresh-cache":
             self._handle_design_cache_refresh_post("figma")
         elif parsed.path == "/api/miro/refresh-cache":
@@ -7094,28 +7074,6 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 return
             result = dispatcher.retry_pending()
             self._send_json_response({"success": True, **result})
-        except Exception as e:
-            self._send_json_response(
-                {"success": False, "error": f"{type(e).__name__}"},
-                status_code=500,
-            )
-
-    def _handle_notion_sync_service_status_post(self):
-        """connection_status の最新結果を Notion Service Status ページに反映する。"""
-        try:
-            from hokusai.integrations.notion_dashboard import (
-                sync_service_status_to_notion,
-            )
-
-            dispatcher = _get_notion_dispatcher()
-            if not dispatcher.is_configured():
-                self._send_json_response({
-                    "success": False,
-                    "error": "Notion ダッシュボード同期が有効化されていません",
-                })
-                return
-            ok = sync_service_status_to_notion(dispatcher)
-            self._send_json_response({"success": ok})
         except Exception as e:
             self._send_json_response(
                 {"success": False, "error": f"{type(e).__name__}"},

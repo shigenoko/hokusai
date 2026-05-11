@@ -5,7 +5,6 @@ Notion 上に HOKUSAI 用の DB / ページを一括作成する。
 作成されるリソース:
 - HOKUSAI Workflows DB
 - HOKUSAI Pull Requests DB（Workflow → Workflows DB の relation 付き）
-- HOKUSAI Service Status ページ
 
 前提:
 - 親ページ（parent_page_id）が事前に Notion 上に存在し、HOKUSAI integration が
@@ -37,7 +36,6 @@ logger = get_logger("integrations.notion_dashboard.setup")
 # ----- リソース名（運用ガイドの命名と一致させる） -----------------------
 WORKFLOWS_DB_TITLE = "HOKUSAI Workflows DB"
 PULL_REQUESTS_DB_TITLE = "HOKUSAI Pull Requests DB"
-SERVICE_STATUS_PAGE_TITLE = "HOKUSAI Service Status"
 
 
 # ----- DB 説明（手動編集を抑止する警告文） ------------------------------
@@ -182,7 +180,6 @@ def setup_notion_workspace(
         {
             "workflows_db_id": "...",
             "pull_requests_db_id": "...",
-            "service_status_page_id": "...",
         }
 
     Raises:
@@ -241,53 +238,9 @@ def setup_notion_workspace(
             "Pull Requests DB の作成レスポンスに id が含まれません"
         )
 
-    # 3. Service Status ページを作る（サブページ。HOKUSAI が定期書き換え）
-    logger.info("Service Status ページを作成中...")
-    try:
-        page = api.create_page({
-            "parent": {"type": "page_id", "page_id": parent_page_id},
-            "properties": {
-                "title": {
-                    "title": [
-                        {"type": "text", "text": {"content": SERVICE_STATUS_PAGE_TITLE}}
-                    ]
-                }
-            },
-            "children": [
-                {
-                    "object": "block",
-                    "type": "paragraph",
-                    "paragraph": {
-                        "rich_text": [
-                            {
-                                "type": "text",
-                                "text": {
-                                    "content": (
-                                        "HOKUSAI が定期的にサービス接続状態を"
-                                        "書き換えます。手動編集は反映されません。"
-                                    )
-                                },
-                            }
-                        ]
-                    },
-                }
-            ],
-        })
-    except Exception as e:
-        raise NotionSetupError(
-            f"Service Status ページの作成に失敗: {type(e).__name__}: {e}"
-        ) from e
-
-    service_status_page_id = page.get("id")
-    if not service_status_page_id:
-        raise NotionSetupError(
-            "Service Status ページの作成レスポンスに id が含まれません"
-        )
-
     return {
         "workflows_db_id": workflows_db_id,
         "pull_requests_db_id": pull_requests_db_id,
-        "service_status_page_id": service_status_page_id,
     }
 
 
@@ -350,7 +303,6 @@ def persist_env_vars(
         f"# Last updated: {datetime.now().isoformat()}",
         f'export HOKUSAI_NOTION_WORKFLOWS_DB_ID="{ids["workflows_db_id"]}"',
         f'export HOKUSAI_NOTION_PR_DB_ID="{ids["pull_requests_db_id"]}"',
-        f'export HOKUSAI_NOTION_SERVICE_STATUS_PAGE_ID="{ids["service_status_page_id"]}"',
         PERSIST_END_MARKER,
     ]
     new_block = "\n".join(block_lines) + "\n"
