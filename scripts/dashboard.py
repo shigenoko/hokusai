@@ -7183,8 +7183,16 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 "deleted_rows": deleted,
             })
         except Exception as e:
+            # 詳細な例外メッセージはファイルパス等の内部情報を含み得るので
+            # API レスポンスには出さず、サーバ側 stderr に traceback として
+            # 残す。クライアント向けは例外クラス名のみ（他の POST ハンドラと
+            # 同じパターン）。
+            import sys
+            import traceback
+
+            traceback.print_exc(file=sys.stderr)
             self._send_json_response(
-                {"success": False, "errors": [f"{type(e).__name__}: {e}"]},
+                {"success": False, "errors": [type(e).__name__]},
                 status_code=500,
             )
 

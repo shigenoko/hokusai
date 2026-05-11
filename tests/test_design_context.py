@@ -660,6 +660,56 @@ class TestDatabasePathConsistency:
             reset_config()
 
 
+class TestDesignCacheHitLogging:
+    """DesignCache の hit / miss が debug ログとして出力される。
+
+    運用ガイドで「cache hit ログを確認」と案内している挙動の
+    実装側保証。
+    """
+
+    def test_get_figma_emits_hit_and_miss_log(self, tmp_path):
+        from unittest.mock import patch
+
+        from hokusai.integrations.design.cache import DesignCache
+        from hokusai.persistence.sqlite_store import SQLiteStore
+
+        store = SQLiteStore(tmp_path / "t.db")
+        cache = DesignCache(store)
+
+        with patch("hokusai.integrations.design.cache.logger") as mock_logger:
+            # miss
+            cache.get_figma("fk1", None)
+            # put + hit
+            cache.put_figma("fk1", None, {"x": 1}, ttl_seconds=60)
+            cache.get_figma("fk1", None)
+
+            debug_messages = [
+                call.args[0] for call in mock_logger.debug.call_args_list
+            ]
+            assert any("figma cache miss" in m for m in debug_messages)
+            assert any("figma cache hit" in m for m in debug_messages)
+
+    def test_get_miro_emits_hit_and_miss_log(self, tmp_path):
+        from unittest.mock import patch
+
+        from hokusai.integrations.design.cache import DesignCache
+        from hokusai.persistence.sqlite_store import SQLiteStore
+
+        store = SQLiteStore(tmp_path / "t.db")
+        cache = DesignCache(store)
+
+        with patch("hokusai.integrations.design.cache.logger") as mock_logger:
+            cache.get_miro("bid1")
+            cache.put_miro("bid1", {"y": 1}, ttl_seconds=60)
+            cache.get_miro("bid1")
+
+            debug_messages = [
+                call.args[0] for call in mock_logger.debug.call_args_list
+            ]
+            assert any("miro cache miss" in m for m in debug_messages)
+            assert any("miro cache hit" in m for m in debug_messages)
+
+
 class TestPhase2DesignBlock:
     """Phase 2 で design 取得失敗 (on_failure: block) 時に早期 return する動作。"""
 

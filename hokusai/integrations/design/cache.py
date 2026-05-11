@@ -74,7 +74,11 @@ class DesignCache:
         except Exception as exc:
             logger.warning("figma cache get failed (cache_key=%s): %s", cache_key, exc)
             return None
-        return row["payload"] if row else None
+        if row:
+            logger.debug("figma cache hit (cache_key=%s)", cache_key)
+            return row["payload"]
+        logger.debug("figma cache miss (cache_key=%s)", cache_key)
+        return None
 
     def put_figma(
         self,
@@ -104,7 +108,11 @@ class DesignCache:
         except Exception as exc:
             logger.warning("miro cache get failed (cache_key=%s): %s", cache_key, exc)
             return None
-        return row["payload"] if row else None
+        if row:
+            logger.debug("miro cache hit (cache_key=%s)", cache_key)
+            return row["payload"]
+        logger.debug("miro cache miss (cache_key=%s)", cache_key)
+        return None
 
     def put_miro(
         self,
