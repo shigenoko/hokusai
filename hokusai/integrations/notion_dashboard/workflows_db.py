@@ -28,9 +28,11 @@ logger = get_logger("integrations.notion_dashboard.workflows_db")
 # 抽出するための正規表現。Notion のメッセージ例:
 #   "<NAME> is not a property that exists. ..."
 #   "Could not find property with name or id: \"<NAME>\". ..."
+#   "Could not find property with name or id: '<NAME>'. ..." (single quote)
 # プロパティ名は空白を含み得る（例: "Design Status"）ため、prefix パターンは最短一致で
-# "is not a property" の直前まで全部キャプチャする。
-_PROPERTY_NAME_PATTERN_QUOTED = re.compile(r'"([^"]+)"')
+# "is not a property" の直前まで全部キャプチャする。クォートは double / single の
+# 両方を許容（Notion のメッセージ表記ゆれに対応）。
+_PROPERTY_NAME_PATTERN_QUOTED = re.compile(r"""(?:"([^"]+)"|'([^']+)')""")
 _PROPERTY_NAME_PATTERN_PREFIX = re.compile(r"^(.+?)\s+is not a property", re.IGNORECASE)
 
 
@@ -322,23 +324,26 @@ def _extract_missing_property(message: str, current_props: dict) -> str | None:
     Notion のメッセージは表記ゆれ（quote 有無、空白を含む名前、大小文字差）が
     あり得るため、以下の順で頑健に試行する:
 
-    1. ダブルクォートで囲まれた名前（"Design Status" 等）— current_props と一致した時のみ
+    1. クォート（double / single）で囲まれた名前 — current_props と一致時のみ
     2. `<name> is not a property` の prefix パターン（最短一致、空白含む名前を許容）
     3. 現在送ろうとしているプロパティ名のいずれかがメッセージに含まれているか
-       （大小文字非依存。Notion のエラー文が小文字化される実装に備える）
+       （大小文字非依存。**長い名前を優先**して評価することで、`Status` が
+       `Design Status` を先取りして誤削除する事故を防ぐ）
     """
     msg_lower = message.lower()
 
-    # 1. クォート抽出
+    # 1. クォート抽出（double / single 両対応）
     m = _PROPERTY_NAME_PATTERN_QUOTED.search(message)
     if m:
-        candidate = m.group(1)
-        if candidate in current_props:
-            return candidate
-        # 大小文字差を吸収
-        for name in current_props:
-            if name.lower() == candidate.lower():
-                return name
+        # group(1)=double quote 内、group(2)=single quote 内（どちらかは None）
+        candidate = m.group(1) or m.group(2)
+        if candidate:
+            if candidate in current_props:
+                return candidate
+            # 大小文字差を吸収
+            for name in current_props:
+                if name.lower() == candidate.lower():
+                    return name
 
     # 2. 先頭パターン（"Design Status is not a property..." → "Design Status"）
     m = _PROPERTY_NAME_PATTERN_PREFIX.match(message)
@@ -350,8 +355,9 @@ def _extract_missing_property(message: str, current_props: dict) -> str | None:
             if name.lower() == candidate.lower():
                 return name
 
-    # 3. 現在送るプロパティのうち、メッセージに含まれるもの（大小文字非依存）
-    for name in current_props:
+    # 3. 含有チェック。長い名前を優先することで、"Status" が "Design Status" より
+    #    先に一致して payload から先取りされる誤削除を避ける。
+    for name in sorted(current_props, key=len, reverse=True):
         if name.lower() in msg_lower:
             return name
 

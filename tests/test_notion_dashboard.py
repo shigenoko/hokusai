@@ -512,6 +512,50 @@ def test_extract_missing_property_case_insensitive_and_spaces():
     assert _extract_missing_property("Unrelated error", current) is None
 
 
+def test_extract_missing_property_supports_single_quote():
+    """Notion のメッセージが single quote で囲んでいるパターンも拾える。"""
+    from hokusai.integrations.notion_dashboard.workflows_db import (
+        _extract_missing_property,
+    )
+
+    current = {"Design Status": {}, "Miro URL": {}}
+
+    # single quote
+    assert _extract_missing_property(
+        "Could not find property with name or id: 'Design Status'.", current
+    ) == "Design Status"
+    # double quote（既存挙動の維持）
+    assert _extract_missing_property(
+        'Could not find property with name or id: "Design Status".', current
+    ) == "Design Status"
+
+
+def test_extract_missing_property_prefers_longer_name():
+    """含有チェック (3) で長いプロパティ名を優先して短い名前の誤削除を防ぐ。
+
+    "Status" と "Design Status" が両方 payload にある場合、メッセージに
+    "design status" が含まれていれば、短い "Status" ではなく長い
+    "Design Status" を選ぶ必要がある（payload の dict 順による先取りを
+    避ける）。
+    """
+    from hokusai.integrations.notion_dashboard.workflows_db import (
+        _extract_missing_property,
+    )
+
+    # Status を Design Status より先に挿入（dict は挿入順を保持）
+    current = {"Status": {}, "Design Status": {}, "Name": {}}
+
+    # 含有チェック経路で "Design Status" にマッチするべき
+    result = _extract_missing_property(
+        "the property design status cannot be found", current
+    )
+    assert result == "Design Status"
+
+    # 両方含まれる文字列でも長い方を優先
+    result2 = _extract_missing_property("status design status", current)
+    assert result2 == "Design Status"
+
+
 def test_workflows_db_propagates_other_errors():
     """property_not_found 以外のエラーは即座に伝播する。"""
     from hokusai.integrations.notion_dashboard.client import NotionAPIError

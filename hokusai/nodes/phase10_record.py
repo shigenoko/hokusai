@@ -96,7 +96,14 @@ def _append_final_change_summary(
 def _append_design_summary(state: WorkflowState, task_client) -> WorkflowState:
     """Figma / Miro 連携結果をタスクページに追記する。
 
-    URL が無いタスクや連携失敗時は何もしない。
+    挙動:
+    - state に figma_url / miro_url のどちらも無いタスクでは何もしない
+    - URL が 1 つでもあれば、連携の成否に関わらずサマリを追記する
+      - 成功時: タイトル / summary / URL / 連携状態を記載
+      - 取得失敗（summary が無い）時: "(取得失敗)" 表示で URL のみ残す
+      - design_sync_errors がある場合: 「エラー」セクションに source 別の
+        詳細を最大 5 件まで記載
+    これにより運用者は Notion のタスクページだけで連携状況を把握できる。
     """
     figma_url = state.get("figma_url")
     miro_url = state.get("miro_url")
