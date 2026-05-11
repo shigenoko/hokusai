@@ -4,6 +4,7 @@
   kind: prompt
   variables:
     - task_url
+    - design_context
 
 - id: phase2.task_research_retry
   title: "Phase 2 事前調査リトライ"
@@ -22,6 +23,7 @@
     - task_url
     - research_result
     - cross_review_section
+    - design_context
 
 - id: phase3.design_check_retry
   title: "Phase 3 設計チェックリトライ"
@@ -60,6 +62,7 @@
     - task_url
     - work_plan_section
     - expected_files_section
+    - design_context
 
 - id: phase5.retry_fix
   title: "Phase 5 リトライ修正"
@@ -80,6 +83,7 @@
   variables:
     - builtin_checklist
     - project_checklist_section
+    - design_context
 
 - id: phase8.review_fix
   title: "Phase 8 レビュー修正"

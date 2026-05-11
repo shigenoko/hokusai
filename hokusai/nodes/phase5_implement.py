@@ -514,6 +514,10 @@ def _build_implementation_prompt(
         lines.extend(f"- {f}" for f in state["expected_changed_files"])
         expected_files_section = "\n".join(lines) + "\n"
 
+    # 外部デザイン情報（Figma / Miro）を組み立て
+    from ..utils.design_helpers import format_design_context_section
+    design_context = format_design_context_section(state)
+
     return get_prompt(
         "phase5.implementation",
         repo_section=repo_section,
@@ -521,6 +525,7 @@ def _build_implementation_prompt(
         task_url=state["task_url"],
         work_plan_section=work_plan_section,
         expected_files_section=expected_files_section,
+        design_context=design_context,
     )
 
 

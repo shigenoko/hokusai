@@ -34,6 +34,9 @@ def phase10_record_node(state: WorkflowState) -> WorkflowState:
     # 確定版変更サマリーを生成してタスクページに追記（worktree cleanup 前）
     state = _append_final_change_summary(state, task_client)
 
+    # 外部デザイン情報をタスクページに追記
+    state = _append_design_summary(state, task_client)
+
     # worktree の自動 cleanup（HOKUSAI が作成したもののみ）
     _cleanup_worktrees(state)
 
@@ -87,6 +90,66 @@ def _append_final_change_summary(
             state, 10, "final_change_summary_failed", "warning", error=str(e),
         )
 
+    return state
+
+
+def _append_design_summary(state: WorkflowState, task_client) -> WorkflowState:
+    """Figma / Miro 連携結果をタスクページに追記する。
+
+    挙動:
+    - state に figma_url / miro_url のどちらも無いタスクでは何もしない
+    - URL が 1 つでもあれば、連携の成否に関わらずサマリを追記する
+      - 成功時: タイトル / summary / URL / 連携状態を記載
+      - 取得失敗（summary が無い）時: "(取得失敗)" 表示で URL のみ残す
+      - design_sync_errors がある場合: 「エラー」セクションに source 別の
+        詳細を最大 5 件まで記載
+    これにより運用者は Notion のタスクページだけで連携状況を把握できる。
+    """
+    figma_url = state.get("figma_url")
+    miro_url = state.get("miro_url")
+    if not (figma_url or miro_url):
+        return state
+
+    try:
+        from ..utils.design_helpers import design_links_for_record
+
+        info = design_links_for_record(state)
+        lines = ["### デザイン / 業務フロー連携", ""]
+        if miro_url:
+            ms = info.get("miro_summary") or "(取得失敗)"
+            lines.append(f"- Miro: [{ms}]({miro_url})")
+        if figma_url:
+            fs = info.get("figma_summary") or "(取得失敗)"
+            lines.append(f"- Figma: [{fs}]({figma_url})")
+        status = info.get("design_integration_status") or "unknown"
+        lines.append(f"- 連携状態: {status}")
+        warnings = info.get("design_warnings") or []
+        if warnings:
+            lines.append("- 警告:")
+            for w in warnings[:5]:
+                lines.append(f"  - {w}")
+        errors = info.get("design_sync_errors") or []
+        if errors:
+            lines.append("- エラー:")
+            for e in errors[:5]:
+                src = e.get("source", "?")
+                msg = e.get("error", "")
+                lines.append(f"  - {src}: {msg}")
+
+        content = "\n".join(lines)
+        result = task_client.append_progress(state["task_url"], content)
+        if hasattr(result, "result"):
+            state = add_audit_log(
+                state, 10, "design_summary_appended", result.result.value,
+                error=result.reason,
+            )
+        else:
+            state = add_audit_log(state, 10, "design_summary_appended", "success")
+    except Exception as exc:
+        logger.warning(f"デザイン情報の記録に失敗: {exc}")
+        state = add_audit_log(
+            state, 10, "design_summary_failed", "warning", error=str(exc),
+        )
     return state
 
 

@@ -1071,6 +1071,30 @@ def _build_notion_payload(state: dict, **overrides: object) -> dict:
         "last_updated": datetime_now_iso(),
         "revision": str(retry_count),
     }
+
+    # Figma / Miro 連携情報。実際にデザイン情報が取得できた／取得を試みて失敗した
+    # 場合のみ payload に含める。`no_url`（URL なし）や `not_configured`（連携無効）
+    # を含む全実行で常にフィールドを送ると、既存 DB に該当プロパティが無い環境で
+    # property_not_found で失敗するため除外する。
+    integration_status = state.get("design_integration_status")
+    has_design_data = (
+        integration_status not in (None, "no_url", "not_configured")
+        or state.get("miro_url")
+        or state.get("figma_url")
+    )
+    if has_design_data:
+        if integration_status:
+            payload["design_integration_status"] = integration_status
+        if state.get("miro_url"):
+            payload["miro_url"] = state.get("miro_url")
+        if state.get("figma_url"):
+            payload["figma_url"] = state.get("figma_url")
+        # design_review_required は bool なので明示的に送る（True/False の両方が意味を持つ）
+        if isinstance(state.get("design_review_required"), bool):
+            payload["design_review_required"] = bool(state.get("design_review_required"))
+        if state.get("design_review_result"):
+            payload["design_review_result"] = state.get("design_review_result")
+
     payload.update(overrides)
     return payload
 

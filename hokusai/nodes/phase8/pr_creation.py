@@ -110,6 +110,19 @@ def _create_new_pr(
     pr_title = task_title or f"feat: {branch_name}"
     pr_body_parts = ["## 概要", "", f"タスク: {task_url}" if task_url else ""]
 
+    # 外部デザイン情報リンク（Figma / Miro）を本文に追記
+    figma_url = state.get("figma_url")
+    miro_url = state.get("miro_url")
+    if figma_url or miro_url:
+        pr_body_parts.append("")
+        pr_body_parts.append("## デザイン / 業務フロー参照")
+        if miro_url:
+            pr_body_parts.append(f"- Miro: {miro_url}")
+        if figma_url:
+            pr_body_parts.append(f"- Figma: {figma_url}")
+        if state.get("design_review_required"):
+            pr_body_parts.append("- ⚠️ デザインレビューが必要です（未解決コメントあり）")
+
     # チェリーピック情報を追加
     cherry_picked_from = state.get("cherry_picked_from")
     if cherry_picked_from:

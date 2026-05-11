@@ -15,13 +15,25 @@ Phase 2/3/4 の子ページ自体は既存の Notion MCP 経由（save_to_subpag
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Any
 
 from ...logging_config import get_logger
-from .client import NotionAPIClient
+from .client import NotionAPIClient, NotionAPIError
 
 logger = get_logger("integrations.notion_dashboard.workflows_db")
+
+# Notion API が property_not_found エラーを返す際のメッセージから、対象プロパティ名を
+# 抽出するための正規表現。Notion のメッセージ例:
+#   "<NAME> is not a property that exists. ..."
+#   "Could not find property with name or id: \"<NAME>\". ..."
+#   "Could not find property with name or id: '<NAME>'. ..." (single quote)
+# プロパティ名は空白を含み得る（例: "Design Status"）ため、prefix パターンは最短一致で
+# "is not a property" の直前まで全部キャプチャする。クォートは double / single の
+# 両方を許容（Notion のメッセージ表記ゆれに対応）。
+_PROPERTY_NAME_PATTERN_QUOTED = re.compile(r"""(?:"([^"]+)"|'([^']+)')""")
+_PROPERTY_NAME_PATTERN_PREFIX = re.compile(r"^(.+?)\s+is not a property", re.IGNORECASE)
 
 
 # ワークフローイベントの種別。同期 dispatcher が発行するイベント名と対応する。
@@ -65,6 +77,13 @@ class WorkflowsDBClient:
         Raises:
             ValueError: workflow_id が含まれない場合
             NotionAPIError / NotionRateLimitError: API 呼び出し失敗
+
+        Note:
+            Notion DB 側に該当プロパティが存在しない場合 (property_not_found) は、
+            該当プロパティを除去して同期を再試行する。最大 6 回まで試行
+            （= 初回 1 + リトライ 5）。これにより、Workflows DB スキーマが古い環境
+            （Figma/Miro 系プロパティ未追加など）でも、存在するプロパティのみで
+            同期が進む。
         """
         workflow_id = payload.get("workflow_id")
         if not workflow_id:
@@ -72,15 +91,58 @@ class WorkflowsDBClient:
 
         existing_page_id = self._find_page_id(workflow_id)
         properties = self._build_properties(event_type, payload)
+        return self._submit_with_property_pruning(existing_page_id, properties)
 
-        if existing_page_id is None:
-            # 新規作成: Name / Workflow ID / Started At を最低限必須として埋める
-            return self._api.create_page({
-                "parent": {"database_id": self._database_id},
-                "properties": properties,
-            })
+    def _submit_with_property_pruning(
+        self,
+        existing_page_id: str | None,
+        properties: dict,
+        max_attempts: int = 6,
+    ) -> dict:
+        """create / update を試行し、property_not_found なら原因プロパティを除去して再試行。
 
-        return self._api.update_page(existing_page_id, {"properties": properties})
+        Notion DB スキーマの差異（プロパティが追加されていない環境）を吸収するため、
+        エラーから推定される原因プロパティをペイロードから外して同期を継続させる。
+        無限ループ回避のために最大試行回数を持つ。
+        """
+        attempts = 0
+        current_props = dict(properties)
+        while True:
+            attempts += 1
+            try:
+                if existing_page_id is None:
+                    return self._api.create_page({
+                        "parent": {"database_id": self._database_id},
+                        "properties": current_props,
+                    })
+                return self._api.update_page(
+                    existing_page_id, {"properties": current_props}
+                )
+            except NotionAPIError as exc:
+                if not _is_property_not_found(exc):
+                    raise
+                if attempts >= max_attempts:
+                    logger.warning(
+                        "property_not_found リトライ上限に到達: 残プロパティ数=%d",
+                        len(current_props),
+                    )
+                    raise
+                missing = _extract_missing_property(exc.message, current_props)
+                if missing is None:
+                    # メッセージから推定できなかった場合は安全のため打ち切る
+                    logger.warning(
+                        "property_not_found 検知だが対象プロパティを特定できず: %s",
+                        exc.message[:200],
+                    )
+                    raise
+                logger.info(
+                    "Workflows DB に '%s' プロパティが存在しないため除外して再試行",
+                    missing,
+                )
+                current_props.pop(missing, None)
+                if not current_props:
+                    logger.warning("除外後にプロパティが空になったため処理を中断")
+                    raise
 
     def get_workflow_page_url(self, workflow_id: str) -> str | None:
         """workflow_id に対応する Notion ページ URL を返す。
@@ -194,6 +256,33 @@ class WorkflowsDBClient:
             summary = str(payload["sync_errors"] or "")
             props["Sync Errors"] = _rich_text(summary)
 
+        # Figma / Miro 連携プロパティ。DB 側に存在しない場合は Notion 側で
+        # property_not_found となるため、空値はスキップして送らない。
+        if "miro_url" in payload and payload["miro_url"]:
+            props["Miro URL"] = {"url": str(payload["miro_url"])}
+        if "figma_url" in payload and payload["figma_url"]:
+            props["Figma URL"] = {"url": str(payload["figma_url"])}
+        if "design_integration_status" in payload and payload["design_integration_status"]:
+            props["Design Status"] = {
+                "select": {"name": str(payload["design_integration_status"])}
+            }
+        if "design_review_required" in payload and isinstance(
+            payload["design_review_required"], bool
+        ):
+            props["Design Review Required"] = {
+                "checkbox": bool(payload["design_review_required"])
+            }
+        if "design_review_result" in payload and payload["design_review_result"]:
+            props["Design Review Result"] = {
+                "select": {"name": str(payload["design_review_result"])}
+            }
+        if "miro_last_synced_at" in payload and payload["miro_last_synced_at"]:
+            props["Miro Last Synced At"] = _date(str(payload["miro_last_synced_at"]))
+        if "figma_last_synced_at" in payload and payload["figma_last_synced_at"]:
+            props["Figma Last Synced At"] = _date(str(payload["figma_last_synced_at"]))
+        if "design_notes" in payload and payload["design_notes"]:
+            props["Design Notes"] = _rich_text(str(payload["design_notes"])[:2000])
+
         return props
 
 
@@ -207,3 +296,69 @@ def _rich_text(text: str) -> dict:
 
 def _date(iso_string: str) -> dict:
     return {"date": {"start": iso_string}}
+
+
+def _is_property_not_found(exc: NotionAPIError) -> bool:
+    """Notion API エラーが property_not_found（プロパティ欠落）由来か判定する。
+
+    判定条件は AND で 3 つ:
+    1. HTTP status が 400（Bad Request）
+    2. error code が "validation_error"
+    3. メッセージに欠落を示す文言（"not a property" / "could not find property"）
+
+    文字列マッチだけだと、別 code の 4xx で文言が偶然含まれた場合に誤判定する。
+    また `validation_error` 全般を property_not_found 扱いすると、型不一致や
+    不正な値（例: `body.properties.X.url` が壊れている等）まで pruning 対象に
+    なり、実在するプロパティが除去されて誤って同期成功扱いされるリスクがある。
+    そのため status + code + 文言の 3 段で絞り込む。
+    """
+    if exc.status != 400 or exc.code != "validation_error":
+        return False
+    msg = exc.message.lower()
+    return ("not a property" in msg) or ("could not find property" in msg)
+
+
+def _extract_missing_property(message: str, current_props: dict) -> str | None:
+    """エラーメッセージから対象プロパティ名を抽出する。
+
+    Notion のメッセージは表記ゆれ（quote 有無、空白を含む名前、大小文字差）が
+    あり得るため、以下の順で頑健に試行する:
+
+    1. クォート（double / single）で囲まれた名前 — current_props と一致時のみ
+    2. `<name> is not a property` の prefix パターン（最短一致、空白含む名前を許容）
+    3. 現在送ろうとしているプロパティ名のいずれかがメッセージに含まれているか
+       （大小文字非依存。**長い名前を優先**して評価することで、`Status` が
+       `Design Status` を先取りして誤削除する事故を防ぐ）
+    """
+    msg_lower = message.lower()
+
+    # 1. クォート抽出（double / single 両対応）
+    m = _PROPERTY_NAME_PATTERN_QUOTED.search(message)
+    if m:
+        # group(1)=double quote 内、group(2)=single quote 内（どちらかは None）
+        candidate = m.group(1) or m.group(2)
+        if candidate:
+            if candidate in current_props:
+                return candidate
+            # 大小文字差を吸収
+            for name in current_props:
+                if name.lower() == candidate.lower():
+                    return name
+
+    # 2. 先頭パターン（"Design Status is not a property..." → "Design Status"）
+    m = _PROPERTY_NAME_PATTERN_PREFIX.match(message)
+    if m:
+        candidate = m.group(1).strip()
+        if candidate in current_props:
+            return candidate
+        for name in current_props:
+            if name.lower() == candidate.lower():
+                return name
+
+    # 3. 含有チェック。長い名前を優先することで、"Status" が "Design Status" より
+    #    先に一致して payload から先取りされる誤削除を避ける。
+    for name in sorted(current_props, key=len, reverse=True):
+        if name.lower() in msg_lower:
+            return name
+
+    return None

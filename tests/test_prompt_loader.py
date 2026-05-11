@@ -18,7 +18,11 @@ class TestGetPrompt:
 
     def test_returns_formatted_string(self):
         """変数埋め込みが正しく動作する"""
-        result = get_prompt("phase2.task_research", task_url="https://example.com/task/1")
+        result = get_prompt(
+            "phase2.task_research",
+            task_url="https://example.com/task/1",
+            design_context="",
+        )
         assert "https://example.com/task/1" in result
         assert "タスクURL: https://example.com/task/1" in result
         assert "{task_url}" not in result
@@ -59,6 +63,7 @@ class TestGetPrompt:
             task_url="https://example.com/task/1",
             work_plan_section="## 作業計画\nステップ1\n",
             expected_files_section="## 変更予定ファイル\n- src/main.ts\n",
+            design_context="",
         )
         assert "test-repo" in result
         assert "ステップ1" in result

@@ -51,6 +51,7 @@ CategoryLLMAgent = "llm_agent"
 CategoryGitHosting = "git_hosting"
 CategoryTaskBackend = "task_backend"
 CategoryMCP = "mcp"
+CategoryDesign = "design"
 
 MODE_SHALLOW = "shallow"
 MODE_DEEP = "deep"
@@ -105,6 +106,16 @@ SERVICE_METADATA: dict[str, dict[str, Any]] = {
         "label": "Linear",
         "category": CategoryTaskBackend,
         "required_for": ["task_backend"],
+    },
+    "figma": {
+        "label": "Figma",
+        "category": CategoryDesign,
+        "required_for": ["design_context"],
+    },
+    "miro": {
+        "label": "Miro",
+        "category": CategoryDesign,
+        "required_for": ["design_context"],
     },
 }
 
@@ -579,6 +590,151 @@ def _check_linear(mode: str) -> dict[str, Any]:
     )
 
 
+def _check_figma(mode: str) -> dict[str, Any]:
+    """Figma 接続状態を環境変数の有無のみで判定する shallow check。
+
+    現時点では設定（config.figma.api_token_env が指す環境変数）が
+    解決可能かどうかのみを見る。実 API への ping は deep モードでの
+    将来拡張として残す。
+    """
+    service_id = "figma"
+    label = "Figma"
+    required_for = ["design_context"]
+
+    try:
+        from ..config import get_config
+
+        cfg = get_config().figma
+    except Exception as exc:
+        return _build_result(
+            service_id=service_id,
+            label=label,
+            category=CategoryDesign,
+            status=STATUS_UNKNOWN,
+            summary="Figma 設定の読み込みに失敗しました",
+            detail=str(exc),
+            required_for=required_for,
+            message_key="connection.figma.unknown",
+            mode=mode,
+        )
+
+    if not cfg.enabled:
+        return _build_result(
+            service_id=service_id,
+            label=label,
+            category=CategoryDesign,
+            status=STATUS_DISABLED,
+            summary="Figma 連携は無効化されています",
+            detail="config.figma.enabled が false です",
+            required_for=required_for,
+            message_key="connection.figma.disabled",
+            mode=mode,
+        )
+
+    token = os.environ.get(cfg.api_token_env or "")
+    if not token:
+        return _build_result(
+            service_id=service_id,
+            label=label,
+            category=CategoryDesign,
+            status=STATUS_NOT_AUTHENTICATED,
+            summary="Figma API トークンが設定されていません",
+            detail=f"環境変数 {cfg.api_token_env} が未設定です",
+            required_for=required_for,
+            message_key="connection.figma.not_authenticated",
+            next_action={
+                "type": "docs",
+                "label": "Figma Personal Access Token を発行",
+                "command": None,
+                "docs_url": "https://www.figma.com/developers/api#access-tokens",
+            },
+            docs_url="https://www.figma.com/developers/api#access-tokens",
+            mode=mode,
+        )
+
+    return _build_result(
+        service_id=service_id,
+        label=label,
+        category=CategoryDesign,
+        status=STATUS_CONNECTED,
+        summary="Figma API トークンが環境変数に設定されています",
+        detail=f"{cfg.api_token_env} を検出（実 API への ping は未実装）",
+        required_for=required_for,
+        message_key="connection.figma.connected",
+        mode=mode,
+    )
+
+
+def _check_miro(mode: str) -> dict[str, Any]:
+    """Miro 接続状態を環境変数の有無のみで判定する shallow check。"""
+    service_id = "miro"
+    label = "Miro"
+    required_for = ["design_context"]
+
+    try:
+        from ..config import get_config
+
+        cfg = get_config().miro
+    except Exception as exc:
+        return _build_result(
+            service_id=service_id,
+            label=label,
+            category=CategoryDesign,
+            status=STATUS_UNKNOWN,
+            summary="Miro 設定の読み込みに失敗しました",
+            detail=str(exc),
+            required_for=required_for,
+            message_key="connection.miro.unknown",
+            mode=mode,
+        )
+
+    if not cfg.enabled:
+        return _build_result(
+            service_id=service_id,
+            label=label,
+            category=CategoryDesign,
+            status=STATUS_DISABLED,
+            summary="Miro 連携は無効化されています",
+            detail="config.miro.enabled が false です",
+            required_for=required_for,
+            message_key="connection.miro.disabled",
+            mode=mode,
+        )
+
+    token = os.environ.get(cfg.api_token_env or "")
+    if not token:
+        return _build_result(
+            service_id=service_id,
+            label=label,
+            category=CategoryDesign,
+            status=STATUS_NOT_AUTHENTICATED,
+            summary="Miro API トークンが設定されていません",
+            detail=f"環境変数 {cfg.api_token_env} が未設定です",
+            required_for=required_for,
+            message_key="connection.miro.not_authenticated",
+            next_action={
+                "type": "docs",
+                "label": "Miro REST API トークンを発行",
+                "command": None,
+                "docs_url": "https://developers.miro.com/reference/api-reference",
+            },
+            docs_url="https://developers.miro.com/reference/api-reference",
+            mode=mode,
+        )
+
+    return _build_result(
+        service_id=service_id,
+        label=label,
+        category=CategoryDesign,
+        status=STATUS_CONNECTED,
+        summary="Miro API トークンが環境変数に設定されています",
+        detail=f"{cfg.api_token_env} を検出（実 API への ping は未実装）",
+        required_for=required_for,
+        message_key="connection.miro.connected",
+        mode=mode,
+    )
+
+
 SERVICE_REGISTRY: dict[str, Callable[[str], dict[str, Any]]] = {
     "claude": _check_claude,
     "codex": _check_codex,
@@ -587,6 +743,8 @@ SERVICE_REGISTRY: dict[str, Callable[[str], dict[str, Any]]] = {
     "notion_mcp": _check_notion_mcp,
     "jira": _check_jira,
     "linear": _check_linear,
+    "figma": _check_figma,
+    "miro": _check_miro,
 }
 
 SERVICE_ORDER: list[str] = [
@@ -597,6 +755,8 @@ SERVICE_ORDER: list[str] = [
     "notion_mcp",
     "jira",
     "linear",
+    "figma",
+    "miro",
 ]
 
 

@@ -3172,6 +3172,7 @@ _TOKEN_PATTERNS: tuple[tuple[str, str], ...] = (
     (r"^sk-ant-[A-Za-z0-9_\-]{30,}$", "Anthropic API key"),
     (r"^sk-(?!ant-)[A-Za-z0-9_\-]{30,}$", "OpenAI API key"),
     (r"^https://hooks\.slack\.com/services/[A-Z0-9]+/[A-Z0-9]+/[A-Za-z0-9]+$", "Slack Incoming Webhook URL"),
+    (r"^figd_[A-Za-z0-9_\-]{30,}$", "Figma Personal Access Token"),
 )
 
 # シークレットを示唆するキー名（部分一致）。値が非空文字列なら警告対象。
@@ -7064,6 +7065,10 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._handle_notion_retry_pending_post()
         elif parsed.path == "/api/notion-dashboard/sync-service-status":
             self._handle_notion_sync_service_status_post()
+        elif parsed.path == "/api/figma/refresh-cache":
+            self._handle_design_cache_refresh_post("figma")
+        elif parsed.path == "/api/miro/refresh-cache":
+            self._handle_design_cache_refresh_post("miro")
         elif parsed.path.startswith("/api/prompts/"):
             from urllib.parse import unquote
             prompt_id = unquote(parsed.path[len("/api/prompts/"):])
@@ -7114,6 +7119,80 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         except Exception as e:
             self._send_json_response(
                 {"success": False, "error": f"{type(e).__name__}"},
+                status_code=500,
+            )
+
+    def _handle_design_cache_refresh_post(self, source: str):
+        """Figma / Miro の SQLite キャッシュをクリアして次回 fetch を強制する。
+
+        Operations Console から「キャッシュ再取得」を実行する経路。
+
+        Args:
+            source: "figma" または "miro"
+
+        エラーレスポンスはこのエンドポイント固有の仕様として
+        `{"success": False, "errors": [...]}` 形式を返す（`errors` は配列）。
+        ステータスコード:
+        - 連携無効: 409
+        - 不明な source: 400
+        - 内部エラー: 500
+        （注: 同 dashboard.py 内の他 POST ハンドラには `error` 単一キー形式の
+         レスポンスを返すものがあるが、このエンドポイントは統一された配列形式
+         を採用している。今後追加するエンドポイントでも配列形式が推奨。）
+        """
+        try:
+            from hokusai.config import get_config
+
+            # ファイル内の他ハンドラと同じ store を使う（_get_store() は DB_PATH
+            # ベースのシングルトン）。cfg.database_path を直接開くと、ダッシュ
+            # ボードの他経路と DB が分離してキャッシュクリアが効かない可能性が
+            # あるため、ここでも _get_store() に統一する。
+            cfg = get_config()
+            store = _get_store()
+            if source == "figma":
+                if not cfg.figma.enabled:
+                    self._send_json_response(
+                        {"success": False, "errors": ["Figma 連携は無効化されています"]},
+                        status_code=409,
+                    )
+                    return
+                deleted = store.clear_figma_cache()
+            elif source == "miro":
+                if not cfg.miro.enabled:
+                    self._send_json_response(
+                        {"success": False, "errors": ["Miro 連携は無効化されています"]},
+                        status_code=409,
+                    )
+                    return
+                deleted = store.clear_miro_cache()
+            else:
+                self._send_json_response(
+                    {"success": False, "errors": [f"unknown source: {source}"]},
+                    status_code=400,
+                )
+                return
+
+            # connection_status のキャッシュもクリア（次回 GET で再評価される）
+            from hokusai.integrations import connection_status as _cs
+
+            _cs.clear_cache()
+
+            self._send_json_response({
+                "success": True,
+                "source": source,
+                "deleted_rows": deleted,
+            })
+        except Exception as e:
+            # 詳細な例外メッセージはファイルパス等の内部情報を含み得るので
+            # API レスポンスには出さず、サーバ側 stderr に traceback として
+            # 残す。クライアント向けは例外クラス名のみ（他の POST ハンドラと
+            # 同じパターン）。
+            import sys
+            import traceback
+
+            traceback.print_exc(file=sys.stderr)
+            self._send_json_response(
+                {"success": False, "errors": [type(e).__name__]},
                 status_code=500,
             )
 

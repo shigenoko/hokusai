@@ -32,9 +32,10 @@ NOTION_API_VERSION = "2022-06-28"
 class NotionAPIError(Exception):
     """Notion API エラー（4xx 系のうち再送しても無駄なもの）"""
 
-    def __init__(self, status: int, message: str):
+    def __init__(self, status: int, message: str, code: str = ""):
         self.status = status
         self.message = message
+        self.code = code
         super().__init__(f"Notion API error {status}: {message}")
 
 
@@ -87,6 +88,17 @@ class NotionAPIClient:
 
     def retrieve_database(self, database_id: str) -> dict:
         return self._request("GET", f"/databases/{database_id}")
+
+    def retrieve_page(self, page_id: str) -> dict:
+        """Notion ページのプロパティ等を取得する（GET /v1/pages/{page_id}）。"""
+        return self._request("GET", f"/pages/{page_id}")
+
+    def list_block_children(self, block_id: str) -> dict:
+        """指定ブロック直下の子ブロック一覧を取得する（GET /v1/blocks/{id}/children）。
+
+        ページ ID も block_id として使える（Notion API の慣習）。
+        """
+        return self._request("GET", f"/blocks/{block_id}/children")
 
     def append_block_children(self, block_id: str, children: list[dict]) -> dict:
         return self._request(
@@ -175,7 +187,7 @@ class NotionAPIClient:
 
             # API token を含む可能性のある詳細はログに出さず、status と message のみ
             safe_message = message or code or "(no detail)"
-            raise NotionAPIError(status, safe_message) from None
+            raise NotionAPIError(status, safe_message, code=str(code)) from None
 
     @staticmethod
     def _parse_retry_after(headers: Any) -> float:

@@ -7,6 +7,8 @@ URL: {task_url}
 
 {work_plan_section}
 {expected_files_section}
+{design_context}
+
 ## 実装指示
 - 作業計画に従ってコードを実装してください
 - テストが通ることを確認してください
