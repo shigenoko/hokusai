@@ -172,6 +172,15 @@ class NotionSyncDispatcher:
             self._handle_pr_created(payload)
             return
 
+        # 後方互換: 旧 Service Status sync が outbox に積んだ
+        # service_status_checked エントリは Notion 連携廃止済みなので
+        # no-op として扱い、retry_pending() で drain できるようにする。
+        if event_type == "service_status_checked":
+            logger.info(
+                "service_status_checked は廃止済みのため no-op で drain します"
+            )
+            return
+
         # workflow_started / phase_changed / phase_artifact_linked /
         # terminal_status_changed は Workflows DB へ
         # Last Sync / Sync Errors を含めて書き戻す

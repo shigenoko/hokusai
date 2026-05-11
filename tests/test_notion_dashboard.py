@@ -712,6 +712,42 @@ def test_dispatcher_retry_pending_succeeds(store: SQLiteStore, monkeypatch):
     assert store.count_notion_sync_pending() == 0
 
 
+def test_dispatcher_retry_pending_drains_legacy_service_status_entries(
+    store: SQLiteStore, monkeypatch
+):
+    """旧 Service Status sync が outbox に積んだ service_status_checked エントリは、
+    アップグレード後の retry_pending() で no-op として drain される。
+
+    Why: workflow_id を持たないエントリを apply_event に渡すと ValueError で
+    永続的にスタックするため、後方互換の no-op を入れている。
+    """
+    monkeypatch.setenv("TEST_TOKEN", "secret")
+    monkeypatch.setenv("TEST_DB", "db1")
+
+    # 旧バージョンが outbox に書いた状態を再現
+    store.enqueue_notion_sync(
+        "legacy-svc-1",
+        "_service_status",
+        "service_status_checked",
+        {"services": [{"id": "gh", "status": "connected"}]},
+    )
+    assert store.count_notion_sync_pending() == 1
+
+    disp = NotionSyncDispatcher(store=store, config=_make_config())
+    # _get_api が外部呼び出しに行かないことを保証（no-op パスを通るはず）
+    monkeypatch.setattr(
+        NotionSyncDispatcher,
+        "_get_workflows_client",
+        lambda self: (_ for _ in ()).throw(AssertionError("should not be called")),
+    )
+
+    result = disp.retry_pending()
+    assert result["succeeded"] == 1
+    assert result["failed"] == 0
+    assert result["moved_to_error"] == 0
+    assert store.count_notion_sync_pending() == 0
+
+
 def test_dispatcher_retry_pending_moves_to_error_after_max_attempts(
     store: SQLiteStore, monkeypatch
 ):
