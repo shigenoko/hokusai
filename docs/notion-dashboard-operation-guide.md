@@ -44,7 +44,7 @@ hokusai notion-setup --parent-page-id <PARENT_PAGE_ID> --persist
 ```
 
 `--persist` 指定で:
-- `~/.zshrc`（または SHELL から自動検出された rc）に 3 つの DB / ページ ID が追記される
+- `~/.zshrc`（または SHELL から自動検出された rc）に 2 つの DB ID（`HOKUSAI_NOTION_WORKFLOWS_DB_ID` / `HOKUSAI_NOTION_PR_DB_ID`）が追記される
 - マーカーで囲まれたブロックとして書き込まれるため、再実行時は **古いブロックを置き換え**（idempotent）
 - 書き込み前に `~/.zshrc.hokusai.bak` バックアップを自動作成（`--no-backup` で無効化可）
 - `--shell-rc <PATH>` で書き込み先を指定可能（bash 派、`/etc/profile` 派など）
