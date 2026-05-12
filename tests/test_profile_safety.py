@@ -12,6 +12,8 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from hokusai.config import (
     ProfileConfig,
     ProfileRegistry,
@@ -126,6 +128,63 @@ def test_workflow_exists_returns_false_for_missing(tmp_path):
     db_path = tmp_path / "wf.db"
     store = SQLiteStore(db_path)
     assert store.workflow_exists("nonexistent") is False
+
+
+def test_alter_table_reraises_non_duplicate_errors(tmp_path, monkeypatch):
+    """ALTER TABLE が duplicate column name 以外の OperationalError を再 raise する。
+
+    duplicate を握り潰す挙動は test_legacy_db_migrates_profile_name_column と
+    test_new_db_has_profile_name_column で検証されている。ここでは「それ以外」が
+    握り潰されないこと（DB lock や別エラーが原因不明にならないこと）を確認する。
+    """
+    from hokusai.persistence import sqlite_store as ss
+
+    # 既存 v0.2.x 互換の DB を手動で用意（profile_name カラム無し）
+    db_path = tmp_path / "wf.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("""
+            CREATE TABLE workflows (
+                workflow_id TEXT PRIMARY KEY,
+                task_url TEXT NOT NULL,
+                task_title TEXT,
+                branch_name TEXT,
+                current_phase INTEGER DEFAULT 1,
+                state_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+        conn.commit()
+
+    # _connect が返す Connection をラップして、ALTER TABLE だけ別エラーを投げる
+    real_connect = ss.SQLiteStore._connect
+
+    class _LockingProxy:
+        def __init__(self, real_conn):
+            self._real = real_conn
+
+        def execute(self, sql, *args, **kwargs):
+            if "ALTER TABLE workflows" in sql:
+                raise sqlite3.OperationalError("database is locked")
+            return self._real.execute(sql, *args, **kwargs)
+
+        def commit(self):
+            return self._real.commit()
+
+        def __enter__(self):
+            self._real.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self._real.__exit__(*args)
+
+    def fake_connect(self):
+        return _LockingProxy(real_connect(self))
+
+    monkeypatch.setattr(ss.SQLiteStore, "_connect", fake_connect)
+
+    with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+        SQLiteStore(db_path)
 
 
 # ---------------------------------------------------------------------------

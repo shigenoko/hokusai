@@ -110,9 +110,8 @@ def start_dashboard(
 
     # scripts/dashboard.py を import して main() を呼ぶ
     # （import 時に PORT / DB_PATH が env から再評価される）
-    import sys
-    repo_root = Path(__file__).resolve().parent.parent.parent
-    sys.path.insert(0, str(repo_root))
+    # scripts は pyproject.toml の wheel packages に含めているため、
+    # pip インストール環境でも import 可能。
     from scripts import dashboard as dashboard_module
 
     # 既存の scripts.dashboard.main() を呼ぶ

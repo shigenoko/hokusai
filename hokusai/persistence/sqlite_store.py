@@ -60,9 +60,13 @@ class SQLiteStore:
                 conn.execute(
                     "ALTER TABLE workflows ADD COLUMN profile_name TEXT"
                 )
-            except sqlite3.OperationalError:
-                # 既にカラムが存在する（新規 DB or 既にマイグレーション済み）
-                pass
+            except sqlite3.OperationalError as e:
+                # 「duplicate column name」のみ握り潰す（新規 DB / マイグレーション
+                # 済み DB ではこのエラーが出るのが正常）。
+                # それ以外（DB lock / 破損 / 権限不足など）は原因を保持するため
+                # 再 raise する（後段で別エラーに化けて原因不明になるのを防ぐ）。
+                if "duplicate column name" not in str(e).lower():
+                    raise
 
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS checkpoints (

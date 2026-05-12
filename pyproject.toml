@@ -49,7 +49,10 @@ Repository = "https://github.com/shigenoko/hokusai.git"
 Issues = "https://github.com/shigenoko/hokusai/issues"
 
 [tool.hatch.build.targets.wheel]
-packages = ["hokusai"]
+# `scripts` も含める理由: hokusai.dashboard.start_dashboard() が
+# scripts.dashboard を import するため、pip 配布版でも `scripts/dashboard.py`
+# を成果物に含める必要がある。実装計画書 §9.2 の最小侵襲アプローチ。
+packages = ["hokusai", "scripts"]
 
 [tool.ruff]
 line-length = 100

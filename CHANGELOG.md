@@ -52,7 +52,8 @@ Phase A〜F に対応。
   - port 衝突を起動前に検出（`DashboardPortInUseError`）
   - dashboard HTML ヘッダに profile バッジ表示
   - `scripts/dashboard.py` を環境変数（`HOKUSAI_DASHBOARD_PORT` /
-    `_DB_PATH` / `_CHECKPOINT_DB_PATH` / `_PROFILE`）で外部制御可能化
+    `HOKUSAI_DASHBOARD_DB_PATH` / `HOKUSAI_DASHBOARD_CHECKPOINT_DB_PATH` /
+    `HOKUSAI_DASHBOARD_PROFILE`）で外部制御可能化
 - **Workflow profile_name 保存**（Phase E）
   - `workflows` テーブルに `profile_name` カラム追加
   - 既存 v0.2.x DB は ALTER TABLE で自動マイグレーション（NULL 行は `(legacy)` 扱い）

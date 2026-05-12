@@ -22,7 +22,11 @@ import yaml
 # 案件名を URL / ファイル名 / SQL identifier として安全に扱えるようにする。
 _PROFILE_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_-]*$")
 
-# registry の探索パス（環境変数 > home の標準位置 > repo 内 template）
+# registry の探索パス（環境変数 > home の標準位置）
+# Note: 実装計画書 §5.1 では「repo 内 template（./hokusai-profiles.yaml）」も
+# 候補として議論されていたが、v0.3.0 では実装していない。チーム共有テンプレが
+# 必要になった場合は HOKUSAI_PROFILES_FILE 環境変数で repo 内 path を指す
+# 運用で代替可能。
 _DEFAULT_REGISTRY_ENV = "HOKUSAI_PROFILES_FILE"
 _DEFAULT_REGISTRY_HOME = Path.home() / ".hokusai" / "profiles.yaml"
 
