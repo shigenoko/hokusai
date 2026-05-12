@@ -252,6 +252,48 @@ def assert_profile_config_exclusive(
         )
 
 
+def find_workflow_in_other_profiles(
+    workflow_id: str,
+    current_profile: str | None,
+    registry: ProfileRegistry,
+) -> list[str]:
+    """Phase E: workflow_id が他 profile の DB に存在するか探索。
+
+    `hokusai --profile a-co continue wf-xxx` で対象 workflow が見つからない時、
+    他 profile に存在するかを案内するために使う。
+
+    Args:
+        workflow_id: 検索対象の workflow_id
+        current_profile: 既に探索済みの profile（除外する）
+        registry: 探索対象の registry
+
+    Returns:
+        workflow が存在する profile 名のリスト（存在しない場合は空 list）。
+    """
+    from ..persistence.sqlite_store import SQLiteStore
+
+    found_in: list[str] = []
+    for name, profile in registry.profiles.items():
+        if name == current_profile:
+            continue
+        # data_dir から database_path を組み立てる（profile config に明示が
+        # 無い場合のデフォルト位置）
+        if profile.data_dir is None:
+            continue
+        db_path = profile.data_dir / "workflow.db"
+        if not db_path.exists():
+            continue
+        try:
+            store = SQLiteStore(db_path)
+            if store.workflow_exists(workflow_id):
+                found_in.append(name)
+        except Exception:
+            # 他 profile の DB に問題があってもここでは無視
+            # （current profile の操作を妨げない）
+            continue
+    return found_in
+
+
 def resolve_profile_to_config_path(
     profile_name: str,
     registry_path: Path | str | None = None,

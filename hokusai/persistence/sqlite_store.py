@@ -48,9 +48,21 @@ class SQLiteStore:
                     current_phase INTEGER DEFAULT 1,
                     state_json TEXT NOT NULL,
                     created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
+                    updated_at TEXT NOT NULL,
+                    profile_name TEXT
                 )
             """)
+
+            # Phase E migration: 既存 DB（v0.2.x 以前）に profile_name カラムが
+            # 無い場合は ALTER TABLE で追加する。既存 row は NULL のまま残り、
+            # display 時に (legacy) としてフォールバックされる。
+            try:
+                conn.execute(
+                    "ALTER TABLE workflows ADD COLUMN profile_name TEXT"
+                )
+            except sqlite3.OperationalError:
+                # 既にカラムが存在する（新規 DB or 既にマイグレーション済み）
+                pass
 
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS checkpoints (
@@ -177,22 +189,29 @@ class SQLiteStore:
         Args:
             workflow_id: ワークフローID
             state: ワークフロー状態
+
+        state に "profile_name" キーが含まれていれば、Phase E で追加した
+        workflows.profile_name カラムに保存する。state にキーが無い場合は
+        既存値を維持する（UPDATE では profile_name を上書きしない）。
         """
         now = datetime.now().isoformat()
         state_json = json.dumps(state, ensure_ascii=False, default=str)
+        profile_name = state.get("profile_name")
 
         with self._connect() as conn:
             conn.execute("""
                 INSERT INTO workflows (
                     workflow_id, task_url, task_title, branch_name,
-                    current_phase, state_json, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    current_phase, state_json, created_at, updated_at,
+                    profile_name
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(workflow_id) DO UPDATE SET
                     task_title = excluded.task_title,
                     branch_name = excluded.branch_name,
                     current_phase = excluded.current_phase,
                     state_json = excluded.state_json,
-                    updated_at = excluded.updated_at
+                    updated_at = excluded.updated_at,
+                    profile_name = COALESCE(excluded.profile_name, workflows.profile_name)
             """, (
                 workflow_id,
                 state.get("task_url", ""),
@@ -202,6 +221,7 @@ class SQLiteStore:
                 state_json,
                 now,
                 now,
+                profile_name,
             ))
             conn.commit()
 
@@ -231,6 +251,38 @@ class SQLiteStore:
             # マルチリポジトリフィールドの欠損補完
             state = self._migrate_multi_repo_fields(state)
             return state
+
+    def get_workflow_profile_name(self, workflow_id: str) -> str | None:
+        """Phase E: workflow に紐づく profile_name を返す。
+
+        Args:
+            workflow_id: 対象 workflow
+
+        Returns:
+            profile_name（v0.3.0 以降に作成された workflow なら設定される）。
+            workflow が存在しない、または v0.2.x 以前の legacy 行なら None。
+        """
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "SELECT profile_name FROM workflows WHERE workflow_id = ?",
+                (workflow_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return None
+            return row[0]
+
+    def workflow_exists(self, workflow_id: str) -> bool:
+        """Phase E: workflow がこの DB に存在するか確認。
+
+        他 profile 探索ロジックで使う（ProfileSafetyError の候補列挙）。
+        """
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "SELECT 1 FROM workflows WHERE workflow_id = ? LIMIT 1",
+                (workflow_id,),
+            )
+            return cursor.fetchone() is not None
 
     def _convert_keys_to_int(self, state: dict[str, Any]) -> dict[str, Any]:
         """
