@@ -698,14 +698,16 @@ Miro 側は同じ paths を `/api/miro/...` で複製。
 
 **対象ファイル**:
 - `hokusai/workflow.py`
-- `hokusai/state.py`（`primary_figma_frame_id` / `primary_miro_frame_id` / `primary_miro_board_id` フィールド追加）
-- `hokusai/nodes/phase3_design.py`（primary frame の決定ロジック）
+- `hokusai/state.py`（§7.1 の **6 フィールド** 追加: `primary_figma_file_key` / `primary_figma_frame_id` / `primary_figma_node_id` / `primary_figma_node_offset` / `primary_miro_frame_id` / `primary_miro_board_id`）
+- `hokusai/nodes/phase3_design.py`（primary frame の決定ロジック、Figma URL からの `file_key` 抽出含む）
 - `hokusai/nodes/phase8/pr_creation.py`（Phase 8a 完了時の dispatcher 呼び出し）
 - `tests/test_workflow_design_writeback.py`
 
 **実装内容**:
-- WorkflowState への 3 フィールド追加（既存 state は後方互換）
-- Phase 3 で primary frame を決定（§7.2 のルール）
+- WorkflowState への **6 フィールド** 追加（§7.1 と一致、既存 state は後方互換）
+  - Figma: file_key / frame_id / node_id / node_offset
+  - Miro: frame_id / board_id
+- Phase 3 で primary frame / board / file_key / node_id を決定（§7.2 のルール）
 - Phase 8a 完了時に `_safe_design_writeback_dispatch()` を呼ぶ
 - `on_failure: block` の場合に Waiting for Human 遷移
 
