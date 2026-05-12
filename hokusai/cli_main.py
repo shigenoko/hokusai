@@ -57,6 +57,11 @@ def main():
         metavar="FILE",
     )
     parser.add_argument(
+        "--profile",
+        help="profile 名（~/.hokusai/profiles.yaml から解決）。-c/--config と同時指定不可",
+        metavar="NAME",
+    )
+    parser.add_argument(
         "-v", "--verbose",
         action="store_true",
         help="詳細ログを出力（デバッグ用）",
@@ -236,6 +241,38 @@ def main():
         help="--persist 時に rc ファイルのバックアップを作成しない（非推奨）",
     )
 
+    # profile コマンド: profile registry の管理
+    profile_parser = subparsers.add_parser(
+        "profile",
+        help="profile（複数案件の実行スコープ）を管理",
+    )
+    profile_subparsers = profile_parser.add_subparsers(
+        dest="profile_subcommand",
+        help="サブコマンド",
+    )
+
+    profile_subparsers.add_parser(
+        "list",
+        help="profile 一覧を表示",
+    )
+
+    profile_show_parser = profile_subparsers.add_parser(
+        "show",
+        help="単一 profile の解決結果を表示（シークレット値は含まない）",
+    )
+    profile_show_parser.add_argument("name", help="profile 名")
+
+    profile_doctor_parser = profile_subparsers.add_parser(
+        "doctor",
+        help="profile 設定の整合性を診断",
+    )
+    profile_doctor_parser.add_argument("name", help="profile 名")
+    profile_doctor_parser.add_argument(
+        "--deep",
+        action="store_true",
+        help="実 API 接続まで踏み込んだ詳細診断（rate limit を消費するため明示指定）",
+    )
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -266,6 +303,10 @@ def main():
     if args.command == "notion-setup":
         sys.exit(_handle_notion_setup(args))
 
+    # profile コマンドは registry のみ参照し、WorkflowConfig は不要
+    if args.command == "profile":
+        sys.exit(_handle_profile_command(args, profile_parser))
+
     # connect コマンドは config / Notion を必要としないため、早期に処理して終了する
     if args.command == "connect":
         from .cli.commands.connect import connect_service, show_status
@@ -291,10 +332,14 @@ def main():
         connect_parser.print_help()
         sys.exit(1)
 
-    # 設定ファイルを読み込み
+    # 設定ファイルを読み込み（--profile が指定されれば registry から解決）
     try:
-        config = create_config_from_env_and_file(args.config)
+        config = create_config_from_env_and_file(
+            args.config, profile_name=args.profile
+        )
         set_config(config)
+        if args.profile:
+            print(f"Profile: {args.profile}")
         if args.config:
             print_config_file(args.config)
         if args.verbose:
@@ -305,6 +350,14 @@ def main():
     except FileNotFoundError as e:
         print_config_error(str(e))
         sys.exit(1)
+    except Exception as e:
+        # profile 系のエラー（ConflictingProfileAndConfigError /
+        # ProfileNotFoundError / ProfileRegistryNotFoundError / ...）を含む
+        from .config.profiles import ProfileError
+        if isinstance(e, ProfileError):
+            print_config_error(str(e))
+            sys.exit(1)
+        raise
 
     # 環境設定チェック（start/continueコマンドの場合）
     if args.command in ("start", "continue"):
@@ -482,6 +535,176 @@ def _handle_notion_setup(args) -> int:
     print("  1. YAML 設定で notion_dashboard.enabled: true を有効化")
     print("  2. docs/notion-dashboard-operation-guide.md を参照")
     print("=" * 70)
+    return 0
+
+
+def _handle_profile_command(args, profile_parser) -> int:
+    """profile サブコマンドのハンドラ
+
+    profile list / show / doctor をルーティングする。registry のみを参照し、
+    WorkflowConfig 生成は行わない（実装計画書 §6.2）。
+    """
+    from .config.profiles import (
+        ProfileError,
+        load_profile_registry,
+        resolve_registry_path,
+    )
+
+    subcommand = getattr(args, "profile_subcommand", None)
+    if subcommand is None:
+        profile_parser.print_help()
+        return 1
+
+    try:
+        registry = load_profile_registry()
+    except ProfileError as e:
+        registry_path = resolve_registry_path()
+        print(f"エラー: {e}")
+        print(f"  registry: {registry_path}")
+        return 1
+
+    if subcommand == "list":
+        return _handle_profile_list(registry)
+    if subcommand == "show":
+        return _handle_profile_show(args.name, registry)
+    if subcommand == "doctor":
+        return _handle_profile_doctor(
+            args.name, registry, deep=getattr(args, "deep", False)
+        )
+
+    profile_parser.print_help()
+    return 1
+
+
+def _handle_profile_list(registry) -> int:
+    """`hokusai profile list` の実装"""
+    if not registry.profiles:
+        print("登録されている profile はありません。")
+        print(f"  registry: {registry.source_path}")
+        return 0
+
+    print(f"{'PROFILE':<20} {'CONFIG':<50} {'DATA DIR'}")
+    print("-" * 100)
+    for name in registry.names():
+        p = registry.profiles[name]
+        data_dir = str(p.data_dir) if p.data_dir else "(default)"
+        print(f"{name:<20} {str(p.config_path):<50} {data_dir}")
+
+    if registry.default_profile:
+        print()
+        print(f"default_profile: {registry.default_profile}")
+    return 0
+
+
+def _handle_profile_show(name: str, registry) -> int:
+    """`hokusai profile show <name>` の実装"""
+    from .config.profiles import ProfileNotFoundError
+
+    try:
+        p = registry.get(name)
+    except ProfileNotFoundError as e:
+        print(f"エラー: {e}")
+        return 1
+
+    print(f"Profile: {p.name}")
+    if p.label:
+        print(f"  label:         {p.label}")
+    if p.description:
+        print(f"  description:   {p.description}")
+    print(f"  config:        {p.config_path}")
+    if p.data_dir:
+        print(f"  data_dir:      {p.data_dir}")
+    if p.dashboard_port:
+        print(f"  dashboard:     port {p.dashboard_port}")
+    print(f"  registry:      {registry.source_path}")
+    print()
+    print("  ※ シークレット値（API token 等）は表示されません。env var 名は")
+    print("    profile config（YAML）内の `*_env` フィールドで確認してください。")
+    return 0
+
+
+def _handle_profile_doctor(name: str, registry, *, deep: bool = False) -> int:
+    """`hokusai profile doctor <name>` の実装
+
+    通常モード: 静的検査と env var 名の存在確認のみ。
+    --deep: 実 API 接続まで踏み込む（Phase E で実装、現状は warning 表示）。
+    """
+    from .config.profiles import ProfileNotFoundError
+
+    try:
+        p = registry.get(name)
+    except ProfileNotFoundError as e:
+        print(f"エラー: {e}")
+        return 1
+
+    print(f"Diagnosing profile: {p.name}")
+    print("-" * 60)
+
+    issues: list[str] = []
+
+    # 1. config file の存在
+    if p.config_path.exists():
+        print(f"  ✓ config file exists: {p.config_path}")
+    else:
+        msg = f"config file が見つかりません: {p.config_path}"
+        print(f"  ✗ {msg}")
+        issues.append(msg)
+
+    # 2. data_dir の存在 / 作成可能性
+    if p.data_dir:
+        if p.data_dir.exists():
+            print(f"  ✓ data_dir exists: {p.data_dir}")
+        else:
+            try:
+                p.data_dir.mkdir(parents=True, exist_ok=True)
+                print(f"  ✓ data_dir created: {p.data_dir}")
+            except OSError as e:
+                msg = f"data_dir が作成できません: {p.data_dir}: {e}"
+                print(f"  ✗ {msg}")
+                issues.append(msg)
+
+    # 3. dashboard port の重複チェック（registry 内）
+    if p.dashboard_port:
+        conflicts = [
+            other
+            for other in registry.profiles.values()
+            if other.name != p.name and other.dashboard_port == p.dashboard_port
+        ]
+        if conflicts:
+            other_names = ", ".join(c.name for c in conflicts)
+            msg = (
+                f"dashboard port {p.dashboard_port} が他 profile と衝突: "
+                f"{other_names}"
+            )
+            print(f"  ✗ {msg}")
+            issues.append(msg)
+        else:
+            print(f"  ✓ dashboard port unique: {p.dashboard_port}")
+
+    # 4. data_dir / database_path の他 profile との衝突
+    if p.data_dir:
+        path_conflicts = [
+            other
+            for other in registry.profiles.values()
+            if other.name != p.name and other.data_dir == p.data_dir
+        ]
+        if path_conflicts:
+            other_names = ", ".join(c.name for c in path_conflicts)
+            msg = f"data_dir が他 profile と衝突: {other_names}"
+            print(f"  ✗ {msg}")
+            issues.append(msg)
+
+    # 5. --deep モード: 実 API 接続確認（Phase E で実装予定）
+    if deep:
+        print()
+        print("  [--deep] 実 API 接続確認は Phase E で実装予定")
+
+    print("-" * 60)
+    if issues:
+        print(f"発見された問題: {len(issues)} 件")
+        return 1
+
+    print("OK: 問題ありません")
     return 0
 
 

@@ -25,12 +25,38 @@ from .models import DEFAULT_STATUS_MAPPING, WorkflowConfig
 
 def create_config_from_env_and_file(
     config_file: str | Path | None = None,
+    *,
+    profile_name: str | None = None,
 ) -> WorkflowConfig:
     """環境変数と設定ファイルから設定を作成
 
     Args:
         config_file: 設定ファイルのパス（指定された場合はこれを優先）
+        profile_name: profile 名（指定時は ~/.hokusai/profiles.yaml から
+            該当 profile の config_path を解決）
+
+    Raises:
+        ConflictingProfileAndConfigError: config_file と profile_name 同時指定
+        ProfileError / ProfileRegistryNotFoundError / ProfileNotFoundError / 等:
+            profile 解決に失敗した場合（hokusai.config.profiles の例外を伝搬）
+
+    Notes:
+        config_file と profile_name は排他。両方指定された場合は
+        ConflictingProfileAndConfigError を投げる（実装計画書 §4.3）。
     """
+    # 排他チェック（実装計画書 §4.3）
+    from .profiles import (
+        assert_profile_config_exclusive,
+        resolve_profile_to_config_path,
+    )
+
+    assert_profile_config_exclusive(profile_name, config_file)
+
+    # profile 指定がある場合は registry から config_path を解決
+    if profile_name:
+        _profile, resolved_path = resolve_profile_to_config_path(profile_name)
+        config_file = resolved_path
+
     # デフォルト設定
     config_dict = {}
 
