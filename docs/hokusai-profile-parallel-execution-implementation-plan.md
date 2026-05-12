@@ -609,27 +609,45 @@ design cache は profile ごとの `workflow.db` に保存されるため、A社
 
 ### Phase D: Dashboard 正式 CLI 化
 
+**v0.3.0 での方針（最小侵襲）**
+
+§9.2 で議論した「`hokusai/dashboard/server.py` への責務移行」は v0.3.0 では
+**実施しない**。`scripts/dashboard.py` は既存のテスト・運用に深く統合されており、
+責務移行を伴うリファクタは破壊的変更のリスクが高いため、v0.3.0 では以下の
+最小侵襲アプローチで CLI 統合を実現する:
+
+- `scripts/dashboard.py` の HTTP server / rendering / API 実装は据え置き
+- `scripts/dashboard.py` を環境変数（`HOKUSAI_DASHBOARD_PORT` /
+  `HOKUSAI_DASHBOARD_DB_PATH` / `HOKUSAI_DASHBOARD_CHECKPOINT_DB_PATH` /
+  `HOKUSAI_DASHBOARD_PROFILE`）で外部制御可能化
+- `hokusai/dashboard/__init__.py` を新設し、CLI が env を組み立てて
+  `scripts.dashboard.main()` を呼ぶブリッジ層として機能させる
+- 完全な責務移行（`hokusai/dashboard/server.py` 新設）はフォローアップ
+  リリース（v0.4 以降）で対応
+
 **対象ファイル**
 
 - `hokusai/cli_main.py`
-- `hokusai/dashboard/__init__.py`（新規）
-- `hokusai/dashboard/server.py`（新規、`scripts/dashboard.py` から責務移行）
-- `scripts/dashboard.py`（薄いラッパ化）
+- `hokusai/dashboard/__init__.py`（新規、CLI ⇄ scripts.dashboard のブリッジ層）
+- `scripts/dashboard.py`（env 経由制御化、責務移行は未実施）
+- `pyproject.toml`（wheel に `scripts` パッケージを含める設定追加）
 - `tests/test_dashboard_profiles.py`
-- 既存の dashboard 関連テストの import 経路更新
 
 **実装内容**
 
-- §9.2 の方針に従い `scripts/dashboard.py` の責務を `hokusai/dashboard/server.py` へ移行
-  - HTTP server / rendering / API ハンドラ / `_store` シングルトン
-  - `PORT` / `DB_PATH` の引数化（profile config から受け取る）
-- `scripts/dashboard.py` を薄いラッパとして残す（後方互換）
-- `hokusai dashboard --profile <name> --port <port>` 追加
-- dashboard 起動前に profile config を解決
+- `scripts/dashboard.py` を環境変数経由で外部制御可能化
+  - `HOKUSAI_DASHBOARD_PORT` / `HOKUSAI_DASHBOARD_DB_PATH` /
+    `HOKUSAI_DASHBOARD_CHECKPOINT_DB_PATH` / `HOKUSAI_DASHBOARD_PROFILE`
+  - module 内 state（`_store` シングルトン等）の env 反映用 refresh フック
+- `hokusai/dashboard/__init__.py` で CLI ⇄ scripts.dashboard をブリッジ
+  - profile config から DB path / port を解決して env に注入
+  - `scripts.dashboard.main()` を起動
+  - 起動前ポート衝突検出（`_port_in_use`、`EADDRINUSE` のみ True 判定）
+  - 起動時 race による `OSError(EADDRINUSE)` を `DashboardPortInUseError` に変換
+- `hokusai dashboard [--profile <name>] [--port <port>]` サブコマンド追加
 - dashboard header に profile name を表示
-- profile registry の dashboard port を利用
-- port 衝突時のエラー整備
-- tests の import 経路を `hokusai.dashboard.server` に更新
+- profile registry の `dashboard.port` を default として利用
+- `pyproject.toml` の `[tool.hatch.build.targets.wheel]` で `packages = ["hokusai", "scripts"]` に拡張（配布版で `scripts.dashboard` を import できるようにする）
 
 **DoD**
 
@@ -638,6 +656,7 @@ design cache は profile ごとの `workflow.db` に保存されるため、A社
 - 接続状態ページが profile config の env var 名を参照する
 - 既存の `python scripts/dashboard.py` 起動も壊れない（後方互換）
 - 既存の dashboard 関連テスト（`tests/test_dashboard_notion_panel.py` 等）が pass する
+- pip インストール環境でも `hokusai dashboard` が起動する
 
 ### Phase E: 誤操作防止と診断
 
@@ -649,8 +668,15 @@ design cache は profile ごとの `workflow.db` に保存されるため、A社
 
 **実装内容**
 
-- workflow not found 時に他 profile の候補を探索
-- `profile doctor` で DB / worktree / port 衝突を検出
+- workflow not found 時に他 profile の候補を探索（`find_workflow_in_other_profiles()`）
+  - sqlite3 URI `mode=ro` で副作用なしの read-only 探索
+  - profile config の `database_path` 明示上書きを尊重（false negative 防止）
+- `profile doctor` での衝突検出（v0.3.0 範囲）
+  - **検出対象**: dashboard port 重複 / `data_dir` 重複 / config file 存在チェック
+  - **`--deep` フラグ**: 受け付けるが実装は注意書き表示のみ（API 疎通確認は v0.4 以降）
+  - **v0.3.0 では未実装**: `database_path` / `checkpoint_db_path` / `worktree_root`
+    個別の衝突検出、env var 存在確認（`data_dir` 統一運用が主、明示上書きは
+    レアケースのため後続対応）
 - command 出力に profile 名を表示
 - `workflows` テーブルに `profile_name` カラムを追加し、workflow の所属 profile を保存する
   - 保存先の正本は `workflows.profile_name`
@@ -659,12 +685,14 @@ design cache は profile ごとの `workflow.db` に保存されるため、A社
   - 既存 workflow（v0.2.x 以前に作成されたもの）の `profile_name` カラムは NULL のまま
   - 表示時は profile 名未設定なら `(legacy)` または default profile 名でフォールバック
   - SQLite ALTER TABLE による在地マイグレーション（既存の SQLite WAL モードと互換）
+  - PRAGMA table_info で事前判定し、duplicate column の race も catch して並行起動に耐える
 
 **DoD**
 
 - 間違った profile で `continue` した時に分かりやすい案内が出る
 - workflow detail / list で profile が見える
 - 既存 v0.2.x DB を v0.3.0 で開いても壊れない（legacy 表示で読み出し可能）
+- `profile doctor` で port / data_dir 衝突を検出できる（実 API 疎通確認は v0.4 以降）
 
 ### Phase F: ドキュメント・運用ガイド
 
