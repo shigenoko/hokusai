@@ -17,6 +17,12 @@ from pathlib import Path
 
 from ..config import WorkflowConfig
 
+# scripts/dashboard.py のデフォルト port と一致させる。
+# CLI / start_dashboard() で port が未指定（None）の場合、必ずこの値に解決して
+# _port_in_use チェック / race condition 変換が走るようにする（port=None で
+# 検証がスキップされる buggy パスを排除）。
+DEFAULT_DASHBOARD_PORT = 8765
+
 
 class DashboardPortInUseError(Exception):
     """指定された port が既に listen 済み"""
@@ -29,9 +35,21 @@ def _port_in_use(port: int, host: str = "localhost") -> bool:
     （EACCES: 特権ポートへの bind 権限不足、EAFNOSUPPORT 等）は呼び出し側に
     伝搬する。これにより「使用中」と「アクセス不可」を区別できる。
 
+    port の事前バリデーション:
+    - bool 型は明示的に拒否（Python では bool が int サブクラス）
+    - 1..65535 の範囲外は ValueError（socket.bind の OverflowError /
+      OSError(EINVAL) を分かりやすい例外にする）
+
     Raises:
+        ValueError: port が 1..65535 範囲外、または bool / int 以外の型
         OSError: EADDRINUSE 以外の OS エラー（権限不足など）
     """
+    # bool は Python では int サブクラスなので明示的に除外
+    if isinstance(port, bool) or not isinstance(port, int):
+        raise ValueError(f"port は int である必要があります: got {type(port).__name__}")
+    if not (1 <= port <= 65535):
+        raise ValueError(f"port は 1..65535 の範囲である必要があります: got {port}")
+
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.settimeout(0.5)
         try:
@@ -87,18 +105,27 @@ def start_dashboard(
     Args:
         config: WorkflowConfig（profile 解決後のもの）
         profile_name: ヘッダ表示用の profile 名（指定時のみバッジ表示）
-        port: listen port（省略時は scripts/dashboard.py のデフォルト 8765）
+        port: listen port。None の場合は DEFAULT_DASHBOARD_PORT (8765) に解決する。
+            これにより _port_in_use チェックと race condition 変換が常に動作し、
+            エラーメッセージにも実効 port 番号が含まれる
 
     Returns:
         プロセスの exit code（通常は KeyboardInterrupt で 0 だが、port 衝突等で 1）
 
     Raises:
-        DashboardPortInUseError: 指定 port が既に listen 済み
+        DashboardPortInUseError: 指定 port が既に listen 済み（事前検出 or race condition）
+        ValueError: port が範囲外（_port_in_use のバリデーションで raise）
     """
+    # port が未指定（None）でも、scripts/dashboard.py 内部で 8765 にフォールバック
+    # するため、HOKUSAI 側でも同じ値に明示的に解決して、衝突検出 / エラー
+    # メッセージ / race condition 変換すべてが正しい port で動くようにする
+    if port is None:
+        port = DEFAULT_DASHBOARD_PORT
+
     # port 衝突を起動前に検出（実装計画書 §9.1）
     # EADDRINUSE 以外の OSError（権限不足等）はそのまま伝搬させて、
     # 「使用中」誤判定を避ける
-    if port is not None and _port_in_use(port):
+    if _port_in_use(port):
         raise DashboardPortInUseError(
             f"port {port} は既に使用中です。"
             "別 profile の dashboard が動作しているか、profile registry の "
@@ -122,7 +149,8 @@ def start_dashboard(
     try:
         dashboard_module.main()
     except OSError as e:
-        if e.errno == errno.EADDRINUSE and port is not None:
+        # port は冒頭で必ず int に解決済みなので、None ガードは不要
+        if e.errno == errno.EADDRINUSE:
             raise DashboardPortInUseError(
                 f"port {port} の bind に失敗しました（_port_in_use チェック後に"
                 f"他プロセスが取得した可能性）: {e}"

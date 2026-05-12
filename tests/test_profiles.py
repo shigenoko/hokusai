@@ -498,6 +498,32 @@ def test_phase_c_paths_expanduser_in_config_file(tmp_path, monkeypatch):
     assert config.checkpoint_db_path == tmp_path / "expanded-cp.db"
 
 
+def test_env_override_expands_tilde(tmp_path, monkeypatch):
+    """WORKFLOW_PROJECT_ROOT / WORKFLOW_DATA_DIR / WORKFLOW_WORKTREE_ROOT の env で ~ が展開される"""
+    from hokusai.config import create_config_from_env_and_file
+
+    # HOME を tmp_path に置換
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    # env override に ~ 含む値をセット
+    monkeypatch.setenv("WORKFLOW_PROJECT_ROOT", "~/env-project")
+    monkeypatch.setenv("WORKFLOW_DATA_DIR", "~/env-data")
+    monkeypatch.setenv("WORKFLOW_WORKTREE_ROOT", "~/env-worktrees")
+
+    # 最小 config（base_branch は env 経由でない値）
+    cfg = tmp_path / "minimal.yaml"
+    cfg.write_text("base_branch: main\n")
+
+    config = create_config_from_env_and_file(str(cfg))
+    # ~ が展開されていることを検証
+    assert "~" not in str(config.project_root)
+    assert "~" not in str(config.data_dir)
+    assert "~" not in str(config.worktree_root)
+    assert config.project_root == tmp_path / "env-project"
+    assert config.data_dir == tmp_path / "env-data"
+    assert config.worktree_root == tmp_path / "env-worktrees"
+
+
 def test_phase_c_parent_directories_created(tmp_path, monkeypatch):
     """補完された path の親ディレクトリが自動作成される"""
     from hokusai.config import create_config_from_env_and_file

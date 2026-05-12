@@ -84,31 +84,25 @@ def create_config_from_env_and_file(
                 config_dict = load_config_from_file(config_path)
                 break
 
-    # 環境変数でオーバーライド
+    # 環境変数でオーバーライド（~ を含む値でも正しく展開されるよう expanduser() を必ず通す）
     if os.environ.get("WORKFLOW_PROJECT_ROOT"):
-        config_dict["project_root"] = Path(os.environ["WORKFLOW_PROJECT_ROOT"])
+        config_dict["project_root"] = Path(os.environ["WORKFLOW_PROJECT_ROOT"]).expanduser()
     if os.environ.get("WORKFLOW_BASE_BRANCH"):
         config_dict["base_branch"] = os.environ["WORKFLOW_BASE_BRANCH"]
     if os.environ.get("WORKFLOW_DATA_DIR"):
-        config_dict["data_dir"] = Path(os.environ["WORKFLOW_DATA_DIR"])
+        config_dict["data_dir"] = Path(os.environ["WORKFLOW_DATA_DIR"]).expanduser()
     if os.environ.get("WORKFLOW_WORKTREE_ROOT"):
-        config_dict["worktree_root"] = Path(os.environ["WORKFLOW_WORKTREE_ROOT"])
+        config_dict["worktree_root"] = Path(os.environ["WORKFLOW_WORKTREE_ROOT"]).expanduser()
 
     # パス型フィールドの変換（~を展開）
-    if "project_root" in config_dict and isinstance(config_dict["project_root"], str):
-        config_dict["project_root"] = Path(config_dict["project_root"]).expanduser()
-    if "data_dir" in config_dict and isinstance(config_dict["data_dir"], str):
-        config_dict["data_dir"] = Path(config_dict["data_dir"]).expanduser()
-    if "worktree_root" in config_dict and isinstance(config_dict["worktree_root"], str):
-        config_dict["worktree_root"] = Path(config_dict["worktree_root"]).expanduser()
-    if "database_path" in config_dict and isinstance(config_dict["database_path"], str):
-        config_dict["database_path"] = Path(config_dict["database_path"]).expanduser()
-    if "checkpoint_db_path" in config_dict and isinstance(
-        config_dict["checkpoint_db_path"], str
-    ):
-        config_dict["checkpoint_db_path"] = Path(
-            config_dict["checkpoint_db_path"]
-        ).expanduser()
+    # 上の env override は Path オブジェクトで入る場合があるため、str / Path 両方をハンドル
+    for path_key in ("project_root", "data_dir", "worktree_root", "database_path", "checkpoint_db_path"):
+        val = config_dict.get(path_key)
+        if isinstance(val, str):
+            config_dict[path_key] = Path(val).expanduser()
+        elif isinstance(val, Path) and "~" in str(val):
+            # env override が "~" を含む場合の safety net（既に展開済みだが二重防御）
+            config_dict[path_key] = val.expanduser()
 
     # Phase C: profile registry の data_dir から path フィールドを補完
     # 補完ルール:

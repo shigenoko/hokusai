@@ -96,6 +96,52 @@ def test_port_in_use_free_port_returns_false():
     assert _port_in_use(port) is False
 
 
+@pytest.mark.parametrize("invalid_port", [0, -1, 65536, 100000])
+def test_port_in_use_rejects_out_of_range(invalid_port):
+    """port が 1..65535 範囲外なら ValueError（OverflowError / EINVAL を分かりやすく）"""
+    from hokusai.dashboard import _port_in_use
+
+    with pytest.raises(ValueError, match="1..65535"):
+        _port_in_use(invalid_port)
+
+
+@pytest.mark.parametrize("invalid_type", [True, False, "8765", 8765.0, None])
+def test_port_in_use_rejects_non_int_types(invalid_type):
+    """port が int 以外（bool / str / float / None）なら ValueError"""
+    from hokusai.dashboard import _port_in_use
+
+    with pytest.raises(ValueError, match="int"):
+        _port_in_use(invalid_type)
+
+
+def test_start_dashboard_resolves_none_port_to_default(tmp_path, monkeypatch):
+    """port=None で start_dashboard を呼んだ場合、DEFAULT_DASHBOARD_PORT に解決される"""
+    from hokusai.dashboard import DEFAULT_DASHBOARD_PORT, start_dashboard
+
+    cfg = WorkflowConfig(
+        data_dir=tmp_path,
+        database_path=tmp_path / "wf.db",
+        checkpoint_db_path=tmp_path / "cp.db",
+    )
+
+    # _port_in_use と main をモックして、port が int で渡されることを検証
+    captured_port = {}
+
+    def fake_port_in_use(port, host="localhost"):
+        captured_port["value"] = port
+        return False
+
+    monkeypatch.setattr("hokusai.dashboard._port_in_use", fake_port_in_use)
+
+    import scripts.dashboard
+    monkeypatch.setattr(scripts.dashboard, "main", lambda: None)
+
+    start_dashboard(cfg, profile_name="test", port=None)
+
+    # _port_in_use が DEFAULT_DASHBOARD_PORT で呼ばれることを確認
+    assert captured_port["value"] == DEFAULT_DASHBOARD_PORT
+
+
 def test_port_in_use_reraises_non_eaddrinuse_errors(monkeypatch):
     """EADDRINUSE 以外の OSError（例: EACCES）は「使用中」と誤判定せず再 raise"""
     import errno
@@ -207,6 +253,67 @@ def test_cli_handle_dashboard_catches_eacces(tmp_path, monkeypatch, capsys):
     assert rc == 1
     assert "権限" in captured.out
     assert "80" in captured.out
+
+
+def test_cli_handle_dashboard_resolves_none_port_in_error_messages(tmp_path, monkeypatch, capsys):
+    """args.port が None でも、エラーメッセージに DEFAULT_DASHBOARD_PORT が表示される"""
+    import errno as _errno
+
+    from hokusai.cli_main import _handle_dashboard
+    from hokusai.dashboard import DEFAULT_DASHBOARD_PORT
+
+    cfg = WorkflowConfig(
+        data_dir=tmp_path,
+        database_path=tmp_path / "wf.db",
+        checkpoint_db_path=tmp_path / "cp.db",
+    )
+
+    def fake_start(config, *, profile_name, port):
+        # port は None ではなく実効値が来ているはず
+        assert port == DEFAULT_DASHBOARD_PORT
+        err = OSError("EACCES simulated")
+        err.errno = _errno.EACCES
+        raise err
+
+    import hokusai.dashboard
+    monkeypatch.setattr(hokusai.dashboard, "start_dashboard", fake_start)
+
+    class _Args:
+        port = None
+        profile = None
+
+    rc = _handle_dashboard(_Args(), cfg)
+    captured = capsys.readouterr()
+    assert rc == 1
+    # メッセージに "None" は含まれず、実効 port (8765) が含まれる
+    assert "None" not in captured.out
+    assert str(DEFAULT_DASHBOARD_PORT) in captured.out
+
+
+def test_cli_handle_dashboard_catches_value_error(tmp_path, monkeypatch, capsys):
+    """_port_in_use の range バリデーション ValueError も親切に終了 1"""
+    from hokusai.cli_main import _handle_dashboard
+
+    cfg = WorkflowConfig(
+        data_dir=tmp_path,
+        database_path=tmp_path / "wf.db",
+        checkpoint_db_path=tmp_path / "cp.db",
+    )
+
+    def fake_start(config, *, profile_name, port):
+        raise ValueError(f"port は 1..65535 の範囲である必要があります: got {port}")
+
+    import hokusai.dashboard
+    monkeypatch.setattr(hokusai.dashboard, "start_dashboard", fake_start)
+
+    class _Args:
+        port = 99999
+        profile = None
+
+    rc = _handle_dashboard(_Args(), cfg)
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "範囲" in captured.out
 
 
 def test_cli_handle_dashboard_catches_unknown_oserror(tmp_path, monkeypatch, capsys):

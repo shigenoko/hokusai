@@ -587,7 +587,7 @@ def _handle_dashboard(args, config) -> int:
     profile が指定されていれば registry から dashboard.port をフォールバック先に使う。
     config はすでに main() で profile 解決済み。
     """
-    from .dashboard import DashboardPortInUseError, start_dashboard
+    from .dashboard import DEFAULT_DASHBOARD_PORT, DashboardPortInUseError, start_dashboard
 
     port = args.port
     profile_arg = getattr(args, "profile", None)
@@ -604,6 +604,12 @@ def _handle_dashboard(args, config) -> int:
             # registry エラーはここでは無視（fallback でデフォルト port を使う）
             pass
 
+    # それでも未確定なら HOKUSAI の実効デフォルト port に解決
+    # （None のまま start_dashboard に渡しても同様に解決されるが、CLI 側でも
+    # 明示的に解決することでエラーメッセージに正しい port 番号が出る）
+    if port is None:
+        port = DEFAULT_DASHBOARD_PORT
+
     try:
         return start_dashboard(
             config,
@@ -611,6 +617,10 @@ def _handle_dashboard(args, config) -> int:
             port=port,
         )
     except DashboardPortInUseError as e:
+        print(f"エラー: {e}")
+        return 1
+    except ValueError as e:
+        # _port_in_use の range バリデーションエラー（port が 1..65535 範囲外）
         print(f"エラー: {e}")
         return 1
     except OSError as e:
