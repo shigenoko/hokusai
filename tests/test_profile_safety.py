@@ -340,6 +340,71 @@ def test_alter_table_reraises_non_duplicate_errors(tmp_path, monkeypatch):
         SQLiteStore(db_path)
 
 
+def test_alter_table_swallows_duplicate_column_race(tmp_path, monkeypatch):
+    """並行起動で他プロセスが先に ALTER を完了した場合、duplicate column を無害にスキップする。
+
+    シナリオ:
+      プロセスA: PRAGMA で「profile_name 無し」と判定 → ALTER TABLE 実行
+      プロセスB: PRAGMA で「profile_name 無し」と判定（A の commit より前）
+               → ALTER TABLE 実行 → duplicate column name エラー
+
+    PRAGMA 事前判定は通常経路の例外コストをゼロにする最適化だが、race を
+    完全には防げない。ALTER 部分だけは duplicate column を catch して
+    successful no-op として扱う。
+    """
+    from hokusai.persistence import sqlite_store as ss
+
+    # legacy DB（profile_name カラム無し）を用意
+    db_path = tmp_path / "race.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("""
+            CREATE TABLE workflows (
+                workflow_id TEXT PRIMARY KEY,
+                task_url TEXT NOT NULL,
+                task_title TEXT,
+                branch_name TEXT,
+                current_phase INTEGER DEFAULT 1,
+                state_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+        conn.commit()
+
+    # ALTER TABLE 実行時だけ duplicate column を投げて、他プロセスが先に
+    # ALTER を完了した状況をシミュレート
+    real_connect = ss.SQLiteStore._connect
+
+    class _RaceProxy:
+        def __init__(self, real_conn):
+            self._real = real_conn
+
+        def execute(self, sql, *args, **kwargs):
+            if "ALTER TABLE workflows" in sql:
+                raise sqlite3.OperationalError(
+                    "duplicate column name: profile_name"
+                )
+            return self._real.execute(sql, *args, **kwargs)
+
+        def commit(self):
+            return self._real.commit()
+
+        def __enter__(self):
+            self._real.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self._real.__exit__(*args)
+
+    def fake_connect(self):
+        return _RaceProxy(real_connect(self))
+
+    monkeypatch.setattr(ss.SQLiteStore, "_connect", fake_connect)
+
+    # 例外を投げずに完了すること（race condition 耐性）
+    SQLiteStore(db_path)
+
+
 # ---------------------------------------------------------------------------
 # find_workflow_in_other_profiles
 # ---------------------------------------------------------------------------

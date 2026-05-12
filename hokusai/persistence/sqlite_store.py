@@ -68,10 +68,21 @@ class SQLiteStore:
             cursor = conn.execute("PRAGMA table_info(workflows)")
             existing_columns = {row[1] for row in cursor.fetchall()}
             if "profile_name" not in existing_columns:
-                # この経路は v0.2.x 以前の DB を初めて v0.3.0 で開いた時のみ通る
-                conn.execute(
-                    "ALTER TABLE workflows ADD COLUMN profile_name TEXT"
-                )
+                # この経路は v0.2.x 以前の DB を初めて v0.3.0 で開いた時のみ通る。
+                # ただし、複数プロセスが同じ legacy DB を同時に初回起動した場合に
+                # race condition が起きうる（両者が PRAGMA で「無い」と判定 →
+                # 両方 ALTER TABLE 実行 → 片方が duplicate column で失敗）。
+                # ALTER 部分だけは duplicate column を無害にスキップする。
+                try:
+                    conn.execute(
+                        "ALTER TABLE workflows ADD COLUMN profile_name TEXT"
+                    )
+                except sqlite3.OperationalError as e:
+                    # race で他プロセスが先に ALTER を完了した場合のみ無視。
+                    # 他の OperationalError（DB lock 継続 / 破損等）は原因を
+                    # 保持するため再 raise。
+                    if "duplicate column name" not in str(e).lower():
+                        raise
 
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS checkpoints (
