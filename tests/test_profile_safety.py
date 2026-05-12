@@ -349,6 +349,73 @@ def test_find_workflow_handles_missing_db_file(tmp_path):
     assert found == []
 
 
+def test_find_workflow_respects_config_database_path_override(tmp_path):
+    """profile config の database_path 明示上書きを尊重して探索する（false negative 防止）"""
+    # custom_db を default 位置とは別の場所に作る
+    data_dir = tmp_path / "company-a"
+    data_dir.mkdir()
+    custom_db = tmp_path / "custom-location" / "wf.db"
+    custom_db.parent.mkdir()
+
+    # config file に database_path 明示
+    cfg = data_dir / "config.yaml"
+    cfg.write_text(
+        f"project_root: /tmp\n"
+        f"database_path: {custom_db}\n"
+    )
+
+    # 配置: data_dir 直下にデフォルト位置の workflow.db は存在しない（=空）
+    # しかし custom_db には workflow を保存する
+    store = SQLiteStore(custom_db)
+    store.save_workflow("wf-override", {
+        "task_url": "https://example.com",
+        "current_phase": 1,
+        "profile_name": "company-a",
+    })
+
+    # 旧実装（data_dir/"workflow.db" 固定）だと見つからない false negative
+    # 新実装は config.database_path を尊重して検出できる
+    registry = ProfileRegistry(profiles={
+        "company-a": ProfileConfig(
+            name="company-a",
+            config_path=cfg,
+            data_dir=data_dir,
+        ),
+    })
+    found = find_workflow_in_other_profiles(
+        "wf-override", current_profile=None, registry=registry
+    )
+    assert found == ["company-a"]
+
+
+def test_find_workflow_falls_back_to_data_dir_default(tmp_path):
+    """config file が無い / database_path 明示無しなら data_dir/'workflow.db' を使う"""
+    data_dir = tmp_path / "company-b"
+    data_dir.mkdir()
+    cfg = data_dir / "config.yaml"
+    cfg.write_text("project_root: /tmp\n")  # database_path 無し
+
+    # data_dir/workflow.db に保存
+    default_db = data_dir / "workflow.db"
+    store = SQLiteStore(default_db)
+    store.save_workflow("wf-default-loc", {
+        "task_url": "https://example.com",
+        "current_phase": 1,
+    })
+
+    registry = ProfileRegistry(profiles={
+        "company-b": ProfileConfig(
+            name="company-b",
+            config_path=cfg,
+            data_dir=data_dir,
+        ),
+    })
+    found = find_workflow_in_other_profiles(
+        "wf-default-loc", current_profile=None, registry=registry
+    )
+    assert found == ["company-b"]
+
+
 def test_find_workflow_handles_corrupt_db(tmp_path, monkeypatch):
     """他 profile の DB が壊れていても current profile の操作は止めない"""
     data_dir = tmp_path / "broken-co"

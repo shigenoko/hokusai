@@ -167,6 +167,10 @@ def load_profile_registry(registry_path: Path | str | None = None) -> ProfileReg
         )
 
     profiles_raw = raw.get("profiles", {})
+    # `profiles:` のみ書いて値を省略すると YAML は null として読まれる。
+    # これは「空 registry」として有効な定義なので、空 dict にフォールバック。
+    if profiles_raw is None:
+        profiles_raw = {}
     if not isinstance(profiles_raw, dict):
         raise ProfileError(
             f"profiles は dict である必要があります: got {type(profiles_raw).__name__}"
@@ -295,12 +299,8 @@ def find_workflow_in_other_profiles(
     for name, profile in registry.profiles.items():
         if name == current_profile:
             continue
-        # data_dir から database_path を組み立てる（profile config に明示が
-        # 無い場合のデフォルト位置）
-        if profile.data_dir is None:
-            continue
-        db_path = profile.data_dir / "workflow.db"
-        if not db_path.exists():
+        db_path = _resolve_profile_database_path(profile)
+        if db_path is None or not db_path.exists():
             continue
         try:
             store = SQLiteStore(db_path)
@@ -311,6 +311,38 @@ def find_workflow_in_other_profiles(
             # （current profile の操作を妨げない）
             continue
     return found_in
+
+
+def _resolve_profile_database_path(profile: "ProfileConfig") -> Path | None:
+    """他 profile の DB ファイルパスを解決する（横断探索用ヘルパ）。
+
+    優先順位:
+    1. profile.config_path の YAML に `database_path` が明示されていればそれ
+       （Phase C の上書き許可と整合）
+    2. profile.data_dir が指定されていれば `data_dir / "workflow.db"`
+    3. どちらも無ければ None（探索スキップ）
+
+    config file の読み込みに失敗した場合（破損 YAML 等）は data_dir フォールバック。
+    """
+    # 1. config file の database_path 明示値を優先（false negative 防止）
+    try:
+        if profile.config_path.exists():
+            with profile.config_path.open(encoding="utf-8") as f:
+                cfg_raw = yaml.safe_load(f) or {}
+            if isinstance(cfg_raw, dict):
+                db_raw = cfg_raw.get("database_path")
+                if isinstance(db_raw, str) and db_raw:
+                    return Path(db_raw).expanduser()
+    except Exception:
+        # 破損 / 権限不足等はデフォルト経路にフォールバック
+        pass
+
+    # 2. data_dir / workflow.db のデフォルト位置
+    if profile.data_dir is not None:
+        return profile.data_dir / "workflow.db"
+
+    # 3. 探索不能
+    return None
 
 
 def resolve_profile_to_config_path(

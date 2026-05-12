@@ -202,6 +202,32 @@ def test_load_profile_registry_profiles_not_dict(tmp_path):
         load_profile_registry(path)
 
 
+def test_load_profile_registry_profiles_null_treated_as_empty(tmp_path):
+    """profiles: null（YAML で値省略）は空 registry として有効"""
+    path = tmp_path / "empty.yaml"
+    path.write_text("profiles:\n")  # → profiles_raw = None
+
+    registry = load_profile_registry(path)
+    assert registry.profiles == {}
+    assert registry.default_profile is None
+
+
+def test_load_profile_registry_profiles_missing_treated_as_empty(tmp_path):
+    """profiles キーそのものが無い場合も空 registry として有効"""
+    path = tmp_path / "no-profiles.yaml"
+    path.write_text("default_profile: a-co\n")  # profiles キー無し
+
+    # default_profile が profiles に存在しないので別エラーになるが、
+    # profiles 自体は dict() として読まれることを確認するため、
+    # default_profile も無いケースで検証
+    path2 = tmp_path / "only-comment.yaml"
+    path2.write_text("# 何も書かない\n")  # 完全空 dict
+
+    registry = load_profile_registry(path2)
+    assert registry.profiles == {}
+    assert registry.default_profile is None
+
+
 def test_load_profile_registry_missing_config_key(tmp_path):
     registry_file = _write_registry(tmp_path, {
         "profiles": {"a-company": {"label": "no config here"}}
