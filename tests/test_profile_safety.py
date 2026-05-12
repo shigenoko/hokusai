@@ -609,6 +609,42 @@ def test_find_workflow_handles_corrupt_db(tmp_path, monkeypatch):
     assert found == []
 
 
+def test_find_workflow_handles_paths_with_special_chars(tmp_path):
+    """パスにスペースや URI 予約文字が含まれても横断探索が動く
+
+    旧実装は ``f"file:{db_path}?mode=ro"`` で URI を組み立てていたため、
+    パスにスペース / ``#`` / ``?`` などが含まれると sqlite3.connect が
+    失敗して silent に False を返し、false negative になっていた。
+    ``Path.as_uri()`` で percent-encode 済みの URI を構築するように
+    修正したため、特殊文字を含むパスでも探索が成立する。
+    """
+    # スペース・#・() を含むディレクトリ名
+    data_dir = tmp_path / "co with space (a) #1"
+    data_dir.mkdir()
+    cfg = data_dir / "config.yaml"
+    cfg.write_text("project_root: /tmp\n")
+
+    db_path = data_dir / "workflow.db"
+    store = SQLiteStore(db_path)
+    store.save_workflow("wf-special", {
+        "task_url": "https://example.com",
+        "current_phase": 1,
+        "profile_name": "co-special",
+    })
+
+    registry = ProfileRegistry(profiles={
+        "co-special": ProfileConfig(
+            name="co-special",
+            config_path=cfg,
+            data_dir=data_dir,
+        ),
+    })
+    found = find_workflow_in_other_profiles(
+        "wf-special", current_profile=None, registry=registry
+    )
+    assert found == ["co-special"]
+
+
 def test_find_workflow_does_not_mutate_other_profile_db(tmp_path):
     """横断探索が他 profile の DB に副作用を起こさない（read-only）
 

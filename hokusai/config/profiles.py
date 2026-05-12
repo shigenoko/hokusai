@@ -321,8 +321,19 @@ def _workflow_exists_readonly(db_path: Path, workflow_id: str) -> bool:
 
     workflows テーブルが存在しない（別用途の sqlite ファイル / 破損 DB 等）
     場合は黙って False を返す。current profile の操作を妨げない方針。
+
+    URI 構築は ``Path.as_uri()`` を使う。素朴な f-string ``f"file:{db_path}?mode=ro"``
+    だと、パスにスペースや ``#`` / ``?`` などの URI 予約文字が含まれた時に
+    sqlite3.connect が失敗して silent な false negative になる
+    （横断探索が「見つからない」と誤判定する）。``as_uri()`` は percent-encode
+    済みの絶対 URI（``file:///path%20with%20spaces``）を返すので安全。
     """
-    uri = f"file:{db_path}?mode=ro"
+    try:
+        uri = f"{db_path.resolve().as_uri()}?mode=ro"
+    except (ValueError, OSError):
+        # as_uri() は絶対パスでないと ValueError、resolve() は条件によって
+        # OSError を投げる場合がある。横断探索の安全側として False を返す。
+        return False
     try:
         conn = sqlite3.connect(uri, uri=True)
     except sqlite3.Error:
