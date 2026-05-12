@@ -10,6 +10,7 @@ scripts/dashboard.py の `main()` を呼ぶシム。
 
 from __future__ import annotations
 
+import errno
 import os
 import socket
 from pathlib import Path
@@ -22,14 +23,24 @@ class DashboardPortInUseError(Exception):
 
 
 def _port_in_use(port: int, host: str = "localhost") -> bool:
-    """指定 port が既に listen されているか確認"""
+    """指定 port が既に listen されているか確認
+
+    `errno.EADDRINUSE` のみを「使用中」と判定し、それ以外の OSError
+    （EACCES: 特権ポートへの bind 権限不足、EAFNOSUPPORT 等）は呼び出し側に
+    伝搬する。これにより「使用中」と「アクセス不可」を区別できる。
+
+    Raises:
+        OSError: EADDRINUSE 以外の OS エラー（権限不足など）
+    """
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.settimeout(0.5)
         try:
             s.bind((host, port))
             return False
-        except OSError:
-            return True
+        except OSError as e:
+            if e.errno == errno.EADDRINUSE:
+                return True
+            raise
 
 
 def prepare_dashboard_env(
@@ -85,6 +96,8 @@ def start_dashboard(
         DashboardPortInUseError: 指定 port が既に listen 済み
     """
     # port 衝突を起動前に検出（実装計画書 §9.1）
+    # EADDRINUSE 以外の OSError（権限不足等）はそのまま伝搬させて、
+    # 「使用中」誤判定を避ける
     if port is not None and _port_in_use(port):
         raise DashboardPortInUseError(
             f"port {port} は既に使用中です。"

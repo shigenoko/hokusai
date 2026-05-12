@@ -96,6 +96,37 @@ def test_port_in_use_free_port_returns_false():
     assert _port_in_use(port) is False
 
 
+def test_port_in_use_reraises_non_eaddrinuse_errors(monkeypatch):
+    """EADDRINUSE 以外の OSError（例: EACCES）は「使用中」と誤判定せず再 raise"""
+    import errno
+
+    from hokusai.dashboard import _port_in_use
+
+    class _FakeSocket:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def settimeout(self, _value):
+            pass
+
+        def bind(self, _addr):
+            err = OSError("permission denied (simulated EACCES)")
+            err.errno = errno.EACCES
+            raise err
+
+    monkeypatch.setattr("hokusai.dashboard.socket.socket", _FakeSocket)
+
+    with pytest.raises(OSError) as exc_info:
+        _port_in_use(80)  # 特権ポートを bind しようとした場面を再現
+    assert exc_info.value.errno == errno.EACCES
+
+
 def test_start_dashboard_raises_on_port_conflict(tmp_path):
     """start_dashboard は port 衝突時に DashboardPortInUseError"""
     from hokusai.dashboard import start_dashboard

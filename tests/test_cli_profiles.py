@@ -293,3 +293,70 @@ def test_profile_doctor_unknown_profile(tmp_path, monkeypatch):
     rc, output = _capture_stdout(_handle_profile_doctor, "missing", registry)
     assert rc == 1
     assert "missing" in output
+
+
+# ---------------------------------------------------------------------------
+# argparse: --profile はトップレベル / サブコマンド後ろの両方で受け付ける
+# ---------------------------------------------------------------------------
+
+
+def _build_parser_for_test():
+    """main() を実行せず parser だけ生成してテスト用に取り出す。
+
+    本物の cli_main.py と同じ default=argparse.SUPPRESS パターンを再現する。
+    """
+    import argparse
+
+    shared_options = argparse.ArgumentParser(add_help=False)
+    shared_options.add_argument(
+        "-c", "--config", metavar="FILE", default=argparse.SUPPRESS,
+    )
+    shared_options.add_argument(
+        "--profile", metavar="NAME", default=argparse.SUPPRESS,
+    )
+
+    parser = argparse.ArgumentParser(prog="hokusai", parents=[shared_options])
+    sub = parser.add_subparsers(dest="command")
+    sub.add_parser("list", parents=[shared_options])
+    sub.add_parser("dashboard", parents=[shared_options])
+    return parser
+
+
+def test_profile_flag_before_subcommand_parses():
+    """`hokusai --profile a-co list` 形式が argparse で正しく解釈される"""
+    parser = _build_parser_for_test()
+    args = parser.parse_args(["--profile", "a-co", "list"])
+    assert args.command == "list"
+    assert getattr(args, "profile", None) == "a-co"
+
+
+def test_profile_flag_after_subcommand_parses():
+    """`hokusai list --profile a-co` 形式（サブコマンド後ろ）も解釈される"""
+    parser = _build_parser_for_test()
+    args = parser.parse_args(["list", "--profile", "a-co"])
+    assert args.command == "list"
+    assert getattr(args, "profile", None) == "a-co"
+
+
+def test_profile_flag_after_dashboard_subcommand():
+    """Copilot 指摘の `hokusai dashboard --profile a-co` 形式が動く"""
+    parser = _build_parser_for_test()
+    args = parser.parse_args(["dashboard", "--profile", "a-co"])
+    assert args.command == "dashboard"
+    assert getattr(args, "profile", None) == "a-co"
+
+
+def test_config_flag_after_subcommand_also_works():
+    """--config もサブコマンド後ろ配置を受け付ける（--profile と同じ shared_options）"""
+    parser = _build_parser_for_test()
+    args = parser.parse_args(["list", "-c", "configs/x.yaml"])
+    assert args.command == "list"
+    assert getattr(args, "config", None) == "configs/x.yaml"
+
+
+def test_neither_flag_specified_returns_none():
+    """どちらも未指定なら getattr のデフォルト None になる（SUPPRESS の動作確認）"""
+    parser = _build_parser_for_test()
+    args = parser.parse_args(["list"])
+    assert getattr(args, "profile", None) is None
+    assert getattr(args, "config", None) is None

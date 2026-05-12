@@ -45,21 +45,35 @@ from .workflow import WorkflowRunner
 
 def main():
     """メインエントリーポイント"""
-    parser = argparse.ArgumentParser(
-        description="LangGraph開発ワークフローCLI",
-        prog="hokusai",
-    )
-
-    # グローバルオプション
-    parser.add_argument(
+    # 共有オプション parent: トップレベル / 各サブコマンドの両方で受け付けるため、
+    # `hokusai --profile a start ...` と `hokusai start --profile a ...` の
+    # どちらの順序でも動くようにする。
+    #
+    # default=argparse.SUPPRESS が必須:
+    # parents=[shared_options] でサブパーサにも --profile を継承させると、
+    # サブパーサ側のデフォルト値（None）がトップレベルで既に解析した値を
+    # 上書きしてしまう問題がある。SUPPRESS にすると未指定時に namespace に
+    # 属性そのものを追加しないため、トップレベルで設定された値が保持される。
+    # アクセスは args.config / args.profile ではなく getattr(args, "config", None)
+    # で行う。
+    shared_options = argparse.ArgumentParser(add_help=False)
+    shared_options.add_argument(
         "-c", "--config",
         help="設定ファイルのパス（例: configs/example-github-issue.yaml）",
         metavar="FILE",
+        default=argparse.SUPPRESS,
     )
-    parser.add_argument(
+    shared_options.add_argument(
         "--profile",
         help="profile 名（~/.hokusai/profiles.yaml から解決）。-c/--config と同時指定不可",
         metavar="NAME",
+        default=argparse.SUPPRESS,
+    )
+
+    parser = argparse.ArgumentParser(
+        description="LangGraph開発ワークフローCLI",
+        prog="hokusai",
+        parents=[shared_options],
     )
     parser.add_argument(
         "-v", "--verbose",
@@ -88,6 +102,7 @@ def main():
     start_parser = subparsers.add_parser(
         "start",
         help="新しいワークフローを開始",
+        parents=[shared_options],
     )
     start_parser.add_argument(
         "task_url",
@@ -109,6 +124,7 @@ def main():
     continue_parser = subparsers.add_parser(
         "continue",
         help="中断したワークフローを再開",
+        parents=[shared_options],
     )
     continue_parser.add_argument(
         "workflow_id",
@@ -124,6 +140,7 @@ def main():
     status_parser = subparsers.add_parser(
         "status",
         help="ワークフローの状態を表示",
+        parents=[shared_options],
     )
     status_parser.add_argument(
         "workflow_id",
@@ -135,12 +152,14 @@ def main():
     subparsers.add_parser(
         "list",
         help="アクティブなワークフロー一覧を表示",
+        parents=[shared_options],
     )
 
     # cleanup コマンド
     cleanup_parser = subparsers.add_parser(
         "cleanup",
         help="ワークフローの worktree を削除",
+        parents=[shared_options],
     )
     cleanup_parser.add_argument(
         "workflow_id",
@@ -157,6 +176,7 @@ def main():
     pr_status_parser = subparsers.add_parser(
         "pr-status",
         help="PRのステータスを更新（オプションなしでGitHubから同期）",
+        parents=[shared_options],
     )
     pr_status_parser.add_argument(
         "workflow_id",
@@ -187,6 +207,7 @@ def main():
     connect_parser = subparsers.add_parser(
         "connect",
         help="外部サービスへの認証導線（gh / glab CLI を経由）",
+        parents=[shared_options],
     )
     connect_parser.add_argument(
         "service",
@@ -214,6 +235,7 @@ def main():
     notion_setup_parser = subparsers.add_parser(
         "notion-setup",
         help="Notion 上に HOKUSAI 用 DB / ページを自動作成（初期セットアップ）",
+        parents=[shared_options],
     )
     notion_setup_parser.add_argument(
         "--parent-page-id",
@@ -245,6 +267,7 @@ def main():
     profile_parser = subparsers.add_parser(
         "profile",
         help="profile（複数案件の実行スコープ）を管理",
+        parents=[shared_options],
     )
     profile_subparsers = profile_parser.add_subparsers(
         dest="profile_subcommand",
@@ -277,6 +300,7 @@ def main():
     dashboard_parser = subparsers.add_parser(
         "dashboard",
         help="Operations Console（Web Dashboard）を起動",
+        parents=[shared_options],
     )
     dashboard_parser.add_argument(
         "--port",
@@ -345,15 +369,18 @@ def main():
         sys.exit(1)
 
     # 設定ファイルを読み込み（--profile が指定されれば registry から解決）
+    # default=argparse.SUPPRESS の関係で args に属性が無い場合があるため getattr で取得
+    config_arg = getattr(args, "config", None)
+    profile_arg = getattr(args, "profile", None)
     try:
         config = create_config_from_env_and_file(
-            args.config, profile_name=args.profile
+            config_arg, profile_name=profile_arg
         )
         set_config(config)
-        if args.profile:
-            print(f"Profile: {args.profile}")
-        if args.config:
-            print_config_file(args.config)
+        if profile_arg:
+            print(f"Profile: {profile_arg}")
+        if config_arg:
+            print_config_file(config_arg)
         if args.verbose:
             logger.debug(f"プロジェクトルート: {config.project_root}")
             logger.debug(f"ベースブランチ: {config.base_branch}")
@@ -563,13 +590,14 @@ def _handle_dashboard(args, config) -> int:
     from .dashboard import DashboardPortInUseError, start_dashboard
 
     port = args.port
+    profile_arg = getattr(args, "profile", None)
 
     # --port 未指定なら registry の dashboard.port を探す
-    if port is None and args.profile:
+    if port is None and profile_arg:
         try:
             from .config.profiles import load_profile_registry
             registry = load_profile_registry()
-            p = registry.profiles.get(args.profile)
+            p = registry.profiles.get(profile_arg)
             if p and p.dashboard_port:
                 port = p.dashboard_port
         except Exception:
@@ -579,7 +607,7 @@ def _handle_dashboard(args, config) -> int:
     try:
         return start_dashboard(
             config,
-            profile_name=args.profile,
+            profile_name=profile_arg,
             port=port,
         )
     except DashboardPortInUseError as e:
