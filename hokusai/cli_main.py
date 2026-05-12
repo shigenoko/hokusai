@@ -45,16 +45,35 @@ from .workflow import WorkflowRunner
 
 def main():
     """メインエントリーポイント"""
-    parser = argparse.ArgumentParser(
-        description="LangGraph開発ワークフローCLI",
-        prog="hokusai",
-    )
-
-    # グローバルオプション
-    parser.add_argument(
+    # 共有オプション parent: トップレベル / 各サブコマンドの両方で受け付けるため、
+    # `hokusai --profile a start ...` と `hokusai start --profile a ...` の
+    # どちらの順序でも動くようにする。
+    #
+    # default=argparse.SUPPRESS が必須:
+    # parents=[shared_options] でサブパーサにも --profile を継承させると、
+    # サブパーサ側のデフォルト値（None）がトップレベルで既に解析した値を
+    # 上書きしてしまう問題がある。SUPPRESS にすると未指定時に namespace に
+    # 属性そのものを追加しないため、トップレベルで設定された値が保持される。
+    # アクセスは args.config / args.profile ではなく getattr(args, "config", None)
+    # で行う。
+    shared_options = argparse.ArgumentParser(add_help=False)
+    shared_options.add_argument(
         "-c", "--config",
         help="設定ファイルのパス（例: configs/example-github-issue.yaml）",
         metavar="FILE",
+        default=argparse.SUPPRESS,
+    )
+    shared_options.add_argument(
+        "--profile",
+        help="profile 名（~/.hokusai/profiles.yaml から解決）。-c/--config と同時指定不可",
+        metavar="NAME",
+        default=argparse.SUPPRESS,
+    )
+
+    parser = argparse.ArgumentParser(
+        description="LangGraph開発ワークフローCLI",
+        prog="hokusai",
+        parents=[shared_options],
     )
     parser.add_argument(
         "-v", "--verbose",
@@ -83,6 +102,7 @@ def main():
     start_parser = subparsers.add_parser(
         "start",
         help="新しいワークフローを開始",
+        parents=[shared_options],
     )
     start_parser.add_argument(
         "task_url",
@@ -104,6 +124,7 @@ def main():
     continue_parser = subparsers.add_parser(
         "continue",
         help="中断したワークフローを再開",
+        parents=[shared_options],
     )
     continue_parser.add_argument(
         "workflow_id",
@@ -119,6 +140,7 @@ def main():
     status_parser = subparsers.add_parser(
         "status",
         help="ワークフローの状態を表示",
+        parents=[shared_options],
     )
     status_parser.add_argument(
         "workflow_id",
@@ -130,12 +152,14 @@ def main():
     subparsers.add_parser(
         "list",
         help="アクティブなワークフロー一覧を表示",
+        parents=[shared_options],
     )
 
     # cleanup コマンド
     cleanup_parser = subparsers.add_parser(
         "cleanup",
         help="ワークフローの worktree を削除",
+        parents=[shared_options],
     )
     cleanup_parser.add_argument(
         "workflow_id",
@@ -152,6 +176,7 @@ def main():
     pr_status_parser = subparsers.add_parser(
         "pr-status",
         help="PRのステータスを更新（オプションなしでGitHubから同期）",
+        parents=[shared_options],
     )
     pr_status_parser.add_argument(
         "workflow_id",
@@ -182,6 +207,7 @@ def main():
     connect_parser = subparsers.add_parser(
         "connect",
         help="外部サービスへの認証導線（gh / glab CLI を経由）",
+        parents=[shared_options],
     )
     connect_parser.add_argument(
         "service",
@@ -209,6 +235,7 @@ def main():
     notion_setup_parser = subparsers.add_parser(
         "notion-setup",
         help="Notion 上に HOKUSAI 用 DB / ページを自動作成（初期セットアップ）",
+        parents=[shared_options],
     )
     notion_setup_parser.add_argument(
         "--parent-page-id",
@@ -234,6 +261,52 @@ def main():
         "--no-backup",
         action="store_true",
         help="--persist 時に rc ファイルのバックアップを作成しない（非推奨）",
+    )
+
+    # profile コマンド: profile registry の管理
+    profile_parser = subparsers.add_parser(
+        "profile",
+        help="profile（複数案件の実行スコープ）を管理",
+        parents=[shared_options],
+    )
+    profile_subparsers = profile_parser.add_subparsers(
+        dest="profile_subcommand",
+        help="サブコマンド",
+    )
+
+    profile_subparsers.add_parser(
+        "list",
+        help="profile 一覧を表示",
+    )
+
+    profile_show_parser = profile_subparsers.add_parser(
+        "show",
+        help="単一 profile の解決結果を表示（シークレット値は含まない）",
+    )
+    profile_show_parser.add_argument("name", help="profile 名")
+
+    profile_doctor_parser = profile_subparsers.add_parser(
+        "doctor",
+        help="profile 設定の整合性を診断",
+    )
+    profile_doctor_parser.add_argument("name", help="profile 名")
+    profile_doctor_parser.add_argument(
+        "--deep",
+        action="store_true",
+        help="実 API 接続まで踏み込んだ詳細診断（rate limit を消費するため明示指定）",
+    )
+
+    # dashboard コマンド: Operations Console を profile 指定で起動
+    dashboard_parser = subparsers.add_parser(
+        "dashboard",
+        help="Operations Console（Web Dashboard）を起動",
+        parents=[shared_options],
+    )
+    dashboard_parser.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="listen port（省略時は profile registry の dashboard.port → 8765）",
     )
 
     args = parser.parse_args()
@@ -266,6 +339,10 @@ def main():
     if args.command == "notion-setup":
         sys.exit(_handle_notion_setup(args))
 
+    # profile コマンドは registry のみ参照し、WorkflowConfig は不要
+    if args.command == "profile":
+        sys.exit(_handle_profile_command(args, profile_parser))
+
     # connect コマンドは config / Notion を必要としないため、早期に処理して終了する
     if args.command == "connect":
         from .cli.commands.connect import connect_service, show_status
@@ -291,12 +368,19 @@ def main():
         connect_parser.print_help()
         sys.exit(1)
 
-    # 設定ファイルを読み込み
+    # 設定ファイルを読み込み（--profile が指定されれば registry から解決）
+    # default=argparse.SUPPRESS の関係で args に属性が無い場合があるため getattr で取得
+    config_arg = getattr(args, "config", None)
+    profile_arg = getattr(args, "profile", None)
     try:
-        config = create_config_from_env_and_file(args.config)
+        config = create_config_from_env_and_file(
+            config_arg, profile_name=profile_arg
+        )
         set_config(config)
-        if args.config:
-            print_config_file(args.config)
+        if profile_arg:
+            print(f"Profile: {profile_arg}")
+        if config_arg:
+            print_config_file(config_arg)
         if args.verbose:
             logger.debug(f"プロジェクトルート: {config.project_root}")
             logger.debug(f"ベースブランチ: {config.base_branch}")
@@ -305,6 +389,18 @@ def main():
     except FileNotFoundError as e:
         print_config_error(str(e))
         sys.exit(1)
+    except Exception as e:
+        # profile 系のエラー（ConflictingProfileAndConfigError /
+        # ProfileNotFoundError / ProfileRegistryNotFoundError / ...）を含む
+        from .config.profiles import ProfileError
+        if isinstance(e, ProfileError):
+            print_config_error(str(e))
+            sys.exit(1)
+        raise
+
+    # dashboard コマンド: config 解決後に起動（WorkflowRunner は不要）
+    if args.command == "dashboard":
+        sys.exit(_handle_dashboard(args, config))
 
     # 環境設定チェック（start/continueコマンドの場合）
     if args.command in ("start", "continue"):
@@ -324,6 +420,7 @@ def main():
         verbose=args.verbose,
         dry_run=args.dry_run,
         step_mode=args.step,
+        profile_name=profile_arg,
     )
 
     try:
@@ -482,6 +579,250 @@ def _handle_notion_setup(args) -> int:
     print("  1. YAML 設定で notion_dashboard.enabled: true を有効化")
     print("  2. docs/notion-dashboard-operation-guide.md を参照")
     print("=" * 70)
+    return 0
+
+
+def _handle_dashboard(args, config) -> int:
+    """`hokusai dashboard [--profile <name>] [--port <port>]` のハンドラ
+
+    profile が指定されていれば registry から dashboard.port をフォールバック先に使う。
+    config はすでに main() で profile 解決済み。
+    """
+    from .dashboard import DEFAULT_DASHBOARD_PORT, DashboardPortInUseError, start_dashboard
+
+    port = args.port
+    profile_arg = getattr(args, "profile", None)
+
+    # --port 未指定なら registry の dashboard.port を探す
+    if port is None and profile_arg:
+        try:
+            from .config.profiles import load_profile_registry
+            registry = load_profile_registry()
+            p = registry.profiles.get(profile_arg)
+            if p and p.dashboard_port:
+                port = p.dashboard_port
+        except Exception:
+            # registry エラーはここでは無視（fallback でデフォルト port を使う）
+            pass
+
+    # それでも未確定なら HOKUSAI の実効デフォルト port に解決
+    # （None のまま start_dashboard に渡しても同様に解決されるが、CLI 側でも
+    # 明示的に解決することでエラーメッセージに正しい port 番号が出る）
+    if port is None:
+        port = DEFAULT_DASHBOARD_PORT
+
+    try:
+        return start_dashboard(
+            config,
+            profile_name=profile_arg,
+            port=port,
+        )
+    except DashboardPortInUseError as e:
+        print(f"エラー: {e}")
+        return 1
+    except ValueError as e:
+        # _port_in_use の range バリデーションエラー（port が 1..65535 範囲外）
+        print(f"エラー: {e}")
+        return 1
+    except OSError as e:
+        # _port_in_use が EADDRINUSE 以外（例: 特権ポート bind 時の EACCES）を
+        # 再 raise するケース。スタックトレースで終了せず、ユーザに状況を説明する。
+        import errno as _errno
+        if e.errno == _errno.EACCES:
+            print(
+                f"エラー: port {port} への bind 権限がありません。"
+                "特権ポート（<=1024）を指定していないか、別ユーザーが占有していないか確認してください。"
+            )
+        elif e.errno == _errno.EADDRNOTAVAIL:
+            print(f"エラー: port {port} は利用不可な状態です: {e}")
+        else:
+            print(f"エラー: port {port} の確認中に予期しない OS エラー: {e}")
+        return 1
+
+
+def _handle_profile_command(args, profile_parser) -> int:
+    """profile サブコマンドのハンドラ
+
+    profile list / show / doctor をルーティングする。registry のみを参照し、
+    WorkflowConfig 生成は行わない（実装計画書 §6.2）。
+    """
+    from .config.profiles import (
+        ProfileError,
+        load_profile_registry,
+        resolve_registry_path,
+    )
+
+    subcommand = getattr(args, "profile_subcommand", None)
+    if subcommand is None:
+        profile_parser.print_help()
+        return 1
+
+    try:
+        registry = load_profile_registry()
+    except ProfileError as e:
+        registry_path = resolve_registry_path()
+        print(f"エラー: {e}")
+        print(f"  registry: {registry_path}")
+        return 1
+
+    if subcommand == "list":
+        return _handle_profile_list(registry)
+    if subcommand == "show":
+        return _handle_profile_show(args.name, registry)
+    if subcommand == "doctor":
+        return _handle_profile_doctor(
+            args.name, registry, deep=getattr(args, "deep", False)
+        )
+
+    profile_parser.print_help()
+    return 1
+
+
+def _handle_profile_list(registry) -> int:
+    """`hokusai profile list` の実装"""
+    if not registry.profiles:
+        print("登録されている profile はありません。")
+        print(f"  registry: {registry.source_path}")
+        return 0
+
+    print(f"{'PROFILE':<20} {'CONFIG':<50} {'DATA DIR'}")
+    print("-" * 100)
+    for name in registry.names():
+        p = registry.profiles[name]
+        data_dir = str(p.data_dir) if p.data_dir else "(default)"
+        print(f"{name:<20} {str(p.config_path):<50} {data_dir}")
+
+    if registry.default_profile:
+        print()
+        print(f"default_profile: {registry.default_profile}")
+    return 0
+
+
+def _handle_profile_show(name: str, registry) -> int:
+    """`hokusai profile show <name>` の実装"""
+    from .config.profiles import ProfileNotFoundError
+
+    try:
+        p = registry.get(name)
+    except ProfileNotFoundError as e:
+        print(f"エラー: {e}")
+        return 1
+
+    print(f"Profile: {p.name}")
+    if p.label:
+        print(f"  label:         {p.label}")
+    if p.description:
+        print(f"  description:   {p.description}")
+    print(f"  config:        {p.config_path}")
+    if p.data_dir:
+        print(f"  data_dir:      {p.data_dir}")
+    if p.dashboard_port:
+        print(f"  dashboard:     port {p.dashboard_port}")
+    print(f"  registry:      {registry.source_path}")
+    print()
+    print("  ※ シークレット値（API token 等）は表示されません。env var 名は")
+    print("    profile config（YAML）内の `*_env` フィールドで確認してください。")
+    return 0
+
+
+def _handle_profile_doctor(name: str, registry, *, deep: bool = False) -> int:
+    """`hokusai profile doctor <name>` の実装
+
+    v0.3.0 の検査範囲:
+      1. config file が存在するか
+      2. data_dir が存在するか（無ければ作成を試みる）
+      3. dashboard port が他 profile と衝突していないか
+      4. data_dir が他 profile と衝突していないか
+
+    `--deep` フラグ: 受け付けるが実 API 接続確認は v0.4 以降で実装予定で、
+                   現状は注意書きを表示するだけ。
+
+    v0.3.0 では未実装（フォローアップで追加予定）:
+      - env var 名（`api_token_env` 等）の存在確認
+      - database_path / checkpoint_db_path / worktree_root 個別の衝突検出
+      - Notion / Figma / Miro / Slack への実 API 接続確認（`--deep`）
+    """
+    from .config.profiles import ProfileNotFoundError
+
+    try:
+        p = registry.get(name)
+    except ProfileNotFoundError as e:
+        print(f"エラー: {e}")
+        return 1
+
+    print(f"Diagnosing profile: {p.name}")
+    print("-" * 60)
+
+    issues: list[str] = []
+
+    # 1. config file の存在
+    if p.config_path.exists():
+        print(f"  ✓ config file exists: {p.config_path}")
+    else:
+        msg = f"config file が見つかりません: {p.config_path}"
+        print(f"  ✗ {msg}")
+        issues.append(msg)
+
+    # 2. data_dir の存在 / 作成可能性
+    if p.data_dir:
+        if p.data_dir.exists():
+            print(f"  ✓ data_dir exists: {p.data_dir}")
+        else:
+            try:
+                p.data_dir.mkdir(parents=True, exist_ok=True)
+                print(f"  ✓ data_dir created: {p.data_dir}")
+            except OSError as e:
+                msg = f"data_dir が作成できません: {p.data_dir}: {e}"
+                print(f"  ✗ {msg}")
+                issues.append(msg)
+
+    # 3. dashboard port の重複チェック（registry 内）
+    if p.dashboard_port:
+        conflicts = [
+            other
+            for other in registry.profiles.values()
+            if other.name != p.name and other.dashboard_port == p.dashboard_port
+        ]
+        if conflicts:
+            other_names = ", ".join(c.name for c in conflicts)
+            msg = (
+                f"dashboard port {p.dashboard_port} が他 profile と衝突: "
+                f"{other_names}"
+            )
+            print(f"  ✗ {msg}")
+            issues.append(msg)
+        else:
+            print(f"  ✓ dashboard port unique: {p.dashboard_port}")
+
+    # 4. data_dir の他 profile との衝突
+    # v0.3.0 では ProfileConfig.data_dir の一致のみ確認する。
+    # database_path / checkpoint_db_path / worktree_root の個別衝突検出は
+    # 各 profile config を読み込んで解決値で比較する必要があり、v0.4 以降。
+    # data_dir 統一運用が主で個別 path override はレアケースのため、
+    # data_dir 重複検出で実用上のカバレッジは確保される。
+    if p.data_dir:
+        path_conflicts = [
+            other
+            for other in registry.profiles.values()
+            if other.name != p.name and other.data_dir == p.data_dir
+        ]
+        if path_conflicts:
+            other_names = ", ".join(c.name for c in path_conflicts)
+            msg = f"data_dir が他 profile と衝突: {other_names}"
+            print(f"  ✗ {msg}")
+            issues.append(msg)
+
+    # 5. --deep モード: 実 API 接続確認（Phase E で実装予定）
+    if deep:
+        print()
+        print("  [--deep] 実 API 接続確認は Phase E で実装予定")
+
+    print("-" * 60)
+    if issues:
+        print(f"発見された問題: {len(issues)} 件")
+        return 1
+
+    print("OK: 問題ありません")
     return 0
 
 

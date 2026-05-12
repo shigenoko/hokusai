@@ -17,6 +17,77 @@ HOKUSAI のすべての特筆すべき変更をこのファイルに記録する
 
 ---
 
+## [0.3.0] - 2026-05-12
+
+複数案件（A 社・B 社・C 社）を安全に並列運用するための **profile 機能** を追加。
+1 PC 上で複数の Notion / Figma / Miro / GitHub / Slack token を使い分けながら、
+DB / worktree / dashboard を完全分離して並行開発できる基盤を提供。
+
+詳細は `docs/hokusai-profile-parallel-execution-implementation-plan.md` の
+Phase A〜F に対応。
+
+### Added
+
+- **Profile Registry**（Phase A）
+  - `~/.hokusai/profiles.yaml` で複数 profile を定義
+  - `HOKUSAI_PROFILES_FILE` 環境変数で registry パス override 可
+  - profile 名 validation（英小文字始まり、英数字/ハイフン/アンダースコア）
+  - `ProfileConfig` / `ProfileRegistry` データクラス
+- **CLI `--profile` グローバルオプション**（Phase B）
+  - `hokusai --profile <name> start | continue | status | list | cleanup | pr-status`
+  - `-c/--config` と排他（同時指定はエラー）
+- **`hokusai profile` サブコマンド**（Phase B）
+  - `profile list`: 登録 profile 一覧
+  - `profile show <name>`: 解決結果を表示（シークレット非表示）
+  - `profile doctor <name> [--deep]`: 設定整合性診断（config file 存在 /
+    data_dir / dashboard port 衝突 / data_dir 衝突）
+- **Data Dir 自動補完**（Phase C）
+  - profile registry の `data_dir` から `database_path` / `checkpoint_db_path` /
+    `worktree_root` を自動補完
+  - config file の明示値が registry 補完より優先
+  - 補完先の親ディレクトリを自動作成
+- **`hokusai dashboard` サブコマンド**（Phase D）
+  - `hokusai dashboard --profile <name> --port <port>`
+  - profile registry の `dashboard.port` を fallback として使用
+  - port 衝突を起動前に検出（`DashboardPortInUseError`）
+  - dashboard HTML ヘッダに profile バッジ表示
+  - `scripts/dashboard.py` を環境変数（`HOKUSAI_DASHBOARD_PORT` /
+    `HOKUSAI_DASHBOARD_DB_PATH` / `HOKUSAI_DASHBOARD_CHECKPOINT_DB_PATH` /
+    `HOKUSAI_DASHBOARD_PROFILE`）で外部制御可能化
+- **Workflow profile_name 保存**（Phase E）
+  - `workflows` テーブルに `profile_name` カラム追加
+  - 既存 v0.2.x DB は ALTER TABLE で自動マイグレーション（NULL 行は `(legacy)` 扱い）
+  - `SQLiteStore.get_workflow_profile_name()` / `workflow_exists()` API
+- **他 profile 横断探索**（Phase E）
+  - `find_workflow_in_other_profiles()`: workflow_id not found 時に
+    他 profile に存在するかを探索（current profile は除外）
+  - 壊れた DB / data_dir 不在の profile は silent skip
+- **配布 / 運用ガイド**（Phase F）
+  - `docs/profile-operation-guide.md`: profile 設定手順、移行ガイド
+  - `configs/example-profiles.yaml` / `configs/example-profile-company.yaml`: 雛形
+
+### Changed
+
+- **`create_config_from_env_and_file()`** に `profile_name` キーワード引数追加
+  - `profile_name` 指定時は registry から config_path を解決
+  - `--profile` と `--config` 排他チェック
+- **`SQLiteStore.save_workflow()`** が `state["profile_name"]` を DB に保存
+  - UPDATE 時は `COALESCE` で既存値を保持（state に無くても上書きしない）
+- **`scripts/dashboard.py`** の PORT / DB_PATH をモジュール定数 → env 解決関数に
+  （`HOKUSAI_DASHBOARD_*` 環境変数が最優先）
+
+### Breaking Changes
+
+なし。既存の `-c/--config` 運用、`python scripts/dashboard.py` 直接起動、
+v0.2.x で作成された DB はすべて互換。
+
+### Documentation
+
+- `docs/hokusai-profile-parallel-execution-implementation-plan.md`
+  実装計画書（Phase A〜F、DoD、テスト計画、移行計画、Open Questions）
+
+---
+
 ## [0.2.0] - 2026-05-11
 
 v0.1.0 から約 2 週間で多数の機能追加と運用性改善を実施。HOKUSAI を Notion
@@ -122,6 +193,7 @@ Notion / GitHub Issue / Jira / Linear 連携の最小機能セット。
 - SQLite による checkpoint / outbox 永続化
 - Worktree ベースの並行ワークフロー実行
 
-[Unreleased]: https://github.com/shigenoko/hokusai/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/shigenoko/hokusai/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/shigenoko/hokusai/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/shigenoko/hokusai/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/shigenoko/hokusai/releases/tag/v0.1.0

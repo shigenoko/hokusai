@@ -26,6 +26,21 @@ from .models import (
     TaskBackendConfig,
     WorkflowConfig,
 )
+from .profiles import (
+    ConflictingProfileAndConfigError,
+    InvalidProfileNameError,
+    ProfileConfig,
+    ProfileError,
+    ProfileNotFoundError,
+    ProfileRegistry,
+    ProfileRegistryNotFoundError,
+    assert_profile_config_exclusive,
+    find_workflow_in_other_profiles,
+    load_profile_registry,
+    resolve_profile_to_config_path,
+    resolve_registry_path,
+    validate_profile_name,
+)
 
 __all__ = [
     # Models
@@ -47,4 +62,18 @@ __all__ = [
     "get_config",
     "reset_config",
     "set_config",
+    # Profiles
+    "ConflictingProfileAndConfigError",
+    "InvalidProfileNameError",
+    "ProfileConfig",
+    "ProfileError",
+    "ProfileNotFoundError",
+    "ProfileRegistry",
+    "ProfileRegistryNotFoundError",
+    "assert_profile_config_exclusive",
+    "find_workflow_in_other_profiles",
+    "load_profile_registry",
+    "resolve_profile_to_config_path",
+    "resolve_registry_path",
+    "validate_profile_name",
 ]

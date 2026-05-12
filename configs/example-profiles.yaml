@@ -1,0 +1,39 @@
+# HOKUSAI profile registry の雛形
+#
+# 配置場所: ~/.hokusai/profiles.yaml （chmod 600 推奨）
+# 別パスに置く場合は HOKUSAI_PROFILES_FILE 環境変数で指定。
+#
+# 重要:
+# - シークレット値（API token 等）は絶対に書かない。env var 名のみを config 側で参照する。
+# - label / description に顧客識別情報を含めるなら、public repo にコミットしないこと。
+# - registry 自体は内部運用情報なので、chmod 600 で multi-user OS でも保護する。
+
+default_profile: company-a   # 任意。複数 profile がある場合は --profile 明示を推奨
+
+profiles:
+  # ─────────────────────────────────────────────────────────
+  company-a:
+    label: "A社 EC Platform"
+    config: "~/work/hokusai-configs/company-a.yaml"
+    data_dir: "~/.hokusai/profiles/company-a"
+    dashboard:
+      port: 8765
+    description: "A社向け EC 開発案件"
+
+  # ─────────────────────────────────────────────────────────
+  company-b:
+    label: "B社 Admin System"
+    config: "~/work/hokusai-configs/company-b.yaml"
+    data_dir: "~/.hokusai/profiles/company-b"
+    dashboard:
+      port: 8766
+    description: "B社向け社内管理システム"
+
+  # ─────────────────────────────────────────────────────────
+  company-c:
+    label: "C社 Mobile App Backend"
+    config: "~/work/hokusai-configs/company-c.yaml"
+    data_dir: "~/.hokusai/profiles/company-c"
+    dashboard:
+      port: 8767
+    description: "C社向けモバイルアプリ backend"

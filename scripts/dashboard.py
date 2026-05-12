@@ -28,8 +28,12 @@ from urllib.parse import parse_qs, urlparse
 
 import yaml
 
-# Ensure the project root is importable when running as a standalone script
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+# `python scripts/dashboard.py` で直接起動するスタンドアロン実行時にのみ
+# プロジェクトルートを sys.path に追加する。package として import される場合
+# （hokusai.dashboard.start_dashboard 経由）は不要であり、実行環境の sys.path を
+# 恒常的に汚染しないようガードする。
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from hokusai.constants import PHASE_SHORT_NAMES
 from hokusai.integrations import connection_status as _cs
@@ -40,9 +44,67 @@ from hokusai.utils.phase_page_templates import (
     initialize_phase_page_state,
 )
 
-DB_PATH = Path.home() / ".hokusai" / "workflow.db"
-CHECKPOINT_DB_PATH = Path.home() / ".hokusai" / "checkpoint.db"
+
+def _resolve_db_path() -> Path:
+    """DB_PATH を解決。HOKUSAI_DASHBOARD_DB_PATH 環境変数が最優先。
+
+    profile 経由起動時は CLI が HOKUSAI_DASHBOARD_DB_PATH を設定してから dashboard を
+    起動するため、既存の `python scripts/dashboard.py` 直接起動と後方互換性を保つ。
+    """
+    env_db = os.environ.get("HOKUSAI_DASHBOARD_DB_PATH")
+    if env_db:
+        return Path(env_db).expanduser()
+    return Path.home() / ".hokusai" / "workflow.db"
+
+
+def _resolve_checkpoint_db_path() -> Path:
+    env_db = os.environ.get("HOKUSAI_DASHBOARD_CHECKPOINT_DB_PATH")
+    if env_db:
+        return Path(env_db).expanduser()
+    return Path.home() / ".hokusai" / "checkpoint.db"
+
+
+DB_PATH = _resolve_db_path()
+CHECKPOINT_DB_PATH = _resolve_checkpoint_db_path()
 _store: SQLiteStore | None = None
+
+# profile 経由起動時に CLI から渡される profile name（ヘッダ表示用）
+HOKUSAI_PROFILE_NAME: str | None = os.environ.get("HOKUSAI_DASHBOARD_PROFILE")
+
+
+def refresh_from_env() -> None:
+    """env から PORT / DB_PATH / CHECKPOINT_DB_PATH / HOKUSAI_PROFILE_NAME を
+    再評価して module 変数を更新する。
+
+    hokusai.dashboard.start_dashboard() が env を設定した後にこの関数を呼ぶ。
+    `importlib.reload()` だとモジュール内の monkeypatch が消えてテストが
+    壊れるため、明示的な refresh を採用している。
+
+    また `_store` は DB_PATH 変更時にリセットする必要があるため None に戻す。
+    """
+    global PORT, DB_PATH, CHECKPOINT_DB_PATH, HOKUSAI_PROFILE_NAME, _store
+    PORT = _resolve_port()
+    DB_PATH = _resolve_db_path()
+    CHECKPOINT_DB_PATH = _resolve_checkpoint_db_path()
+    HOKUSAI_PROFILE_NAME = os.environ.get("HOKUSAI_DASHBOARD_PROFILE")
+    # DB_PATH が変わった場合、既存の _store シングルトンは無効
+    _store = None
+
+
+def _render_profile_badge() -> str:
+    """profile 経由起動時にヘッダロゴ横に表示する小バッジ。
+
+    HOKUSAI_DASHBOARD_PROFILE が設定されていなければ空文字列を返し、
+    既存の direct 起動とのレンダリング差分を最小化する。
+    """
+    if not HOKUSAI_PROFILE_NAME:
+        return ""
+    safe = html_mod.escape(HOKUSAI_PROFILE_NAME)
+    return (
+        f' <span style="font-size:0.7em; padding:2px 8px; margin-left:8px;'
+        f' background:#eef2ff; color:#4338ca; border-radius:4px;">'
+        f'Profile: {safe}</span>'
+    )
 
 
 def _get_store() -> SQLiteStore:
@@ -127,7 +189,42 @@ def render_notion_dashboard_panel() -> str:
 
 CHECKLIST_PATH = Path(__file__).parent.parent / "hokusai" / "review_checklist.md"
 CONFIGS_DIR = Path(__file__).parent.parent / "configs"
-PORT = 8765
+
+
+def _resolve_port() -> int:
+    """PORT を解決。HOKUSAI_DASHBOARD_PORT 環境変数が最優先。
+
+    profile 経由起動時は CLI が HOKUSAI_DASHBOARD_PORT を設定してから dashboard を
+    起動するため、既存の `python scripts/dashboard.py` 直接起動と後方互換性を保つ。
+
+    バリデーション:
+    - 数値変換失敗 → warning + 8765 にフォールバック
+    - 1..65535 範囲外 → warning + 8765 にフォールバック
+    （`python scripts/dashboard.py` 直接起動時に bind 直前まで気づかない事故を防ぐ。
+      CLI 経由では hokusai.dashboard._port_in_use がより厳格に検証する。）
+    """
+    env_port = os.environ.get("HOKUSAI_DASHBOARD_PORT")
+    default_port = 8765
+    if env_port:
+        try:
+            parsed = int(env_port)
+        except ValueError:
+            print(
+                f"warning: HOKUSAI_DASHBOARD_PORT={env_port!r} は数値ではありません。"
+                f"デフォルトの {default_port} を使用します。"
+            )
+            return default_port
+        if not (1 <= parsed <= 65535):
+            print(
+                f"warning: HOKUSAI_DASHBOARD_PORT={parsed} は 1..65535 の範囲外です。"
+                f"デフォルトの {default_port} を使用します。"
+            )
+            return default_port
+        return parsed
+    return default_port
+
+
+PORT = _resolve_port()
 HOKUSAI_COMMAND_TIMEOUT = 3600
 
 _BG_LOG_DIR = Path(tempfile.gettempdir()) / "hokusai-dashboard-logs"
@@ -6165,7 +6262,7 @@ def render_html(content: str, title: str = "HOKUS AI Dashboard") -> str:
     <div class="container">
         <div class="header">
             <div class="header-left">
-                <div class="logo">HOKUS<span>AI</span> Dashboard</div>
+                <div class="logo">HOKUS<span>AI</span> Dashboard{_render_profile_badge()}</div>
                 <nav class="header-nav">
                     <a href="/">一覧</a>
                     <a href="/settings">設定</a>

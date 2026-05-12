@@ -1,0 +1,81 @@
+# HOKUSAI profile config の雛形
+#
+# profile registry (~/.hokusai/profiles.yaml) から参照される個別案件用 config。
+# 案件ごとに 1 ファイル作成する想定。配置例:
+#   ~/work/hokusai-configs/company-a.yaml
+#   ~/work/hokusai-configs/company-b.yaml
+#
+# 設定値:
+# - data_dir / database_path / checkpoint_db_path / worktree_root は registry 側で
+#   data_dir を指定していれば自動補完される。ここで明示する必要は通常ない。
+# - 環境変数名（*_env）には案件 prefix を付けて衝突を防ぐ。
+# - シークレットは絶対に書かない（環境変数経由のみ）。
+
+# プロジェクト基本設定
+project_root: ~/repo/company-a/backend
+base_branch: main
+
+# ビルド・テストコマンド
+build_command: npm run build
+test_command: npm run test
+lint_command: npm run lint
+
+# Task backend（Notion / GitHub Issue / Jira / Linear）
+task_backend:
+  type: notion
+
+# Git hosting
+git_hosting:
+  type: github
+  repo: company-a/backend
+  # GitLab の場合:
+  # type: gitlab
+  # base_url: https://gitlab.com
+  # project_path: company-a/backend
+
+# Notion メインダッシュボード同期（v0.2.0+）
+notion_dashboard:
+  enabled: true
+  api_token_env: COMPANY_A_NOTION_API_TOKEN
+  workflows_db_id_env: COMPANY_A_NOTION_WORKFLOWS_DB_ID
+  pull_requests_db_id_env: COMPANY_A_NOTION_PR_DB_ID
+  sync_outbox:
+    enabled: true
+    max_retry_attempts: 10
+
+# Figma 連携（v0.2.0+、read-only MVP）
+figma:
+  enabled: true
+  api_token_env: COMPANY_A_FIGMA_API_TOKEN
+  fetch_comments: true
+  export_images: true
+
+# Miro 連携（v0.2.0+、read-only MVP）
+miro:
+  enabled: true
+  api_token_env: COMPANY_A_MIRO_API_TOKEN
+  default_team_id_env: COMPANY_A_MIRO_TEAM_ID
+
+# Slack 通知（v0.2.0+）
+notifications:
+  slack:
+    enabled: true
+    webhook_url_env: COMPANY_A_SLACK_WEBHOOK_URL
+    events:
+      - waiting_for_human
+      - workflow_failed
+      - pr_created
+      - workflow_completed
+
+# Operations Console（HOKUSAI Web Dashboard）BASIC 認証
+web_dashboard:
+  auth:
+    enabled: false           # 案件によって on/off
+    username_env: COMPANY_A_HOKUSAI_OPS_USERNAME
+    password_env: COMPANY_A_HOKUSAI_OPS_PASSWORD
+
+# クロスLLMレビュー（任意）
+cross_review:
+  enabled: false
+  model: codex-mini-latest
+  phases: [2, 4]
