@@ -420,6 +420,7 @@ def main():
         verbose=args.verbose,
         dry_run=args.dry_run,
         step_mode=args.step,
+        profile_name=profile_arg,
     )
 
     try:

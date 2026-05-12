@@ -28,8 +28,12 @@ from urllib.parse import parse_qs, urlparse
 
 import yaml
 
-# Ensure the project root is importable when running as a standalone script
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+# `python scripts/dashboard.py` で直接起動するスタンドアロン実行時にのみ
+# プロジェクトルートを sys.path に追加する。package として import される場合
+# （hokusai.dashboard.start_dashboard 経由）は不要であり、実行環境の sys.path を
+# 恒常的に汚染しないようガードする。
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from hokusai.constants import PHASE_SHORT_NAMES
 from hokusai.integrations import connection_status as _cs

@@ -56,7 +56,13 @@ class WorkflowRunner:
     # フェーズ名のマッピング
     PHASE_NAMES = PHASE_NAMES
 
-    def __init__(self, verbose: bool = False, dry_run: bool = False, step_mode: bool = False):
+    def __init__(
+        self,
+        verbose: bool = False,
+        dry_run: bool = False,
+        step_mode: bool = False,
+        profile_name: str | None = None,
+    ):
         """
         初期化
 
@@ -64,6 +70,11 @@ class WorkflowRunner:
             verbose: 詳細ログモード
             dry_run: ドライランモード（実際の処理は行わない）
             step_mode: ステップ実行モード（各フェーズ完了後に一時停止）
+            profile_name: profile 名（v0.3.0 で追加）。start() で作成される
+                新規 workflow の state に注入され、Phase E の誤操作検知 /
+                他 profile 横断探索の根拠として workflows.profile_name に保存される。
+                continue / status 等の既存 workflow への操作には影響しない
+                （loaded state の profile_name が保持される）。
         """
         self.config = get_config()
         self.store = SQLiteStore(self.config.database_path)
@@ -71,6 +82,7 @@ class WorkflowRunner:
         self.verbose = verbose
         self.dry_run = dry_run
         self.step_mode = step_mode
+        self.profile_name = profile_name
         # Notion メインダッシュボード同期 dispatcher
         # enabled=False または環境変数未設定なら is_configured() が False で no-op
         self.notion_dispatcher = NotionSyncDispatcher(
@@ -272,6 +284,10 @@ class WorkflowRunner:
         )
         # Notion接続状態を実行時点の環境に合わせて明示的に反映
         state["notion_connected"] = os.environ.get("HOKUSAI_SKIP_NOTION") != "1"
+        # profile_name を state に注入（Phase E、workflows.profile_name 永続化用）
+        # None の場合は state に入れず、save_workflow 側の COALESCE で既存値を保持
+        if self.profile_name is not None:
+            state["profile_name"] = self.profile_name
         workflow_id = state["workflow_id"]
 
         if self.verbose:
