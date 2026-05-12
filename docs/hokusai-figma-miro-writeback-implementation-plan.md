@@ -76,11 +76,11 @@ Phase 8a 完了
 WorkflowRunner._safe_design_writeback_dispatch()
     ↓
 DesignWritebackDispatcher
-    ├─ Figma post_comment(frame_id, body)
-    │       ├─ 成功 → audit_log
+    ├─ Figma post_comment(file_key, message, client_meta={node_id, node_offset})
+    │       ├─ 成功 → audit_log + design_writeback_idempotency
     │       └─ 失敗 → figma_sync_outbox enqueue
-    └─ Miro create_card(board_id, position, body)
-            ├─ 成功 → audit_log
+    └─ Miro create_card(board_id, message, position)
+            ├─ 成功 → audit_log + design_writeback_idempotency
             └─ 失敗 → miro_sync_outbox enqueue
 
 Operations Console
@@ -88,6 +88,13 @@ Operations Console
     ├─ /api/figma/retry-pending（個別 / 全件）
     └─ /api/miro/retry-pending（個別 / 全件）
 ```
+
+**API 呼び出しの引数**（§6.1.2 / §7.2 と一致）:
+
+| target | API パラメータ |
+|---|---|
+| Figma | `POST /v1/files/{file_key}/comments`、body に `message` + `client_meta.{node_id, node_offset}` |
+| Miro | `POST /v2/boards/{board_id}/cards`、body に title / description / position |
 
 既存 `NotionSyncDispatcher` パターンを完全踏襲し、同じ抽象で Figma / Miro を扱う。
 
