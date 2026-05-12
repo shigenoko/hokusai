@@ -575,3 +575,58 @@ def test_phase_c_parent_directories_created(tmp_path, monkeypatch):
     assert data_dir.exists()
     # database_path / checkpoint_db_path の親も作成される（補完先 == data_dir なので同じ）
     assert config.database_path.parent.exists()
+
+
+def test_phase_c_worktree_root_directory_created(tmp_path, monkeypatch):
+    """worktree_root はファイルではなくディレクトリなので、それ自体が作成される
+
+    旧実装は worktree_root に対しても parent.mkdir() しか呼んでおらず、
+    親が既に存在するケース（data_dir 配下の "worktrees" を補完するケース）では
+    worktree_root 自体は作られなかった。git worktree が `config.worktree_root / X`
+    を作る際に親ディレクトリ不在で失敗するため、worktree_root 自身を
+    `mkdir(parents=True, exist_ok=True)` する必要がある。
+    """
+    from hokusai.config import create_config_from_env_and_file
+
+    data_dir = tmp_path / "data-co"
+
+    cfg = tmp_path / "a.yaml"
+    cfg.write_text("project_root: /tmp/repo\n")
+    registry = tmp_path / "profiles.yaml"
+    registry.write_text(yaml.safe_dump({
+        "profiles": {
+            "a-co": {
+                "config": str(cfg),
+                "data_dir": str(data_dir),
+            }
+        }
+    }))
+    monkeypatch.setenv("HOKUSAI_PROFILES_FILE", str(registry))
+
+    config = create_config_from_env_and_file(profile_name="a-co")
+
+    # worktree_root は data_dir/"worktrees" に補完される
+    assert config.worktree_root == data_dir / "worktrees"
+    # worktree_root それ自体が存在する（git worktree add の前提）
+    assert config.worktree_root.exists()
+    assert config.worktree_root.is_dir()
+
+
+def test_phase_c_worktree_root_directory_created_with_explicit_path(tmp_path, monkeypatch):
+    """config file で worktree_root を明示した場合も、ディレクトリ自体が作成される"""
+    from hokusai.config import create_config_from_env_and_file
+
+    explicit_worktree = tmp_path / "custom" / "wt-root"
+    assert not explicit_worktree.exists()
+
+    cfg = tmp_path / "a.yaml"
+    cfg.write_text(
+        "project_root: /tmp/repo\n"
+        f"worktree_root: {explicit_worktree}\n"
+    )
+
+    config = create_config_from_env_and_file(config_file=str(cfg))
+
+    assert config.worktree_root == explicit_worktree
+    assert explicit_worktree.exists()
+    assert explicit_worktree.is_dir()

@@ -118,10 +118,17 @@ def create_config_from_env_and_file(
 
     # data_dir が解決された結果として作成されるディレクトリを保証
     # （WorkflowConfig.__post_init__ が data_dir を作るが、補完した周辺パスの親も用意）
-    for path_key in ("database_path", "checkpoint_db_path", "worktree_root"):
+    #
+    # database_path / checkpoint_db_path はファイルパスなので「親ディレクトリ」を作成。
+    # worktree_root は git worktree が中に配置するディレクトリパスなので、
+    # それ自体を作成する必要がある（parent だけ作っても worktree 作成側で失敗する）。
+    for path_key in ("database_path", "checkpoint_db_path"):
         p = config_dict.get(path_key)
         if isinstance(p, Path):
             p.parent.mkdir(parents=True, exist_ok=True)
+    worktree_root_val = config_dict.get("worktree_root")
+    if isinstance(worktree_root_val, Path):
+        worktree_root_val.mkdir(parents=True, exist_ok=True)
 
     # task_backend と git_hosting をパース
     task_backend = _parse_task_backend_config(config_dict)
