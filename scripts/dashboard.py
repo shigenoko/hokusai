@@ -6972,6 +6972,18 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             service_id = unquote(parsed.path[len("/api/connections/"):])
             self._handle_connections_get(service_id, query)
             return
+        elif parsed.path == "/api/figma/outbox":
+            self._handle_writeback_list_get("figma", "outbox", query)
+            return
+        elif parsed.path == "/api/figma/errors":
+            self._handle_writeback_list_get("figma", "errors", query)
+            return
+        elif parsed.path == "/api/miro/outbox":
+            self._handle_writeback_list_get("miro", "outbox", query)
+            return
+        elif parsed.path == "/api/miro/errors":
+            self._handle_writeback_list_get("miro", "errors", query)
+            return
         elif "id" in query:
             # 詳細ページ
             workflow_id = query["id"][0]
@@ -7146,6 +7158,14 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._handle_design_cache_refresh_post("figma")
         elif parsed.path == "/api/miro/refresh-cache":
             self._handle_design_cache_refresh_post("miro")
+        elif parsed.path == "/api/figma/retry-pending":
+            self._handle_writeback_retry_post("figma")
+        elif parsed.path == "/api/figma/move-to-errors":
+            self._handle_writeback_move_to_errors_post("figma")
+        elif parsed.path == "/api/miro/retry-pending":
+            self._handle_writeback_retry_post("miro")
+        elif parsed.path == "/api/miro/move-to-errors":
+            self._handle_writeback_move_to_errors_post("miro")
         elif parsed.path.startswith("/api/prompts/"):
             from urllib.parse import unquote
             prompt_id = unquote(parsed.path[len("/api/prompts/"):])
@@ -7174,6 +7194,144 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         except Exception as e:
             self._send_json_response(
                 {"success": False, "error": f"{type(e).__name__}"},
+                status_code=500,
+            )
+
+    # ------------------------------------------------------------------
+    # Phase E (v0.4.0): Figma / Miro 書き戻し outbox の Operations Console API
+    # 計画書 §10 参照
+    # ------------------------------------------------------------------
+
+    def _get_writeback_target(self, source: str):
+        """source 文字列から WritebackTarget enum を取得。"""
+        from hokusai.integrations.design.writeback import WritebackTarget
+        return WritebackTarget.FIGMA if source == "figma" else WritebackTarget.MIRO
+
+    def _handle_writeback_list_get(self, source: str, kind: str, query: dict):
+        """GET /api/{figma,miro}/{outbox,errors}
+
+        Query:
+            limit (int, default 100)
+            profile (str, optional)
+        """
+        try:
+            from hokusai.integrations.design.writeback import OutboxStore
+            target = self._get_writeback_target(source)
+            limit = int(query.get("limit", ["100"])[0])
+            profile = query.get("profile", [None])[0]
+            store = OutboxStore(DB_PATH, target=target)
+            if kind == "outbox":
+                entries = store.list_outbox(limit=limit, profile_name=profile)
+                items = [
+                    {
+                        "id": e.id,
+                        "idempotency_key": e.idempotency_key,
+                        "workflow_id": e.workflow_id,
+                        "profile_name": e.profile_name,
+                        "event_type": e.event_type,
+                        "resource": e.payload.get("node_id")
+                            or e.payload.get("frame_id"),
+                        "attempt_count": e.attempt_count,
+                        "last_error": e.last_error,
+                        "created_at": e.created_at,
+                        "updated_at": e.updated_at,
+                    }
+                    for e in entries
+                ]
+            else:
+                items = store.list_errors(limit=limit, profile_name=profile)
+            self._send_json_response({"success": True, "items": items, "count": len(items)})
+        except Exception as e:
+            self._send_json_response(
+                {"success": False, "error": f"{type(e).__name__}: {e}"},
+                status_code=500,
+            )
+
+    def _handle_writeback_retry_post(self, source: str):
+        """POST /api/{figma,miro}/retry-pending
+
+        body:
+            {"id": <int>}        個別再送（指定 outbox id のみ）
+            {}                   pending 全件再送
+            {"force": true}      errors にあっても再試行
+
+        v0.4.0: 1 行ずつ attempt_count を +1。MAX(5) で errors に自動移動。
+        """
+        try:
+            from hokusai.integrations.design.writeback import (
+                FigmaWritebackDispatcher,
+                MiroWritebackDispatcher,
+                OutboxStore,
+                build_figma_dispatcher,
+                build_miro_dispatcher,
+                load_writeback_config,
+            )
+            from hokusai.config import get_config
+            target = self._get_writeback_target(source)
+            store = OutboxStore(DB_PATH, target=target)
+
+            try:
+                body = self._read_json_body()
+            except Exception:
+                body = {}
+            force = bool(body.get("force", False))
+            specific_id = body.get("id")
+
+            config = get_config()
+            wcfg = load_writeback_config(config)
+            if source == "figma":
+                dispatcher = build_figma_dispatcher(DB_PATH, wcfg)
+            else:
+                dispatcher = build_miro_dispatcher(DB_PATH, wcfg)
+            if dispatcher is None:
+                self._send_json_response({
+                    "success": False,
+                    "error": f"{source} writeback is not configured (disabled or token missing)",
+                }, status_code=409)
+                return
+
+            results: list[dict] = []
+            if specific_id is not None:
+                results.append(dispatcher.retry(int(specific_id), force=force))
+            else:
+                entries = store.list_outbox(limit=100)
+                for e in entries:
+                    results.append(dispatcher.retry(e.id, force=force))
+
+            self._send_json_response({
+                "success": True,
+                "results": results,
+                "count": len(results),
+            })
+        except Exception as e:
+            self._send_json_response(
+                {"success": False, "error": f"{type(e).__name__}: {e}"},
+                status_code=500,
+            )
+
+    def _handle_writeback_move_to_errors_post(self, source: str):
+        """POST /api/{figma,miro}/move-to-errors
+
+        body: {"id": <int>}
+        outbox から errors へ強制移動。
+        """
+        try:
+            from hokusai.integrations.design.writeback import OutboxStore
+            target = self._get_writeback_target(source)
+            body = self._read_json_body()
+            outbox_id = int(body.get("id"))
+            store = OutboxStore(DB_PATH, target=target)
+            ok = store.move_to_errors(outbox_id, error="manually moved by operator")
+            if not ok:
+                self._send_json_response(
+                    {"success": False, "error": f"outbox id {outbox_id} not found"},
+                    status_code=404,
+                )
+                return
+            self._send_json_response({"success": True, "moved_id": outbox_id})
+        except Exception as e:
+            self._send_json_response(
+                {"success": False, "error": f"{type(e).__name__}: {e}"},
                 status_code=500,
             )
 
