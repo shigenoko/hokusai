@@ -192,20 +192,35 @@ def load_profile_registry(registry_path: Path | str | None = None) -> ProfileReg
         config_path = Path(config_path_raw).expanduser()
 
         data_dir_raw = entry.get("data_dir")
-        data_dir = (
-            Path(data_dir_raw).expanduser()
-            if isinstance(data_dir_raw, str)
-            else None
-        )
+        data_dir: Path | None = None
+        if data_dir_raw is not None:
+            if not isinstance(data_dir_raw, str):
+                raise ProfileError(
+                    f"profile '{name}' の data_dir は文字列である必要があります: "
+                    f"got {type(data_dir_raw).__name__}"
+                )
+            data_dir = Path(data_dir_raw).expanduser()
 
-        dashboard_raw = entry.get("dashboard", {})
+        dashboard_raw = entry.get("dashboard")
         dashboard_port: int | None = None
-        if isinstance(dashboard_raw, dict):
+        if dashboard_raw is not None:
+            if not isinstance(dashboard_raw, dict):
+                raise ProfileError(
+                    f"profile '{name}' の dashboard は dict である必要があります: "
+                    f"got {type(dashboard_raw).__name__}"
+                )
             port = dashboard_raw.get("port")
             if port is not None:
-                if not isinstance(port, int):
+                # bool は Python では int のサブクラスなので明示的に除外
+                if isinstance(port, bool) or not isinstance(port, int):
                     raise ProfileError(
-                        f"profile '{name}' の dashboard.port は int である必要があります"
+                        f"profile '{name}' の dashboard.port は int である必要があります: "
+                        f"got {type(port).__name__}"
+                    )
+                if not (1 <= port <= 65535):
+                    raise ProfileError(
+                        f"profile '{name}' の dashboard.port は 1〜65535 の範囲である必要があります: "
+                        f"got {port}"
                     )
                 dashboard_port = port
 

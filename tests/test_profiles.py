@@ -243,6 +243,71 @@ def test_load_profile_registry_dashboard_port_not_int(tmp_path):
         load_profile_registry(registry_file)
 
 
+def test_load_profile_registry_data_dir_not_str(tmp_path):
+    """data_dir が文字列以外（dict / list / int 等）なら ProfileError"""
+    cfg = tmp_path / "a.yaml"
+    cfg.write_text("project_root: /tmp\n")
+    registry_file = _write_registry(tmp_path, {
+        "profiles": {
+            "a-company": {"config": str(cfg), "data_dir": ["unexpected", "list"]}
+        }
+    })
+    with pytest.raises(ProfileError, match="data_dir"):
+        load_profile_registry(registry_file)
+
+
+def test_load_profile_registry_dashboard_not_dict(tmp_path):
+    """dashboard が dict 以外（string / int 等）なら ProfileError"""
+    cfg = tmp_path / "a.yaml"
+    cfg.write_text("project_root: /tmp\n")
+    registry_file = _write_registry(tmp_path, {
+        "profiles": {
+            "a-company": {"config": str(cfg), "dashboard": "port-8765"}
+        }
+    })
+    with pytest.raises(ProfileError, match="dashboard"):
+        load_profile_registry(registry_file)
+
+
+def test_load_profile_registry_dashboard_port_out_of_range(tmp_path):
+    """dashboard.port が 1..65535 の範囲外なら ProfileError"""
+    cfg = tmp_path / "a.yaml"
+    cfg.write_text("project_root: /tmp\n")
+
+    # 上限超過
+    registry_high = _write_registry(tmp_path, {
+        "profiles": {
+            "a-company": {"config": str(cfg), "dashboard": {"port": 99999}}
+        }
+    })
+    with pytest.raises(ProfileError, match="範囲"):
+        load_profile_registry(registry_high)
+
+    # 0 / 負値
+    for invalid_port in [0, -1]:
+        rf = tmp_path / f"profiles-{invalid_port}.yaml"
+        rf.write_text(yaml.safe_dump({
+            "profiles": {
+                "a-company": {"config": str(cfg), "dashboard": {"port": invalid_port}}
+            }
+        }))
+        with pytest.raises(ProfileError, match="範囲"):
+            load_profile_registry(rf)
+
+
+def test_load_profile_registry_dashboard_port_bool_rejected(tmp_path):
+    """YAML で true/false を port に渡された場合（Python では bool が int サブクラスなので明示除外）"""
+    cfg = tmp_path / "a.yaml"
+    cfg.write_text("project_root: /tmp\n")
+    registry_file = _write_registry(tmp_path, {
+        "profiles": {
+            "a-company": {"config": str(cfg), "dashboard": {"port": True}}
+        }
+    })
+    with pytest.raises(ProfileError, match="port"):
+        load_profile_registry(registry_file)
+
+
 # ---------------------------------------------------------------------------
 # ProfileRegistry.get
 # ---------------------------------------------------------------------------
@@ -413,14 +478,22 @@ def test_phase_c_paths_expanduser_in_config_file(tmp_path, monkeypatch):
     """config file の database_path / checkpoint_db_path に ~ が含まれても展開される"""
     from hokusai.config import create_config_from_env_and_file
 
+    # HOME を tmp_path に置換して、~/... が tmp_path/... に展開されることを検証する。
+    # 単に tmp_path を絶対パスで書くと expanduser の回帰検知にならないため、
+    # 必ず "~/" を含む値を使う。
+    monkeypatch.setenv("HOME", str(tmp_path))
+
     cfg = tmp_path / "a.yaml"
     cfg.write_text(
         "project_root: /tmp/repo\n"
-        f"database_path: {tmp_path}/expanded.db\n"
-        f"checkpoint_db_path: {tmp_path}/expanded-cp.db\n"
+        "database_path: ~/expanded.db\n"
+        "checkpoint_db_path: ~/expanded-cp.db\n"
     )
 
     config = create_config_from_env_and_file(str(cfg))
+    # ~ が HOME=tmp_path に展開されているはず
+    assert "~" not in str(config.database_path)
+    assert "~" not in str(config.checkpoint_db_path)
     assert config.database_path == tmp_path / "expanded.db"
     assert config.checkpoint_db_path == tmp_path / "expanded-cp.db"
 
