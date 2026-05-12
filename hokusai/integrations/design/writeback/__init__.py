@@ -9,12 +9,15 @@ from __future__ import annotations
 
 from .figma_writeback import FigmaWritebackArgs, FigmaWritebackDispatcher
 from .idempotency import build_idempotency_key
+from .miro_writeback import MiroWritebackArgs, MiroWritebackDispatcher
 from .outbox import MAX_ATTEMPT_COUNT, OutboxEntry, OutboxStore, WritebackTarget
 
 __all__ = [
     "MAX_ATTEMPT_COUNT",
     "FigmaWritebackArgs",
     "FigmaWritebackDispatcher",
+    "MiroWritebackArgs",
+    "MiroWritebackDispatcher",
     "OutboxEntry",
     "OutboxStore",
     "WritebackTarget",
