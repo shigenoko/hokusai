@@ -7,10 +7,14 @@ Phase 8a 完了時に Figma frame / Miro board に進捗コメント / カード
 
 from __future__ import annotations
 
+from .figma_writeback import FigmaWritebackArgs, FigmaWritebackDispatcher
 from .idempotency import build_idempotency_key
-from .outbox import OutboxEntry, OutboxStore, WritebackTarget
+from .outbox import MAX_ATTEMPT_COUNT, OutboxEntry, OutboxStore, WritebackTarget
 
 __all__ = [
+    "MAX_ATTEMPT_COUNT",
+    "FigmaWritebackArgs",
+    "FigmaWritebackDispatcher",
     "OutboxEntry",
     "OutboxStore",
     "WritebackTarget",

@@ -90,6 +90,47 @@ class FigmaClient:
             return []
         return data.get("comments", []) if isinstance(data, dict) else []
 
+    def post_comment(
+        self,
+        file_key: str,
+        *,
+        message: str,
+        node_id: str,
+        node_offset: dict[str, float] | None = None,
+    ) -> dict[str, Any]:
+        """Figma frame に pin コメントを投稿する（Phase E, v0.4.0）。
+
+        Figma REST API:
+            POST /v1/files/{file_key}/comments
+            body: {"message": "...", "client_meta": {"node_id": "...", "node_offset": {...}}}
+
+        詳細: https://developers.figma.com/docs/rest-api/comments-endpoints/
+
+        Args:
+            file_key: Figma file key
+            message: コメント本文
+            node_id: pin する frame / node の ID
+            node_offset: pin 位置（既定 {"x": 0, "y": 0}、frame 左上）
+
+        Returns:
+            API レスポンス（"id" にコメント ID が入る）
+
+        Raises:
+            FigmaAPIError: 4xx エラー（権限不足、frame 不在等）
+            FigmaRateLimitError: 429
+        """
+        if not file_key or not node_id or not message:
+            raise ValueError("file_key / node_id / message は必須")
+        offset = node_offset or {"x": 0, "y": 0}
+        body = {
+            "message": message,
+            "client_meta": {
+                "node_id": node_id,
+                "node_offset": offset,
+            },
+        }
+        return self._request("POST", f"/files/{file_key}/comments", body=body)
+
     def get_image_urls(
         self, file_key: str, node_ids: list[str], *, fmt: str = "png", scale: float = 1.0
     ) -> dict[str, str]:
@@ -164,13 +205,19 @@ class FigmaClient:
 
     # ---------- 内部 ----------
 
-    def _request(self, method: str, path: str) -> dict[str, Any]:
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        body: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         url = f"{FIGMA_API_BASE}{path}"
         last_exception: Exception | None = None
         for attempt in range(1, self._max_attempts + 1):
             self._enforce_rate_limit()
             try:
-                return self._send(method, url)
+                return self._send(method, url, body=body)
             except FigmaRateLimitError as e:
                 last_exception = e
                 logger.warning(
@@ -208,16 +255,28 @@ class FigmaClient:
             time.sleep(wait)
         self._last_request_at = time.monotonic()
 
-    def _send(self, method: str, url: str) -> dict[str, Any]:
+    def _send(
+        self,
+        method: str,
+        url: str,
+        *,
+        body: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        headers = {"X-Figma-Token": self._api_token}
+        data: bytes | None = None
+        if body is not None:
+            data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+            headers["Content-Type"] = "application/json"
         req = urllib.request.Request(
             url,
             method=method,
-            headers={"X-Figma-Token": self._api_token},
+            headers=headers,
+            data=data,
         )
         try:
             with urllib.request.urlopen(req, timeout=self._timeout) as response:
-                body = response.read().decode("utf-8")
-                return json.loads(body) if body else {}
+                body_text = response.read().decode("utf-8")
+                return json.loads(body_text) if body_text else {}
         except urllib.error.HTTPError as e:
             status = e.code
             try:
