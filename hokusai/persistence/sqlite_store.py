@@ -56,17 +56,22 @@ class SQLiteStore:
             # Phase E migration: 既存 DB（v0.2.x 以前）に profile_name カラムが
             # 無い場合は ALTER TABLE で追加する。既存 row は NULL のまま残り、
             # display 時に (legacy) としてフォールバックされる。
-            try:
+            #
+            # PRAGMA table_info で事前に存在判定する設計理由:
+            # - try/except OperationalError を制御フローに使うと、起動の度に
+            #   例外コストが発生する（profile_name カラムが既にある通常ケースで
+            #   毎回 raise → catch を経由）
+            # - エラーメッセージ文字列 "duplicate column name" への依存も避けたい
+            #   （SQLite バージョン / ローカライズ次第で変わる可能性）
+            # 事前判定により、ALTER TABLE は本当に必要な時（legacy DB の初回起動）
+            # にだけ実行され、それ以外は通常経路で完結する
+            cursor = conn.execute("PRAGMA table_info(workflows)")
+            existing_columns = {row[1] for row in cursor.fetchall()}
+            if "profile_name" not in existing_columns:
+                # この経路は v0.2.x 以前の DB を初めて v0.3.0 で開いた時のみ通る
                 conn.execute(
                     "ALTER TABLE workflows ADD COLUMN profile_name TEXT"
                 )
-            except sqlite3.OperationalError as e:
-                # 「duplicate column name」のみ握り潰す（新規 DB / マイグレーション
-                # 済み DB ではこのエラーが出るのが正常）。
-                # それ以外（DB lock / 破損 / 権限不足など）は原因を保持するため
-                # 再 raise する（後段で別エラーに化けて原因不明になるのを防ぐ）。
-                if "duplicate column name" not in str(e).lower():
-                    raise
 
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS checkpoints (

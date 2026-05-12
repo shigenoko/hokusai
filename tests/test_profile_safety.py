@@ -179,6 +179,110 @@ def test_save_workflow_with_runner_profile_persists_to_db(tmp_path):
     assert store.get_workflow_profile_name(state["workflow_id"]) == "company-a"
 
 
+def test_alter_table_skipped_when_column_already_exists(tmp_path, monkeypatch):
+    """profile_name カラムが既に存在する DB を開く時、ALTER TABLE が呼ばれない。
+
+    旧実装は try/except で OperationalError を制御フローに使っていたため、
+    起動の度に例外コストが発生していた。新実装は PRAGMA table_info で
+    事前判定するため、不要な ALTER TABLE 実行は無くなる。
+    """
+    from hokusai.persistence import sqlite_store as ss
+
+    # 通常通り SQLiteStore で DB を作成（profile_name カラム付き）
+    db_path = tmp_path / "wf.db"
+    SQLiteStore(db_path)
+
+    # 2 回目以降の起動を再現: ALTER TABLE が呼ばれたら検知する proxy
+    alter_calls: list[str] = []
+
+    real_connect = ss.SQLiteStore._connect
+
+    class _AlterTrackingProxy:
+        def __init__(self, real_conn):
+            self._real = real_conn
+
+        def execute(self, sql, *args, **kwargs):
+            if sql.strip().upper().startswith("ALTER TABLE"):
+                alter_calls.append(sql)
+            return self._real.execute(sql, *args, **kwargs)
+
+        def commit(self):
+            return self._real.commit()
+
+        def __enter__(self):
+            self._real.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self._real.__exit__(*args)
+
+    monkeypatch.setattr(
+        ss.SQLiteStore,
+        "_connect",
+        lambda self: _AlterTrackingProxy(real_connect(self)),
+    )
+
+    # 既存 DB を再度開く（profile_name カラム既存）→ ALTER TABLE は呼ばれないはず
+    SQLiteStore(db_path)
+    assert alter_calls == [], f"既存カラム DB で ALTER TABLE が呼ばれた: {alter_calls}"
+
+
+def test_alter_table_called_for_legacy_db(tmp_path, monkeypatch):
+    """v0.2.x 以前の DB（profile_name 無し）を初めて開く時は ALTER TABLE が呼ばれる"""
+    from hokusai.persistence import sqlite_store as ss
+
+    # 旧スキーマ（profile_name カラム無し）を手動で作成
+    db_path = tmp_path / "legacy.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("""
+            CREATE TABLE workflows (
+                workflow_id TEXT PRIMARY KEY,
+                task_url TEXT NOT NULL,
+                task_title TEXT,
+                branch_name TEXT,
+                current_phase INTEGER DEFAULT 1,
+                state_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+        conn.commit()
+
+    # ALTER TABLE 呼び出しを検知する proxy
+    alter_calls: list[str] = []
+    real_connect = ss.SQLiteStore._connect
+
+    class _Proxy:
+        def __init__(self, real_conn):
+            self._real = real_conn
+
+        def execute(self, sql, *args, **kwargs):
+            if sql.strip().upper().startswith("ALTER TABLE"):
+                alter_calls.append(sql)
+            return self._real.execute(sql, *args, **kwargs)
+
+        def commit(self):
+            return self._real.commit()
+
+        def __enter__(self):
+            self._real.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self._real.__exit__(*args)
+
+    monkeypatch.setattr(
+        ss.SQLiteStore,
+        "_connect",
+        lambda self: _Proxy(real_connect(self)),
+    )
+
+    SQLiteStore(db_path)
+    # legacy DB に対しては ALTER TABLE が 1 回呼ばれる
+    assert len(alter_calls) == 1
+    assert "profile_name" in alter_calls[0]
+
+
 def test_alter_table_reraises_non_duplicate_errors(tmp_path, monkeypatch):
     """ALTER TABLE が duplicate column name 以外の OperationalError を再 raise する。
 
