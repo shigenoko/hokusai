@@ -135,11 +135,17 @@ def start_dashboard(
     env = prepare_dashboard_env(config, profile_name=profile_name, port=port)
     os.environ.update(env)
 
-    # scripts/dashboard.py を import して main() を呼ぶ
-    # （import 時に PORT / DB_PATH が env から再評価される）
-    # scripts は pyproject.toml の wheel packages に含めているため、
-    # pip インストール環境でも import 可能。
+    # scripts/dashboard.py を import して main() を呼ぶ。
+    # 重要: モジュールが既に import 済み（テスト経由等）の場合、import 時の env
+    # 読み取り（PORT / DB_PATH / HOKUSAI_PROFILE_NAME 等）は **再評価されない**。
+    # 挙動を import 順序に依存させないため、env 更新後に明示的に
+    # `refresh_from_env()` を呼んで module 変数を再評価する。
+    # （importlib.reload は monkeypatch を消すためテスト互換性の観点で不採用）
+    # scripts は pyproject.toml の wheel packages に含めているため、pip
+    # インストール環境でも import 可能。
     from scripts import dashboard as dashboard_module
+
+    dashboard_module.refresh_from_env()
 
     # 既存の scripts.dashboard.main() を呼ぶ
     # Race condition 対策: _port_in_use() チェック後〜実 bind までの間に

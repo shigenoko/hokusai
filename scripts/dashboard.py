@@ -68,6 +68,25 @@ _store: SQLiteStore | None = None
 HOKUSAI_PROFILE_NAME: str | None = os.environ.get("HOKUSAI_DASHBOARD_PROFILE")
 
 
+def refresh_from_env() -> None:
+    """env から PORT / DB_PATH / CHECKPOINT_DB_PATH / HOKUSAI_PROFILE_NAME を
+    再評価して module 変数を更新する。
+
+    hokusai.dashboard.start_dashboard() が env を設定した後にこの関数を呼ぶ。
+    `importlib.reload()` だとモジュール内の monkeypatch が消えてテストが
+    壊れるため、明示的な refresh を採用している。
+
+    また `_store` は DB_PATH 変更時にリセットする必要があるため None に戻す。
+    """
+    global PORT, DB_PATH, CHECKPOINT_DB_PATH, HOKUSAI_PROFILE_NAME, _store
+    PORT = _resolve_port()
+    DB_PATH = _resolve_db_path()
+    CHECKPOINT_DB_PATH = _resolve_checkpoint_db_path()
+    HOKUSAI_PROFILE_NAME = os.environ.get("HOKUSAI_DASHBOARD_PROFILE")
+    # DB_PATH が変わった場合、既存の _store シングルトンは無効
+    _store = None
+
+
 def _render_profile_badge() -> str:
     """profile 経由起動時にヘッダロゴ横に表示する小バッジ。
 
@@ -173,17 +192,32 @@ def _resolve_port() -> int:
 
     profile 経由起動時は CLI が HOKUSAI_DASHBOARD_PORT を設定してから dashboard を
     起動するため、既存の `python scripts/dashboard.py` 直接起動と後方互換性を保つ。
+
+    バリデーション:
+    - 数値変換失敗 → warning + 8765 にフォールバック
+    - 1..65535 範囲外 → warning + 8765 にフォールバック
+    （`python scripts/dashboard.py` 直接起動時に bind 直前まで気づかない事故を防ぐ。
+      CLI 経由では hokusai.dashboard._port_in_use がより厳格に検証する。）
     """
     env_port = os.environ.get("HOKUSAI_DASHBOARD_PORT")
+    default_port = 8765
     if env_port:
         try:
-            return int(env_port)
+            parsed = int(env_port)
         except ValueError:
             print(
                 f"warning: HOKUSAI_DASHBOARD_PORT={env_port!r} は数値ではありません。"
-                "デフォルトの 8765 を使用します。"
+                f"デフォルトの {default_port} を使用します。"
             )
-    return 8765
+            return default_port
+        if not (1 <= parsed <= 65535):
+            print(
+                f"warning: HOKUSAI_DASHBOARD_PORT={parsed} は 1..65535 の範囲外です。"
+                f"デフォルトの {default_port} を使用します。"
+            )
+            return default_port
+        return parsed
+    return default_port
 
 
 PORT = _resolve_port()

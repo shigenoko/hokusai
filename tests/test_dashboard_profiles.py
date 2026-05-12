@@ -114,6 +114,59 @@ def test_port_in_use_rejects_non_int_types(invalid_type):
         _port_in_use(invalid_type)
 
 
+def test_start_dashboard_refreshes_module_state_from_env(tmp_path, monkeypatch):
+    """start_dashboard() が env 更新後に scripts.dashboard.refresh_from_env() を
+    呼んで module 変数（PORT / DB_PATH 等）を再評価することを検証。
+
+    既に import 済みの module でも、env 更新後に PORT が正しく反映される必要がある。
+    """
+    from hokusai.dashboard import start_dashboard
+
+    cfg = WorkflowConfig(
+        data_dir=tmp_path,
+        database_path=tmp_path / "wf.db",
+        checkpoint_db_path=tmp_path / "cp.db",
+    )
+
+    # 事前に違う PORT で module を一度 reload しておく（既に import 済みの状態を再現）
+    monkeypatch.setenv("HOKUSAI_DASHBOARD_PORT", "9000")
+    import scripts.dashboard as dashboard_module
+    importlib.reload(dashboard_module)
+    assert dashboard_module.PORT == 9000
+
+    # main を no-op に（reload せず monkeypatch を維持）
+    monkeypatch.setattr(dashboard_module, "main", lambda: None)
+    monkeypatch.setattr("hokusai.dashboard._port_in_use", lambda *a, **k: False)
+
+    # start_dashboard で別 port を指定すると、refresh_from_env が走って module の PORT が更新される
+    start_dashboard(cfg, profile_name="test", port=19999)
+
+    # refresh 後の module は新しい PORT を持つ
+    assert dashboard_module.PORT == 19999
+
+
+def test_refresh_from_env_updates_all_fields(monkeypatch, tmp_path):
+    """refresh_from_env が PORT / DB_PATH / CHECKPOINT_DB_PATH / HOKUSAI_PROFILE_NAME
+    すべてを env から再評価することを検証"""
+    import scripts.dashboard as dashboard_module
+
+    new_db = tmp_path / "refreshed-wf.db"
+    new_cp = tmp_path / "refreshed-cp.db"
+    monkeypatch.setenv("HOKUSAI_DASHBOARD_PORT", "12345")
+    monkeypatch.setenv("HOKUSAI_DASHBOARD_DB_PATH", str(new_db))
+    monkeypatch.setenv("HOKUSAI_DASHBOARD_CHECKPOINT_DB_PATH", str(new_cp))
+    monkeypatch.setenv("HOKUSAI_DASHBOARD_PROFILE", "refreshed-profile")
+
+    dashboard_module.refresh_from_env()
+
+    assert dashboard_module.PORT == 12345
+    assert dashboard_module.DB_PATH == new_db
+    assert dashboard_module.CHECKPOINT_DB_PATH == new_cp
+    assert dashboard_module.HOKUSAI_PROFILE_NAME == "refreshed-profile"
+    # _store がリセットされる（DB_PATH 変更時の必須挙動）
+    assert dashboard_module._store is None
+
+
 def test_start_dashboard_resolves_none_port_to_default(tmp_path, monkeypatch):
     """port=None で start_dashboard を呼んだ場合、DEFAULT_DASHBOARD_PORT に解決される"""
     from hokusai.dashboard import DEFAULT_DASHBOARD_PORT, start_dashboard
@@ -408,6 +461,19 @@ def test_dashboard_module_invalid_port_falls_back_to_default(monkeypatch, capsys
     # warning が出ている
     captured = capsys.readouterr()
     assert "8765" in captured.out or "warning" in captured.out.lower()
+
+
+@pytest.mark.parametrize("out_of_range", ["0", "-1", "65536", "100000"])
+def test_dashboard_module_out_of_range_port_falls_back_to_default(monkeypatch, capsys, out_of_range):
+    """range 外（0 / 負 / 65536+）も warning + 8765 にフォールバック"""
+    monkeypatch.setenv("HOKUSAI_DASHBOARD_PORT", out_of_range)
+
+    import scripts.dashboard as dashboard_module
+    importlib.reload(dashboard_module)
+
+    assert dashboard_module.PORT == 8765
+    captured = capsys.readouterr()
+    assert "範囲" in captured.out or "warning" in captured.out.lower()
 
 
 def test_dashboard_module_default_port_without_env(monkeypatch):
