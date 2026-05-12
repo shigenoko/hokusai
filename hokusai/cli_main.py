@@ -728,8 +728,19 @@ def _handle_profile_show(name: str, registry) -> int:
 def _handle_profile_doctor(name: str, registry, *, deep: bool = False) -> int:
     """`hokusai profile doctor <name>` の実装
 
-    通常モード: 静的検査と env var 名の存在確認のみ。
-    --deep: 実 API 接続まで踏み込む（Phase E で実装、現状は warning 表示）。
+    v0.3.0 の検査範囲:
+      1. config file が存在するか
+      2. data_dir が存在するか（無ければ作成を試みる）
+      3. dashboard port が他 profile と衝突していないか
+      4. data_dir が他 profile と衝突していないか
+
+    `--deep` フラグ: 受け付けるが実 API 接続確認は v0.4 以降で実装予定で、
+                   現状は注意書きを表示するだけ。
+
+    v0.3.0 では未実装（フォローアップで追加予定）:
+      - env var 名（`api_token_env` 等）の存在確認
+      - database_path / checkpoint_db_path / worktree_root 個別の衝突検出
+      - Notion / Figma / Miro / Slack への実 API 接続確認（`--deep`）
     """
     from .config.profiles import ProfileNotFoundError
 
@@ -783,7 +794,12 @@ def _handle_profile_doctor(name: str, registry, *, deep: bool = False) -> int:
         else:
             print(f"  ✓ dashboard port unique: {p.dashboard_port}")
 
-    # 4. data_dir / database_path の他 profile との衝突
+    # 4. data_dir の他 profile との衝突
+    # v0.3.0 では ProfileConfig.data_dir の一致のみ確認する。
+    # database_path / checkpoint_db_path / worktree_root の個別衝突検出は
+    # 各 profile config を読み込んで解決値で比較する必要があり、v0.4 以降。
+    # data_dir 統一運用が主で個別 path override はレアケースのため、
+    # data_dir 重複検出で実用上のカバレッジは確保される。
     if p.data_dir:
         path_conflicts = [
             other
