@@ -164,6 +164,131 @@ class SQLiteStore:
                 ON notion_sync_errors(workflow_id)
             """)
 
+            # Phase E (v0.4.0): Figma / Miro 書き戻し（コメント / カード投稿）の
+            # outbox / errors / idempotency テーブル。
+            # 詳細は docs/hokusai-figma-miro-writeback-implementation-plan.md §5 を参照。
+            #
+            # 構造は notion_sync_outbox とほぼ同じだが以下が異なる:
+            # - profile_name 列を追加（v0.3.0 整合）
+            # - next_attempt_at なし（自動 retry なし、Operations Console からの手動再送のみ）
+            # - attempt_count（attempts ではなく明示的な命名）
+            #
+            # 5 テーブル + 7 index:
+            #   figma_sync_outbox + 2 idx / figma_sync_errors + 1 idx
+            #   miro_sync_outbox + 2 idx / miro_sync_errors + 1 idx
+            #   design_writeback_idempotency + 1 idx
+
+            # Figma 同期用 outbox
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS figma_sync_outbox (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    idempotency_key TEXT UNIQUE NOT NULL,
+                    workflow_id TEXT NOT NULL,
+                    profile_name TEXT,
+                    event_type TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+            """)
+
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_figma_outbox_workflow
+                ON figma_sync_outbox(workflow_id)
+            """)
+
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_figma_outbox_event
+                ON figma_sync_outbox(event_type)
+            """)
+
+            # Figma 同期用 errors（30 日経過で hokusai cleanup により自動削除、再送時の参照用）
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS figma_sync_errors (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    idempotency_key TEXT NOT NULL,
+                    workflow_id TEXT NOT NULL,
+                    profile_name TEXT,
+                    event_type TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    error_message TEXT NOT NULL,
+                    failed_at TEXT NOT NULL
+                )
+            """)
+
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_figma_errors_workflow
+                ON figma_sync_errors(workflow_id)
+            """)
+
+            # Miro 同期用 outbox（構造は figma と同じ）
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS miro_sync_outbox (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    idempotency_key TEXT UNIQUE NOT NULL,
+                    workflow_id TEXT NOT NULL,
+                    profile_name TEXT,
+                    event_type TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+            """)
+
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_miro_outbox_workflow
+                ON miro_sync_outbox(workflow_id)
+            """)
+
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_miro_outbox_event
+                ON miro_sync_outbox(event_type)
+            """)
+
+            # Miro 同期用 errors（30 日経過で hokusai cleanup により自動削除、再送時の参照用）
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS miro_sync_errors (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    idempotency_key TEXT NOT NULL,
+                    workflow_id TEXT NOT NULL,
+                    profile_name TEXT,
+                    event_type TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    error_message TEXT NOT NULL,
+                    failed_at TEXT NOT NULL
+                )
+            """)
+
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_miro_errors_workflow
+                ON miro_sync_errors(workflow_id)
+            """)
+
+            # 冪等キー記録（§9.2 参照、API call 成功後の重複抑止用）
+            # Figma / Miro REST API のいずれにも idempotency key 受け渡しの仕組みは
+            # 存在しないため、HOKUSAI 側で成功済み idempotency_key を永続化して
+            # dispatcher の入口で事前チェックする。
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS design_writeback_idempotency (
+                    idempotency_key TEXT PRIMARY KEY,
+                    workflow_id TEXT NOT NULL,
+                    profile_name TEXT,
+                    target TEXT NOT NULL,
+                    resource TEXT NOT NULL,
+                    response_id TEXT,
+                    created_at TEXT NOT NULL
+                )
+            """)
+
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_writeback_idempotency_workflow
+                ON design_writeback_idempotency(workflow_id)
+            """)
+
             # Figma / Miro 取得結果のキャッシュ。MVP では fetch ごとに
             # cache_ttl_seconds を比較して上書き保存する。
             # cache_key:
