@@ -115,7 +115,19 @@ def start_dashboard(
     from scripts import dashboard as dashboard_module
 
     # 既存の scripts.dashboard.main() を呼ぶ
-    dashboard_module.main()
+    # Race condition 対策: _port_in_use() チェック後〜実 bind までの間に
+    # 他プロセスが port を取得した場合、ThreadingHTTPServer が EADDRINUSE を
+    # 投げる。これを DashboardPortInUseError に変換して呼び出し側に統一形式で
+    # 通知する（CLI 側で同じ except 句で扱える）。
+    try:
+        dashboard_module.main()
+    except OSError as e:
+        if e.errno == errno.EADDRINUSE and port is not None:
+            raise DashboardPortInUseError(
+                f"port {port} の bind に失敗しました（_port_in_use チェック後に"
+                f"他プロセスが取得した可能性）: {e}"
+            ) from e
+        raise
     return 0
 
 

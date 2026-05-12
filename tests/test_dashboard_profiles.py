@@ -147,6 +147,124 @@ def test_start_dashboard_raises_on_port_conflict(tmp_path):
         sock.close()
 
 
+def test_start_dashboard_converts_race_condition_eaddrinuse(tmp_path, monkeypatch):
+    """_port_in_use チェック後の race condition で main() が EADDRINUSE を投げた場合、
+    DashboardPortInUseError に変換されることを検証する。"""
+    import errno as _errno
+
+    from hokusai.dashboard import start_dashboard
+
+    cfg = WorkflowConfig(
+        data_dir=tmp_path,
+        database_path=tmp_path / "wf.db",
+        checkpoint_db_path=tmp_path / "cp.db",
+    )
+
+    # _port_in_use は False を返す（初回チェック時は空いている状態）
+    monkeypatch.setattr("hokusai.dashboard._port_in_use", lambda port, host="localhost": False)
+
+    # scripts.dashboard.main() を呼んだら EADDRINUSE を投げる（race condition 再現）
+    def fake_main():
+        err = OSError("Address already in use (simulated race)")
+        err.errno = _errno.EADDRINUSE
+        raise err
+
+    import scripts.dashboard
+    monkeypatch.setattr(scripts.dashboard, "main", fake_main)
+
+    with pytest.raises(DashboardPortInUseError, match="他プロセスが取得"):
+        start_dashboard(cfg, profile_name="test", port=18888)
+
+
+def test_cli_handle_dashboard_catches_eacces(tmp_path, monkeypatch, capsys):
+    """_handle_dashboard が EACCES（特権ポート権限不足）でスタックトレースせず終了 1 を返す"""
+    import errno as _errno
+
+    from hokusai.cli_main import _handle_dashboard
+
+    cfg = WorkflowConfig(
+        data_dir=tmp_path,
+        database_path=tmp_path / "wf.db",
+        checkpoint_db_path=tmp_path / "cp.db",
+    )
+
+    def fake_start(config, *, profile_name, port):
+        err = OSError("permission denied (simulated EACCES)")
+        err.errno = _errno.EACCES
+        raise err
+
+    monkeypatch.setattr("hokusai.cli_main.start_dashboard", fake_start, raising=False)
+    # _handle_dashboard が import するため、hokusai.dashboard 側も差し替える
+    import hokusai.dashboard
+    monkeypatch.setattr(hokusai.dashboard, "start_dashboard", fake_start)
+
+    class _Args:
+        port = 80
+        profile = None
+
+    rc = _handle_dashboard(_Args(), cfg)
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "権限" in captured.out
+    assert "80" in captured.out
+
+
+def test_cli_handle_dashboard_catches_unknown_oserror(tmp_path, monkeypatch, capsys):
+    """その他の OSError も親切なメッセージで終了 1 にする"""
+    import errno as _errno
+
+    from hokusai.cli_main import _handle_dashboard
+
+    cfg = WorkflowConfig(
+        data_dir=tmp_path,
+        database_path=tmp_path / "wf.db",
+        checkpoint_db_path=tmp_path / "cp.db",
+    )
+
+    def fake_start(config, *, profile_name, port):
+        err = OSError("address not available (simulated)")
+        err.errno = _errno.EADDRNOTAVAIL
+        raise err
+
+    import hokusai.dashboard
+    monkeypatch.setattr(hokusai.dashboard, "start_dashboard", fake_start)
+
+    class _Args:
+        port = 8765
+        profile = None
+
+    rc = _handle_dashboard(_Args(), cfg)
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "8765" in captured.out
+
+
+def test_start_dashboard_propagates_unrelated_oserror(tmp_path, monkeypatch):
+    """main() の EADDRINUSE 以外の OSError はそのまま伝搬する"""
+    import errno as _errno
+
+    from hokusai.dashboard import start_dashboard
+
+    cfg = WorkflowConfig(
+        data_dir=tmp_path,
+        database_path=tmp_path / "wf.db",
+        checkpoint_db_path=tmp_path / "cp.db",
+    )
+
+    monkeypatch.setattr("hokusai.dashboard._port_in_use", lambda port, host="localhost": False)
+
+    def fake_main():
+        err = OSError("disk full (simulated)")
+        err.errno = _errno.ENOSPC
+        raise err
+
+    import scripts.dashboard
+    monkeypatch.setattr(scripts.dashboard, "main", fake_main)
+
+    with pytest.raises(OSError, match="disk full"):
+        start_dashboard(cfg, profile_name="test", port=18888)
+
+
 # ---------------------------------------------------------------------------
 # scripts/dashboard.py の env override
 # ---------------------------------------------------------------------------

@@ -613,6 +613,20 @@ def _handle_dashboard(args, config) -> int:
     except DashboardPortInUseError as e:
         print(f"エラー: {e}")
         return 1
+    except OSError as e:
+        # _port_in_use が EADDRINUSE 以外（例: 特権ポート bind 時の EACCES）を
+        # 再 raise するケース。スタックトレースで終了せず、ユーザに状況を説明する。
+        import errno as _errno
+        if e.errno == _errno.EACCES:
+            print(
+                f"エラー: port {port} への bind 権限がありません。"
+                "特権ポート（<=1024）を指定していないか、別ユーザーが占有していないか確認してください。"
+            )
+        elif e.errno == _errno.EADDRNOTAVAIL:
+            print(f"エラー: port {port} は利用不可な状態です: {e}")
+        else:
+            print(f"エラー: port {port} の確認中に予期しない OS エラー: {e}")
+        return 1
 
 
 def _handle_profile_command(args, profile_parser) -> int:
