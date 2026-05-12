@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import re
+import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -292,9 +293,14 @@ def find_workflow_in_other_profiles(
 
     Returns:
         workflow が存在する profile 名のリスト（存在しない場合は空 list）。
-    """
-    from ..persistence.sqlite_store import SQLiteStore
 
+    Note:
+        SQLiteStore 経由ではなく sqlite3 を read-only モードで直接開く。
+        SQLiteStore は __init__ で _init_db() を必ず実行し、PRAGMA(journal_mode=WAL)
+        や CREATE TABLE / ALTER TABLE による副作用が発生する。横断探索は
+        「他 profile の DB を覗き見るだけ」なので、設定ミスで別用途の sqlite
+        ファイルを指していた場合に破壊的にならないよう、書き込みを起こさない。
+    """
     found_in: list[str] = []
     for name, profile in registry.profiles.items():
         if name == current_profile:
@@ -302,15 +308,37 @@ def find_workflow_in_other_profiles(
         db_path = _resolve_profile_database_path(profile)
         if db_path is None or not db_path.exists():
             continue
-        try:
-            store = SQLiteStore(db_path)
-            if store.workflow_exists(workflow_id):
-                found_in.append(name)
-        except Exception:
-            # 他 profile の DB に問題があってもここでは無視
-            # （current profile の操作を妨げない）
-            continue
+        if _workflow_exists_readonly(db_path, workflow_id):
+            found_in.append(name)
     return found_in
+
+
+def _workflow_exists_readonly(db_path: Path, workflow_id: str) -> bool:
+    """副作用なしで workflow_id の存在を確認する（横断探索用）。
+
+    sqlite3 URI の `mode=ro` で read-only 接続を開き、`SELECT 1` のみ実行する。
+    `SQLiteStore.__init__()` が走らせる PRAGMA / CREATE / ALTER を回避する。
+
+    workflows テーブルが存在しない（別用途の sqlite ファイル / 破損 DB 等）
+    場合は黙って False を返す。current profile の操作を妨げない方針。
+    """
+    uri = f"file:{db_path}?mode=ro"
+    try:
+        conn = sqlite3.connect(uri, uri=True)
+    except sqlite3.Error:
+        return False
+    try:
+        cursor = conn.execute(
+            "SELECT 1 FROM workflows WHERE workflow_id = ? LIMIT 1",
+            (workflow_id,),
+        )
+        return cursor.fetchone() is not None
+    except sqlite3.Error:
+        # OperationalError: workflows テーブル不在 / スキーマ不一致
+        # DatabaseError: sqlite ファイルでない（"file is not a database"）
+        return False
+    finally:
+        conn.close()
 
 
 def _resolve_profile_database_path(profile: "ProfileConfig") -> Path | None:

@@ -542,3 +542,74 @@ def test_find_workflow_handles_corrupt_db(tmp_path, monkeypatch):
         "wf-x", current_profile=None, registry=registry
     )
     assert found == []
+
+
+def test_find_workflow_does_not_mutate_other_profile_db(tmp_path):
+    """横断探索が他 profile の DB に副作用を起こさない（read-only）
+
+    旧実装は SQLiteStore.__init__ で _init_db() を呼んで PRAGMA(journal_mode=WAL)
+    や CREATE TABLE / ALTER TABLE を実行していたため、「探索するだけ」で
+    他 profile の DB を書き換えていた。設定ミスで別用途の sqlite ファイルを
+    指していた場合に破壊的になる懸念があったため、read-only 化を保証する。
+    """
+    import sqlite3
+
+    data_dir = tmp_path / "company-x"
+    data_dir.mkdir()
+    cfg = data_dir / "config.yaml"
+    cfg.write_text("project_root: /tmp\n")
+
+    db_path = data_dir / "workflow.db"
+
+    # v0.2.x 風の DB を sqlite3 で直接作る（profile_name カラム無し、
+    # journal_mode は DELETE のまま）
+    conn = sqlite3.connect(db_path)
+    conn.execute("""
+        CREATE TABLE workflows (
+            workflow_id TEXT PRIMARY KEY,
+            task_url TEXT,
+            state_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """)
+    conn.execute(
+        "INSERT INTO workflows VALUES (?, ?, ?, ?, ?)",
+        ("wf-legacy", "https://example.com", "{}", "2026-01-01", "2026-01-01"),
+    )
+    conn.commit()
+
+    # 探索前のスキーマと journal_mode を記録
+    before_columns = {row[1] for row in conn.execute("PRAGMA table_info(workflows)")}
+    before_journal = conn.execute("PRAGMA journal_mode").fetchone()[0]
+    conn.close()
+
+    registry = ProfileRegistry(profiles={
+        "company-x": ProfileConfig(
+            name="company-x",
+            config_path=cfg,
+            data_dir=data_dir,
+        ),
+    })
+
+    # 横断探索を実行
+    found = find_workflow_in_other_profiles(
+        "wf-legacy", current_profile=None, registry=registry
+    )
+    assert found == ["company-x"]
+
+    # 探索後のスキーマと journal_mode を確認 → 変わっていないこと
+    conn = sqlite3.connect(db_path)
+    after_columns = {row[1] for row in conn.execute("PRAGMA table_info(workflows)")}
+    after_journal = conn.execute("PRAGMA journal_mode").fetchone()[0]
+    conn.close()
+
+    assert before_columns == after_columns, (
+        f"探索が ALTER TABLE 副作用を起こした: {before_columns} -> {after_columns}"
+    )
+    assert before_journal == after_journal, (
+        f"探索が journal_mode を変更した: {before_journal} -> {after_journal}"
+    )
+    # WAL モードに変わると -wal / -shm ファイルが残るので、それも確認
+    assert not (db_path.parent / f"{db_path.name}-wal").exists()
+    assert not (db_path.parent / f"{db_path.name}-shm").exists()
