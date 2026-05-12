@@ -365,6 +365,19 @@ def phase8a_pr_draft_node(state: WorkflowState) -> WorkflowState:
         else:
             print("⚠️ Phase 8a: PRが作成されませんでした（変更がないか、ブランチが存在しません）")
 
+        # Phase E (v0.4.0): Figma / Miro 書き戻し
+        # PR 作成成功時に primary frame / board へ進捗コメント / カードを投稿する。
+        # primary_* が未設定 or writeback 無効 / token 未設定なら silent に skip。
+        # 失敗は dispatcher 内で outbox に積まれるため workflow を止めない。
+        try:
+            _dispatch_design_writeback(state, pull_requests)
+        except Exception as e:
+            # 安全網: integration 層の予期せぬ例外で workflow を止めない
+            logger.warning(
+                "design writeback dispatch raised unexpected exception: %s",
+                type(e).__name__,
+            )
+
         # Note: Copilotレビュー待ちは統合レビューループ（phase8b_unified_wait）で処理する。
         # Phase 8a はPR作成のみを担当し、後続の phase8b_unified_wait へ進む。
 
@@ -378,3 +391,59 @@ def phase8a_pr_draft_node(state: WorkflowState) -> WorkflowState:
     state = update_phase_status(state, 8, PhaseStatus.COMPLETED)
 
     return state
+
+
+def _dispatch_design_writeback(state, pull_requests: list) -> None:
+    """Phase E (v0.4.0): Figma / Miro への進捗書き戻し。
+
+    config.figma.writeback / config.miro.writeback が enabled かつ
+    primary_* が state に設定されている場合のみ実行。それ以外は silent に skip。
+
+    失敗は dispatcher 内で outbox に積まれ、workflow を止めない。
+
+    参考: docs/hokusai-figma-miro-writeback-implementation-plan.md §11 (Step 5)
+    """
+    if not pull_requests:
+        return
+
+    try:
+        from ...integrations.design.writeback import (
+            build_figma_dispatcher,
+            build_miro_dispatcher,
+            dispatch_phase8a_writeback,
+            load_writeback_config,
+        )
+    except ImportError:
+        return  # writeback モジュールが無い環境では何もしない
+
+    config = get_config()
+    writeback_cfg = load_writeback_config(config)
+    if not (writeback_cfg.figma_enabled or writeback_cfg.miro_enabled):
+        return
+
+    db_path = Path(getattr(config, "database_path", "workflow.db"))
+    figma_dispatcher = build_figma_dispatcher(db_path, writeback_cfg)
+    miro_dispatcher = build_miro_dispatcher(db_path, writeback_cfg)
+    if figma_dispatcher is None and miro_dispatcher is None:
+        return
+
+    # 1 件目の PR を「主 PR」として書き戻し対象に採用
+    primary_pr = pull_requests[0]
+    mr_url = primary_pr.get("url")
+    commit_sha = state.get("cherry_picked_commits", [None])[0] or ""
+
+    profile_name = state.get("profile_name") or getattr(config, "profile_name", None)
+
+    result = dispatch_phase8a_writeback(
+        state,
+        mr_url=mr_url,
+        commit_sha=commit_sha,
+        figma_dispatcher=figma_dispatcher,
+        miro_dispatcher=miro_dispatcher,
+        profile_name=profile_name,
+        workflow_id=state.get("workflow_id"),
+    )
+    if result.figma:
+        logger.info("figma writeback: %s", result.figma.get("status"))
+    if result.miro:
+        logger.info("miro writeback: %s", result.miro.get("status"))

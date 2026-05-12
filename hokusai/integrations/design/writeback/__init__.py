@@ -9,6 +9,17 @@ from __future__ import annotations
 
 from .figma_writeback import FigmaWritebackArgs, FigmaWritebackDispatcher
 from .idempotency import build_idempotency_key
+from .integration import (
+    WritebackEnabledConfig,
+    WritebackResult,
+    build_figma_dispatcher,
+    build_miro_dispatcher,
+    decide_primary_figma,
+    decide_primary_miro,
+    dispatch_phase8a_writeback,
+    load_writeback_config,
+    populate_primary_writeback_targets,
+)
 from .miro_writeback import MiroWritebackArgs, MiroWritebackDispatcher
 from .outbox import MAX_ATTEMPT_COUNT, OutboxEntry, OutboxStore, WritebackTarget
 
@@ -20,6 +31,15 @@ __all__ = [
     "MiroWritebackDispatcher",
     "OutboxEntry",
     "OutboxStore",
+    "WritebackEnabledConfig",
+    "WritebackResult",
     "WritebackTarget",
+    "build_figma_dispatcher",
     "build_idempotency_key",
+    "build_miro_dispatcher",
+    "decide_primary_figma",
+    "decide_primary_miro",
+    "dispatch_phase8a_writeback",
+    "load_writeback_config",
+    "populate_primary_writeback_targets",
 ]
