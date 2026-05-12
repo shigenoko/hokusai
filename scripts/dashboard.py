@@ -40,9 +40,48 @@ from hokusai.utils.phase_page_templates import (
     initialize_phase_page_state,
 )
 
-DB_PATH = Path.home() / ".hokusai" / "workflow.db"
-CHECKPOINT_DB_PATH = Path.home() / ".hokusai" / "checkpoint.db"
+
+def _resolve_db_path() -> Path:
+    """DB_PATH を解決。HOKUSAI_DASHBOARD_DB_PATH 環境変数が最優先。
+
+    profile 経由起動時は CLI が HOKUSAI_DASHBOARD_DB_PATH を設定してから dashboard を
+    起動するため、既存の `python scripts/dashboard.py` 直接起動と後方互換性を保つ。
+    """
+    env_db = os.environ.get("HOKUSAI_DASHBOARD_DB_PATH")
+    if env_db:
+        return Path(env_db).expanduser()
+    return Path.home() / ".hokusai" / "workflow.db"
+
+
+def _resolve_checkpoint_db_path() -> Path:
+    env_db = os.environ.get("HOKUSAI_DASHBOARD_CHECKPOINT_DB_PATH")
+    if env_db:
+        return Path(env_db).expanduser()
+    return Path.home() / ".hokusai" / "checkpoint.db"
+
+
+DB_PATH = _resolve_db_path()
+CHECKPOINT_DB_PATH = _resolve_checkpoint_db_path()
 _store: SQLiteStore | None = None
+
+# profile 経由起動時に CLI から渡される profile name（ヘッダ表示用）
+HOKUSAI_PROFILE_NAME: str | None = os.environ.get("HOKUSAI_DASHBOARD_PROFILE")
+
+
+def _render_profile_badge() -> str:
+    """profile 経由起動時にヘッダロゴ横に表示する小バッジ。
+
+    HOKUSAI_DASHBOARD_PROFILE が設定されていなければ空文字列を返し、
+    既存の direct 起動とのレンダリング差分を最小化する。
+    """
+    if not HOKUSAI_PROFILE_NAME:
+        return ""
+    safe = html_mod.escape(HOKUSAI_PROFILE_NAME)
+    return (
+        f' <span style="font-size:0.7em; padding:2px 8px; margin-left:8px;'
+        f' background:#eef2ff; color:#4338ca; border-radius:4px;">'
+        f'Profile: {safe}</span>'
+    )
 
 
 def _get_store() -> SQLiteStore:
@@ -127,7 +166,27 @@ def render_notion_dashboard_panel() -> str:
 
 CHECKLIST_PATH = Path(__file__).parent.parent / "hokusai" / "review_checklist.md"
 CONFIGS_DIR = Path(__file__).parent.parent / "configs"
-PORT = 8765
+
+
+def _resolve_port() -> int:
+    """PORT を解決。HOKUSAI_DASHBOARD_PORT 環境変数が最優先。
+
+    profile 経由起動時は CLI が HOKUSAI_DASHBOARD_PORT を設定してから dashboard を
+    起動するため、既存の `python scripts/dashboard.py` 直接起動と後方互換性を保つ。
+    """
+    env_port = os.environ.get("HOKUSAI_DASHBOARD_PORT")
+    if env_port:
+        try:
+            return int(env_port)
+        except ValueError:
+            print(
+                f"warning: HOKUSAI_DASHBOARD_PORT={env_port!r} は数値ではありません。"
+                "デフォルトの 8765 を使用します。"
+            )
+    return 8765
+
+
+PORT = _resolve_port()
 HOKUSAI_COMMAND_TIMEOUT = 3600
 
 _BG_LOG_DIR = Path(tempfile.gettempdir()) / "hokusai-dashboard-logs"
@@ -6165,7 +6224,7 @@ def render_html(content: str, title: str = "HOKUS AI Dashboard") -> str:
     <div class="container">
         <div class="header">
             <div class="header-left">
-                <div class="logo">HOKUS<span>AI</span> Dashboard</div>
+                <div class="logo">HOKUS<span>AI</span> Dashboard{_render_profile_badge()}</div>
                 <nav class="header-nav">
                     <a href="/">一覧</a>
                     <a href="/settings">設定</a>

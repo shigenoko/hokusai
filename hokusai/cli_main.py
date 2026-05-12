@@ -273,6 +273,18 @@ def main():
         help="実 API 接続まで踏み込んだ詳細診断（rate limit を消費するため明示指定）",
     )
 
+    # dashboard コマンド: Operations Console を profile 指定で起動
+    dashboard_parser = subparsers.add_parser(
+        "dashboard",
+        help="Operations Console（Web Dashboard）を起動",
+    )
+    dashboard_parser.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="listen port（省略時は profile registry の dashboard.port → 8765）",
+    )
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -358,6 +370,10 @@ def main():
             print_config_error(str(e))
             sys.exit(1)
         raise
+
+    # dashboard コマンド: config 解決後に起動（WorkflowRunner は不要）
+    if args.command == "dashboard":
+        sys.exit(_handle_dashboard(args, config))
 
     # 環境設定チェック（start/continueコマンドの場合）
     if args.command in ("start", "continue"):
@@ -536,6 +552,39 @@ def _handle_notion_setup(args) -> int:
     print("  2. docs/notion-dashboard-operation-guide.md を参照")
     print("=" * 70)
     return 0
+
+
+def _handle_dashboard(args, config) -> int:
+    """`hokusai dashboard [--profile <name>] [--port <port>]` のハンドラ
+
+    profile が指定されていれば registry から dashboard.port をフォールバック先に使う。
+    config はすでに main() で profile 解決済み。
+    """
+    from .dashboard import DashboardPortInUseError, start_dashboard
+
+    port = args.port
+
+    # --port 未指定なら registry の dashboard.port を探す
+    if port is None and args.profile:
+        try:
+            from .config.profiles import load_profile_registry
+            registry = load_profile_registry()
+            p = registry.profiles.get(args.profile)
+            if p and p.dashboard_port:
+                port = p.dashboard_port
+        except Exception:
+            # registry エラーはここでは無視（fallback でデフォルト port を使う）
+            pass
+
+    try:
+        return start_dashboard(
+            config,
+            profile_name=args.profile,
+            port=port,
+        )
+    except DashboardPortInUseError as e:
+        print(f"エラー: {e}")
+        return 1
 
 
 def _handle_profile_command(args, profile_parser) -> int:
