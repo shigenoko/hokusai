@@ -17,6 +17,82 @@ HOKUSAI のすべての特筆すべき変更をこのファイルに記録する
 
 ---
 
+## [0.4.0] - 2026-05-13
+
+Figma / Miro **書き戻し機能（Phase E）** を追加。Phase 8a（PR 作成）完了時に、
+対象 frame / board へ進捗コメント / カードを自動投稿する。
+
+詳細は `docs/hokusai-figma-miro-writeback-implementation-plan.md` に対応。
+
+### Added
+
+- **SQLite スキーマ**（Step 1）
+  - `figma_sync_outbox` / `figma_sync_errors`
+  - `miro_sync_outbox` / `miro_sync_errors`
+  - `design_writeback_idempotency`（成功済み投稿の冪等キー保存）
+  - 全テーブルに `profile_name` 列（v0.3.0 整合）
+  - 計 5 テーブル + 7 index
+- **outbox 操作 API**（Step 2）
+  - `OutboxStore` クラス: enqueue / list / get / mark_succeeded /
+    increment_attempt / move_to_errors / cleanup_old_errors
+  - 3 段階 should_skip（idempotency / outbox / errors、`force=true` で errors 無視）
+  - 冪等キー `{workflow_id}:{event_type}:{resource}:{revision}`
+- **Figma post_comment**（Step 3）
+  - `FigmaClient.post_comment(file_key, message, node_id, node_offset)`
+  - `POST /v1/files/{file_key}/comments` に `client_meta` 付きで pin 投稿
+  - `FigmaWritebackDispatcher.dispatch / retry`
+- **Miro create_card**（Step 4）
+  - `MiroClient.create_card(board_id, title, description, position, style)`
+  - 主 frame の右側 50px に薄緑 card を配置
+  - `MiroWritebackDispatcher.dispatch / retry`
+- **WorkflowState 拡張**（Step 5）
+  - `primary_figma_file_key` / `primary_figma_frame_id` / `primary_figma_node_id` /
+    `primary_figma_node_offset`
+  - `primary_miro_frame_id` / `primary_miro_board_id`
+  - 既存 state は後方互換（未設定なら writeback skip）
+- **Phase 8a への組み込み**（Step 5）
+  - PR 作成成功直後に Figma / Miro へ dispatch
+  - 失敗は outbox に積み workflow を継続（best effort）
+- **Operations Console API**（Step 6）
+  - `GET /api/{figma,miro}/{outbox,errors}` 一覧（limit / profile フィルタ）
+  - `POST /api/{figma,miro}/retry-pending` 個別 / 全件 / force 再送
+  - `POST /api/{figma,miro}/move-to-errors` 強制移動
+- **cleanup 統合**（Step 7）
+  - `hokusai cleanup --stale` で errors / idempotency の 30 日経過行を自動削除
+- **運用ガイド**: `docs/figma-miro-writeback-operation-guide.md`
+
+### Behavior
+
+- 投稿先 frame / board は Phase 3 で `state.primary_*` に確定
+- `figma.writeback.enabled` / `miro.writeback.enabled` が `false` の既存 config はそのまま動作
+- `on_failure`: `warn`（既定） / `block`（Waiting for Human 遷移） / `skip` の 3 モード
+- 自動 retry なし。失敗は outbox に積み、Operations Console から手動再送
+- 5 回手動再送で errors テーブルへ自動移動（自動経路では再投稿しない）
+- 冪等性: Figma / Miro API には idempotency key 受け渡し機構が無いため、
+  HOKUSAI 側で成功済み idempotency_key を `design_writeback_idempotency` に永続化し、
+  dispatcher 入口で 3 段階チェック（idempotency / outbox / errors）
+
+### Tests
+
+- `tests/test_design_writeback_outbox.py`（12 件）
+- `tests/test_design_writeback_api.py`（18 件）
+- `tests/test_figma_writeback.py`（17 件）
+- `tests/test_miro_writeback.py`（10 件）
+- `tests/test_writeback_integration.py`（20 件）
+- `tests/test_dashboard_writeback.py`（4 件）
+- 合計 81 件、全 pass
+
+### v0.4.1 以降のフォローアップ
+
+- Operations Console UI への HTML パネル統合（API は v0.4.0 で揃っている）
+- i18n（日本語 / 英語切替）
+- 投稿テンプレートの config 化（card 色 / position offset 等）
+- 複数 frame / 複数 board への投稿
+- Phase 5（Implement）/ Phase 10（Record）のトリガー
+- 自動 retry（exponential backoff）
+
+---
+
 ## [0.3.0] - 2026-05-12
 
 複数案件（A 社・B 社・C 社）を安全に並列運用するための **profile 機能** を追加。
