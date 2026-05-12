@@ -53,9 +53,13 @@ def create_config_from_env_and_file(
     assert_profile_config_exclusive(profile_name, config_file)
 
     # profile 指定がある場合は registry から config_path を解決
+    profile_data_dir_default: Path | None = None
     if profile_name:
-        _profile, resolved_path = resolve_profile_to_config_path(profile_name)
+        profile, resolved_path = resolve_profile_to_config_path(profile_name)
         config_file = resolved_path
+        # Phase C: registry 側で data_dir が指定されていれば、後段で
+        # config_dict に未指定の path フィールドを補完するために保持
+        profile_data_dir_default = profile.data_dir
 
     # デフォルト設定
     config_dict = {}
@@ -97,6 +101,33 @@ def create_config_from_env_and_file(
         config_dict["data_dir"] = Path(config_dict["data_dir"]).expanduser()
     if "worktree_root" in config_dict and isinstance(config_dict["worktree_root"], str):
         config_dict["worktree_root"] = Path(config_dict["worktree_root"]).expanduser()
+    if "database_path" in config_dict and isinstance(config_dict["database_path"], str):
+        config_dict["database_path"] = Path(config_dict["database_path"]).expanduser()
+    if "checkpoint_db_path" in config_dict and isinstance(
+        config_dict["checkpoint_db_path"], str
+    ):
+        config_dict["checkpoint_db_path"] = Path(
+            config_dict["checkpoint_db_path"]
+        ).expanduser()
+
+    # Phase C: profile registry の data_dir から path フィールドを補完
+    # 補完ルール:
+    #   - config file に明示があれば config file 優先
+    #   - 環境変数 WORKFLOW_* で上書きされていればそれ優先（既に config_dict に入っている）
+    #   - どちらも無く registry に data_dir があれば、それを基点に補完
+    if profile_data_dir_default is not None:
+        base = profile_data_dir_default
+        config_dict.setdefault("data_dir", base)
+        config_dict.setdefault("database_path", base / "workflow.db")
+        config_dict.setdefault("checkpoint_db_path", base / "checkpoint.db")
+        config_dict.setdefault("worktree_root", base / "worktrees")
+
+    # data_dir が解決された結果として作成されるディレクトリを保証
+    # （WorkflowConfig.__post_init__ が data_dir を作るが、補完した周辺パスの親も用意）
+    for path_key in ("database_path", "checkpoint_db_path", "worktree_root"):
+        p = config_dict.get(path_key)
+        if isinstance(p, Path):
+            p.parent.mkdir(parents=True, exist_ok=True)
 
     # task_backend と git_hosting をパース
     task_backend = _parse_task_backend_config(config_dict)

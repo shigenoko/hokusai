@@ -327,3 +327,126 @@ def test_resolve_profile_to_config_path_no_registry(tmp_path):
         resolve_profile_to_config_path(
             "a-company", tmp_path / "no-registry.yaml"
         )
+
+
+# ---------------------------------------------------------------------------
+# Phase C: data_dir 自動補完
+# ---------------------------------------------------------------------------
+
+
+def test_phase_c_autocomplete_paths_from_registry_data_dir(tmp_path, monkeypatch):
+    """registry の data_dir が config に補完される（config で未指定の場合）"""
+    from hokusai.config import create_config_from_env_and_file
+
+    data_dir = tmp_path / "profile-a-data"
+
+    cfg = tmp_path / "a.yaml"
+    cfg.write_text("project_root: /tmp/repo-a\n")
+    registry = tmp_path / "profiles.yaml"
+    registry.write_text(yaml.safe_dump({
+        "profiles": {
+            "a-co": {
+                "config": str(cfg),
+                "data_dir": str(data_dir),
+            }
+        }
+    }))
+    monkeypatch.setenv("HOKUSAI_PROFILES_FILE", str(registry))
+
+    config = create_config_from_env_and_file(profile_name="a-co")
+    assert config.data_dir == data_dir
+    assert config.database_path == data_dir / "workflow.db"
+    assert config.checkpoint_db_path == data_dir / "checkpoint.db"
+    assert config.worktree_root == data_dir / "worktrees"
+
+
+def test_phase_c_config_file_overrides_registry_data_dir(tmp_path, monkeypatch):
+    """config file 内で明示された path は registry の data_dir より優先"""
+    from hokusai.config import create_config_from_env_and_file
+
+    data_dir_registry = tmp_path / "registry-data"
+    db_explicit = tmp_path / "explicit-workflow.db"
+
+    cfg = tmp_path / "a.yaml"
+    cfg.write_text(
+        f"project_root: /tmp/repo-a\n"
+        f"database_path: {db_explicit}\n"
+    )
+    registry = tmp_path / "profiles.yaml"
+    registry.write_text(yaml.safe_dump({
+        "profiles": {
+            "a-co": {
+                "config": str(cfg),
+                "data_dir": str(data_dir_registry),
+            }
+        }
+    }))
+    monkeypatch.setenv("HOKUSAI_PROFILES_FILE", str(registry))
+
+    config = create_config_from_env_and_file(profile_name="a-co")
+    # config file の database_path が registry の data_dir 補完より優先される
+    assert config.database_path == db_explicit
+    # 明示されていない他のフィールドは registry data_dir から補完される
+    assert config.checkpoint_db_path == data_dir_registry / "checkpoint.db"
+    assert config.worktree_root == data_dir_registry / "worktrees"
+
+
+def test_phase_c_no_registry_data_dir_no_autocomplete(tmp_path, monkeypatch):
+    """registry に data_dir が無ければ補完されない（既存 WorkflowConfig デフォルト）"""
+    from hokusai.config import create_config_from_env_and_file
+
+    cfg = tmp_path / "a.yaml"
+    cfg.write_text("project_root: /tmp/repo-a\n")
+    registry = tmp_path / "profiles.yaml"
+    registry.write_text(yaml.safe_dump({
+        "profiles": {"a-co": {"config": str(cfg)}}
+    }))
+    monkeypatch.setenv("HOKUSAI_PROFILES_FILE", str(registry))
+
+    config = create_config_from_env_and_file(profile_name="a-co")
+    # WorkflowConfig のデフォルト（~/.hokusai/...）が使われる
+    # registry の data_dir 補完は走らない
+    assert ".hokusai" in str(config.data_dir)
+
+
+def test_phase_c_paths_expanduser_in_config_file(tmp_path, monkeypatch):
+    """config file の database_path / checkpoint_db_path に ~ が含まれても展開される"""
+    from hokusai.config import create_config_from_env_and_file
+
+    cfg = tmp_path / "a.yaml"
+    cfg.write_text(
+        "project_root: /tmp/repo\n"
+        f"database_path: {tmp_path}/expanded.db\n"
+        f"checkpoint_db_path: {tmp_path}/expanded-cp.db\n"
+    )
+
+    config = create_config_from_env_and_file(str(cfg))
+    assert config.database_path == tmp_path / "expanded.db"
+    assert config.checkpoint_db_path == tmp_path / "expanded-cp.db"
+
+
+def test_phase_c_parent_directories_created(tmp_path, monkeypatch):
+    """補完された path の親ディレクトリが自動作成される"""
+    from hokusai.config import create_config_from_env_and_file
+
+    data_dir = tmp_path / "nested" / "deep" / "profile-data"
+    assert not data_dir.exists()
+
+    cfg = tmp_path / "a.yaml"
+    cfg.write_text("project_root: /tmp/repo\n")
+    registry = tmp_path / "profiles.yaml"
+    registry.write_text(yaml.safe_dump({
+        "profiles": {
+            "a-co": {
+                "config": str(cfg),
+                "data_dir": str(data_dir),
+            }
+        }
+    }))
+    monkeypatch.setenv("HOKUSAI_PROFILES_FILE", str(registry))
+
+    config = create_config_from_env_and_file(profile_name="a-co")
+    # data_dir 自体が作成される
+    assert data_dir.exists()
+    # database_path / checkpoint_db_path の親も作成される（補完先 == data_dir なので同じ）
+    assert config.database_path.parent.exists()
