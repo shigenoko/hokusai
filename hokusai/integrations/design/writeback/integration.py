@@ -42,10 +42,27 @@ class WritebackEnabledConfig:
     miro_token_env: str | None = None
 
 
+_VALID_ON_FAILURE = ("warn", "block", "skip")
+
+
+def _normalize_on_failure(value: Any, default: str = "warn") -> str:
+    """on_failure の値を warn/block/skip に正規化する。
+
+    None / 不正値はすべて default にフォールバック。これがないと dispatcher
+    側 (\u00a78.1) で ValueError が出て dispatcher 構築 / retry API が 500 になる。
+    """
+    if value is None:
+        return default
+    s = str(value)
+    return s if s in _VALID_ON_FAILURE else default
+
+
 def load_writeback_config(workflow_config: Any) -> WritebackEnabledConfig:
     """既存 WorkflowConfig（dataclass）から writeback 設定を抽出。
 
     既存 config 構造を壊さないため、属性が無い場合は既定値（disabled）を返す。
+    on_failure に不正値が来た場合は既定 warn にフォールバック（dispatcher が
+    ValueError で落ちて 500 になるのを防ぐ）。
     """
     figma_cfg = getattr(workflow_config, "figma", None) or {}
     miro_cfg = getattr(workflow_config, "miro", None) or {}
@@ -63,10 +80,10 @@ def load_writeback_config(workflow_config: Any) -> WritebackEnabledConfig:
 
     return WritebackEnabledConfig(
         figma_enabled=bool(_get(figma_writeback, "enabled", False)),
-        figma_on_failure=str(_get(figma_writeback, "on_failure", "warn")),
+        figma_on_failure=_normalize_on_failure(_get(figma_writeback, "on_failure")),
         figma_token_env=_get(figma_cfg, "api_token_env"),
         miro_enabled=bool(_get(miro_writeback, "enabled", False)),
-        miro_on_failure=str(_get(miro_writeback, "on_failure", "warn")),
+        miro_on_failure=_normalize_on_failure(_get(miro_writeback, "on_failure")),
         miro_token_env=_get(miro_cfg, "api_token_env"),
     )
 

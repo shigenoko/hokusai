@@ -430,7 +430,9 @@ def _dispatch_design_writeback(state, pull_requests: list) -> None:
     # 1 件目の PR を「主 PR」として書き戻し対象に採用
     primary_pr = pull_requests[0]
     mr_url = primary_pr.get("url")
-    commit_sha = state.get("cherry_picked_commits", [None])[0] or ""
+    # cherry_picked_commits は存在するが空リストの場合があるため安全に取得
+    commits = state.get("cherry_picked_commits") or []
+    commit_sha = commits[0] if commits else ""
 
     profile_name = state.get("profile_name") or getattr(config, "profile_name", None)
 

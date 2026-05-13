@@ -133,6 +133,22 @@ class DesignRateLimitConfig:
 
 
 @dataclass
+class WritebackConfig:
+    """Phase E (v0.4.0): Figma / Miro 書き戻し設定。
+
+    詳細: docs/hokusai-figma-miro-writeback-implementation-plan.md §8
+
+    on_failure ポリシー:
+      - warn（既定）: outbox に積み workflow を継続
+      - block: outbox に積み workflow を Waiting for Human に遷移
+      - skip: outbox にも積まず警告のみ
+    """
+
+    enabled: bool = False
+    on_failure: str = "warn"  # warn | block | skip
+
+
+@dataclass
 class FigmaIntegrationConfig:
     """Figma 連携設定。
 
@@ -149,6 +165,7 @@ class FigmaIntegrationConfig:
     on_failure: str = "warn"  # warn | block | skip
     retry: DesignRetryConfig = field(default_factory=DesignRetryConfig)
     rate_limit: DesignRateLimitConfig = field(default_factory=DesignRateLimitConfig)
+    writeback: WritebackConfig = field(default_factory=WritebackConfig)
 
 
 @dataclass
@@ -167,6 +184,7 @@ class MiroIntegrationConfig:
     on_failure: str = "warn"  # warn | block | skip
     retry: DesignRetryConfig = field(default_factory=DesignRetryConfig)
     rate_limit: DesignRateLimitConfig = field(default_factory=DesignRateLimitConfig)
+    writeback: WritebackConfig = field(default_factory=WritebackConfig)
 
 
 @dataclass

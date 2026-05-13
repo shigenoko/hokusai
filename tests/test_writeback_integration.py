@@ -48,6 +48,41 @@ def test_load_writeback_config_with_dict_config():
     assert cfg.miro_token_env == "HOKUSAI_MIRO_API_TOKEN"
 
 
+def test_load_writeback_config_normalizes_invalid_on_failure():
+    """on_failure に不正値が来たら既定 warn にフォールバック"""
+    class Cfg:
+        figma = {"writeback": {"enabled": True, "on_failure": "unknown"}}
+        miro = {"writeback": {"enabled": True, "on_failure": None}}
+    cfg = load_writeback_config(Cfg())
+    assert cfg.figma_on_failure == "warn"
+    assert cfg.miro_on_failure == "warn"
+
+
+def test_load_writeback_config_with_dataclass_writeback():
+    """dataclass の WritebackConfig 経由でも動作（実 WorkflowConfig 経路）"""
+    from hokusai.config.models import (
+        FigmaIntegrationConfig,
+        MiroIntegrationConfig,
+        WritebackConfig,
+    )
+    class Cfg:
+        figma = FigmaIntegrationConfig(
+            enabled=True,
+            api_token_env="HOKUSAI_FIGMA_API_TOKEN",
+            writeback=WritebackConfig(enabled=True, on_failure="block"),
+        )
+        miro = MiroIntegrationConfig(
+            enabled=True,
+            api_token_env="HOKUSAI_MIRO_API_TOKEN",
+            writeback=WritebackConfig(enabled=False, on_failure="skip"),
+        )
+    cfg = load_writeback_config(Cfg())
+    assert cfg.figma_enabled is True
+    assert cfg.figma_on_failure == "block"
+    assert cfg.miro_enabled is False
+    assert cfg.miro_on_failure == "skip"
+
+
 def test_load_writeback_config_missing_writeback_section():
     """既存 config に writeback 節がない場合は disabled"""
     class Cfg:

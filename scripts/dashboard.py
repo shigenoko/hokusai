@@ -7288,10 +7288,21 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             target = self._get_writeback_target(source)
             store = OutboxStore(DB_PATH, target=target)
 
-            try:
-                body = self._read_json_body()
-            except Exception:
+            # 無効 JSON で body={} にフォールバックすると、空 body と同じ意味で
+            # 「pending 全件再送」が走るため、操作系 API として安全側に倒す。
+            # body 無し（空リクエスト）は許容、body 付きで JSON が壊れていれば 400。
+            content_length = int(self.headers.get("Content-Length", 0))
+            if content_length == 0:
                 body = {}
+            else:
+                try:
+                    body = self._read_json_body()
+                except Exception:
+                    self._send_json_response(
+                        {"success": False, "errors": ["request body must be valid JSON"]},
+                        status_code=400,
+                    )
+                    return
 
             # force: 真の boolean のみ True 扱い（"false" 文字列は False に）
             force = body.get("force") is True
