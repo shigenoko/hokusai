@@ -86,9 +86,9 @@ def test_build_miro_card_payload():
     assert payload["data"]["title"] == "✅ Phase 8a 完了"
     assert "MR:" in payload["data"]["description"]
     assert "commit: abc1234" in payload["data"]["description"]
-    # 主 frame の右側 50px、同じ y
-    assert payload["position"]["x"] == 100.0 + 300.0 + 50.0
-    assert payload["position"]["y"] == 200.0
+    # 主 frame の右側 50px、同じ y（浮動小数比較は pytest.approx で行う）
+    assert payload["position"]["x"] == pytest.approx(100.0 + 300.0 + 50.0)
+    assert payload["position"]["y"] == pytest.approx(200.0)
     assert payload["style"]["fillColor"] == "#4FCC8B"
 
 

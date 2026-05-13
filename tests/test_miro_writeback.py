@@ -127,9 +127,9 @@ def test_dispatch_success(store, mock_client):
     call = mock_client.create_card.call_args
     assert call.args == ("board-abc",)
     assert call.kwargs["title"] == "✅ Phase 8a 完了"
-    # 主 frame の右側 50px
-    assert call.kwargs["position"]["x"] == 100.0 + 300.0 + 50.0
-    assert call.kwargs["position"]["y"] == 200.0
+    # 主 frame の右側 50px（浮動小数比較は pytest.approx で行う）
+    assert call.kwargs["position"]["x"] == pytest.approx(100.0 + 300.0 + 50.0)
+    assert call.kwargs["position"]["y"] == pytest.approx(200.0)
     assert call.kwargs["style"]["fillColor"] == "#4FCC8B"
 
 
