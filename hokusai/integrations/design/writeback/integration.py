@@ -171,7 +171,13 @@ def decide_primary_miro(state: dict[str, Any]) -> dict[str, Any]:
         return {}
 
     frame = screens[0]
-    frame_id = frame.get("id") or frame.get("frame_id")
+    # MiroClient.to_common_context() の screens は node_id キーを使う。
+    # id / frame_id は旧 schema 互換のために fallback として受け付ける。
+    frame_id = (
+        frame.get("node_id")
+        or frame.get("id")
+        or frame.get("frame_id")
+    )
     if not frame_id:
         return {}
 
@@ -253,11 +259,18 @@ def dispatch_phase8a_writeback(
         frame_id = state.get("primary_miro_frame_id")
         if board_id and frame_id and wf_id:
             # frame_meta は miro_context から復元（無ければ 0 で構築）
+            # MiroClient.to_common_context() の screens は node_id キーを使う。
+            # 座標情報（x/y/width）は _build_miro_screens が geometry から保存する。
             miro_ctx = state.get("miro_context") or {}
             screens = miro_ctx.get("screens") or []
             frame_meta: dict[str, Any] = {}
             for s in screens:
-                if (s.get("id") or s.get("frame_id")) == frame_id:
+                screen_id = (
+                    s.get("node_id")
+                    or s.get("id")
+                    or s.get("frame_id")
+                )
+                if screen_id == frame_id:
                     frame_meta = {
                         "x": s.get("x", 0),
                         "y": s.get("y", 0),

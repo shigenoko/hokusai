@@ -327,10 +327,16 @@ def _build_miro_screens(
             data = frame.get("data") if isinstance(frame.get("data"), dict) else {}
             name = data.get("title") or frame.get("id") or ""
             buckets = _collect(by_frame.get(frame.get("id"), []))
+            # Phase E (v0.4.0): writeback の card 配置位置計算のため geometry を保持
+            geometry = frame.get("geometry") if isinstance(frame.get("geometry"), dict) else {}
             screens.append({
                 "name": name,
                 "node_id": frame.get("id", ""),
                 "description": "",
+                "x": geometry.get("x", 0),
+                "y": geometry.get("y", 0),
+                "width": geometry.get("width", 0),
+                "height": geometry.get("height", 0),
                 "texts": buckets["texts"],
                 "components": buckets["components"],
                 "notes": buckets["notes"],

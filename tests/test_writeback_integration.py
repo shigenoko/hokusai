@@ -149,13 +149,24 @@ def test_decide_primary_figma_missing_file_key():
 
 
 def test_decide_primary_miro_from_first_screen():
+    """MiroClient.to_common_context() の実 schema（node_id キー）を採用"""
     state = {
         "miro_board_id": "board-abc",
-        "miro_context": {"screens": [{"id": "frame-1"}]},
+        "miro_context": {"screens": [{"node_id": "frame-1", "name": "Home"}]},
     }
     result = decide_primary_miro(state)
     assert result["primary_miro_board_id"] == "board-abc"
     assert result["primary_miro_frame_id"] == "frame-1"
+
+
+def test_decide_primary_miro_fallback_legacy_id_key():
+    """旧 schema (id / frame_id) も後方互換として受け付ける"""
+    state = {
+        "miro_board_id": "board-abc",
+        "miro_context": {"screens": [{"id": "frame-legacy"}]},
+    }
+    result = decide_primary_miro(state)
+    assert result["primary_miro_frame_id"] == "frame-legacy"
 
 
 def test_decide_primary_miro_missing_board():
@@ -174,12 +185,12 @@ def test_decide_primary_miro_empty_screens():
 
 
 def test_populate_writes_to_state():
-    """state に primary_* を書き込む"""
+    """state に primary_* を書き込む（実 schema: node_id キー）"""
     state = {
         "figma_file_key": "file-abc",
         "figma_target_node_id": "node-1",
         "miro_board_id": "board-abc",
-        "miro_context": {"screens": [{"id": "frame-1"}]},
+        "miro_context": {"screens": [{"node_id": "frame-1"}]},
     }
     populate_primary_writeback_targets(state)
     assert state["primary_figma_file_key"] == "file-abc"
@@ -264,15 +275,19 @@ def test_dispatch_figma_skipped_if_primary_unset(db_path):
 
 
 def test_dispatch_miro_uses_frame_meta_from_context(db_path):
-    """Miro dispatch の frame_meta を miro_context から復元"""
+    """Miro dispatch の frame_meta を miro_context から復元
+
+    実 schema: MiroClient.to_common_context() / _build_miro_screens() が
+    screens に node_id / x / y / width / height を含める（v0.4.0 拡張）。
+    """
     state = {
         "workflow_id": "wf-1",
         "primary_miro_board_id": "board-1",
         "primary_miro_frame_id": "frame-1",
         "miro_context": {
             "screens": [
-                {"id": "frame-1", "x": 10.0, "y": 20.0, "width": 100.0},
-                {"id": "frame-2", "x": 999.0, "y": 999.0, "width": 100.0},
+                {"node_id": "frame-1", "x": 10.0, "y": 20.0, "width": 100.0},
+                {"node_id": "frame-2", "x": 999.0, "y": 999.0, "width": 100.0},
             ],
         },
     }

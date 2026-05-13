@@ -7211,16 +7211,25 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         """GET /api/{figma,miro}/{outbox,errors}
 
         Query:
-            limit (int, default 100)
+            limit (int, default 100、不正値は default にフォールバック)
             profile (str, optional)
 
         エラーレスポンスは既存の `_handle_design_cache_refresh_post` と統一して
         `{"success": False, "errors": [...]}`（配列）形式を返す。
+        内部実装の詳細（例外メッセージ）はサーバ側ログに留め、レスポンスには
+        例外型のみ含める（パス等の情報漏洩防止）。
         """
         try:
             from hokusai.integrations.design.writeback import OutboxStore
             target = self._get_writeback_target(source)
-            limit = int(query.get("limit", ["100"])[0])
+            # limit のバリデーション: 不正値はデフォルト 100 にフォールバック
+            limit_raw = query.get("limit", ["100"])[0]
+            try:
+                limit = int(limit_raw)
+                if limit <= 0:
+                    limit = 100
+            except (TypeError, ValueError):
+                limit = 100
             profile = query.get("profile", [None])[0]
             store = OutboxStore(DB_PATH, target=target)
             if kind == "outbox":
@@ -7245,8 +7254,13 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 items = store.list_errors(limit=limit, profile_name=profile)
             self._send_json_response({"success": True, "items": items, "count": len(items)})
         except Exception as e:
+            # 例外詳細は logger に、レスポンスには型名のみ（情報漏洩防止）
+            import logging
+            logging.getLogger("dashboard").exception(
+                "writeback list failed (%s %s)", source, kind,
+            )
             self._send_json_response(
-                {"success": False, "errors": [f"{type(e).__name__}: {e}"]},
+                {"success": False, "errors": [type(e).__name__]},
                 status_code=500,
             )
 
@@ -7278,11 +7292,36 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 body = self._read_json_body()
             except Exception:
                 body = {}
-            force = bool(body.get("force", False))
+
+            # force: 真の boolean のみ True 扱い（"false" 文字列は False に）
+            force = body.get("force") is True
+
             specific_id = body.get("id")
+            if specific_id is not None:
+                try:
+                    specific_id = int(specific_id)
+                except (TypeError, ValueError):
+                    self._send_json_response(
+                        {"success": False, "errors": ["id must be an integer"]},
+                        status_code=400,
+                    )
+                    return
+
             req_limit = body.get("limit")
             # 1 リクエストあたりの上限は 5000、既定 500（運用安全のため）
-            max_total = min(int(req_limit) if req_limit else 500, 5000)
+            if req_limit is None:
+                max_total = 500
+            else:
+                try:
+                    max_total = min(int(req_limit), 5000)
+                    if max_total <= 0:
+                        max_total = 500
+                except (TypeError, ValueError):
+                    self._send_json_response(
+                        {"success": False, "errors": ["limit must be a positive integer"]},
+                        status_code=400,
+                    )
+                    return
 
             config = get_config()
             wcfg = load_writeback_config(config)
@@ -7301,7 +7340,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 
             results: list[dict] = []
             if specific_id is not None:
-                results.append(dispatcher.retry(int(specific_id), force=force))
+                results.append(dispatcher.retry(specific_id, force=force))
             else:
                 # ページング処理: 100 件単位で取得し、limit 到達 or 取得 0 件で停止
                 processed_ids: set[int] = set()
@@ -7325,22 +7364,50 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 "limit_reached": (specific_id is None and len(results) >= max_total),
             })
         except Exception as e:
+            import logging
+            logging.getLogger("dashboard").exception(
+                "writeback retry failed (%s)", source,
+            )
             self._send_json_response(
-                {"success": False, "errors": [f"{type(e).__name__}: {e}"]},
+                {"success": False, "errors": [type(e).__name__]},
                 status_code=500,
             )
 
     def _handle_writeback_move_to_errors_post(self, source: str):
         """POST /api/{figma,miro}/move-to-errors
 
-        body: {"id": <int>}
+        body: {"id": <int>}（必須）
         outbox から errors へ強制移動。
+        必須フィールド欠落 / 非数値は 400 を返す。
         """
         try:
             from hokusai.integrations.design.writeback import OutboxStore
             target = self._get_writeback_target(source)
-            body = self._read_json_body()
-            outbox_id = int(body.get("id"))
+            try:
+                body = self._read_json_body()
+            except Exception:
+                self._send_json_response(
+                    {"success": False, "errors": ["request body must be valid JSON"]},
+                    status_code=400,
+                )
+                return
+
+            raw_id = body.get("id")
+            if raw_id is None:
+                self._send_json_response(
+                    {"success": False, "errors": ["id is required"]},
+                    status_code=400,
+                )
+                return
+            try:
+                outbox_id = int(raw_id)
+            except (TypeError, ValueError):
+                self._send_json_response(
+                    {"success": False, "errors": ["id must be an integer"]},
+                    status_code=400,
+                )
+                return
+
             store = OutboxStore(DB_PATH, target=target)
             ok = store.move_to_errors(outbox_id, error="manually moved by operator")
             if not ok:
@@ -7351,8 +7418,12 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 return
             self._send_json_response({"success": True, "moved_id": outbox_id})
         except Exception as e:
+            import logging
+            logging.getLogger("dashboard").exception(
+                "writeback move-to-errors failed (%s)", source,
+            )
             self._send_json_response(
-                {"success": False, "errors": [f"{type(e).__name__}: {e}"]},
+                {"success": False, "errors": [type(e).__name__]},
                 status_code=500,
             )
 
