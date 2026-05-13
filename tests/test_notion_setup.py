@@ -844,6 +844,47 @@ def test_cli_handler_falls_back_to_default_when_profile_config_missing_field(
     assert 'export HOKUSAI_NOTION_PR_DB_ID="pr"' in out
 
 
+def test_persist_env_vars_rejects_invalid_profile_name(tmp_path, sample_ids):
+    """profile_name に改行・空白・制御文字を含む値を渡すと ValueError"""
+    from hokusai.integrations.notion_dashboard.setup import persist_env_vars
+
+    rc = tmp_path / "test.zshrc"
+
+    # 改行（注入リスク）
+    with pytest.raises(ValueError, match="invalid profile_name"):
+        persist_env_vars(
+            rc, sample_ids,
+            profile_name="foo\nexport EVIL=1",
+        )
+    # 空白
+    with pytest.raises(ValueError, match="invalid profile_name"):
+        persist_env_vars(rc, sample_ids, profile_name="bad name")
+    # 大文字（registry 規則と一致）
+    with pytest.raises(ValueError, match="invalid profile_name"):
+        persist_env_vars(rc, sample_ids, profile_name="BAD_CASE")
+    # 数字始まり
+    with pytest.raises(ValueError, match="invalid profile_name"):
+        persist_env_vars(rc, sample_ids, profile_name="1foo")
+    # 空文字
+    with pytest.raises(ValueError, match="invalid profile_name"):
+        persist_env_vars(rc, sample_ids, profile_name="")
+    # マーカー行を閉じる文字を含む
+    with pytest.raises(ValueError, match="invalid profile_name"):
+        persist_env_vars(rc, sample_ids, profile_name="foo)===")
+
+
+def test_persist_env_vars_accepts_valid_profile_names(tmp_path, sample_ids):
+    """profile_name として妥当な値は受け入れられる"""
+    from hokusai.integrations.notion_dashboard.setup import persist_env_vars
+
+    rc = tmp_path / "test.zshrc"
+    # 標準的な命名（英小文字 + 数字 + ハイフン / アンダースコア）
+    persist_env_vars(rc, sample_ids, profile_name="company-a")
+    persist_env_vars(rc, sample_ids, profile_name="hokusai")
+    persist_env_vars(rc, sample_ids, profile_name="proj_01")
+    # 例外が出なければ OK
+
+
 def test_persist_env_vars_rejects_invalid_env_name(tmp_path, sample_ids):
     """シェル変数名として不正な workflows_env_name を渡すと ValueError"""
     from hokusai.integrations.notion_dashboard.setup import persist_env_vars

@@ -282,6 +282,11 @@ def _build_profile_markers(profile_name: str) -> tuple[str, str]:
 # `persist_env_vars` / `_handle_notion_setup` の入口でチェックする。
 _ENV_VAR_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
+# profile 名として許容する形式。hokusai/config/profiles.py の _PROFILE_NAME_PATTERN
+# と一致させる。マーカー行（コメント形式）に直接埋め込むため、改行 / 制御文字 /
+# 空白などが入ると rc の構造が壊れるためここでも独立に検証する。
+_PROFILE_NAME_FOR_MARKER_PATTERN = re.compile(r"^[a-z][a-z0-9_-]*$")
+
 
 def is_valid_env_var_name(name: Any) -> bool:
     """env 変数名がシェル identifier として妥当な形式かを返す（読みやすい述語）。
@@ -364,6 +369,15 @@ def persist_env_vars(
 
     # profile 名指定時は profile 別マーカー、未指定時は従来マーカー
     if profile_name is not None:
+        # profile 名はコメント行に直接埋め込むため、改行・空白・制御文字等が
+        # 入ると rc の構造が壊れる。hokusai/config/profiles.py の規則と一致させる。
+        if not isinstance(profile_name, str) or not _PROFILE_NAME_FOR_MARKER_PATTERN.match(
+            profile_name
+        ):
+            raise ValueError(
+                f"invalid profile_name for rc marker: {profile_name!r} "
+                f"(must match [a-z][a-z0-9_-]*)"
+            )
         begin_marker, end_marker = _build_profile_markers(profile_name)
     else:
         begin_marker, end_marker = PERSIST_BEGIN_MARKER, PERSIST_END_MARKER
