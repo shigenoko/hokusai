@@ -157,8 +157,9 @@ def decide_primary_figma(state: dict[str, Any]) -> dict[str, Any]:
     if not node_id:
         screens = figma_ctx.get("screens") or []
         if screens:
-            # screens[0]["id"] が node_id を保持する想定（既存形式）
-            node_id = screens[0].get("id") or screens[0].get("node_id")
+            # 実 schema は screens[0]["node_id"]（FigmaClient._screen_from_node）。
+            # 旧 / 別形式の fallback として "id" も受け付ける。
+            node_id = screens[0].get("node_id") or screens[0].get("id")
 
     if not node_id:
         return {}

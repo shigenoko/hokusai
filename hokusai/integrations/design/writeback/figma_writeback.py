@@ -85,8 +85,13 @@ class FigmaWritebackDispatcher:
                "response_id": str | None,
                "error": str | None}
 
-        この関数自体は例外を投げない（best effort）。
-        例外は outbox 経由で運用者に伝える。
+        例外ハンドリング（best effort）:
+          - Figma API 関連の例外（FigmaAPIError / FigmaRateLimitError）と
+            ネットワーク系（urllib.error.URLError / TimeoutError / OSError /
+            RuntimeError）は捕捉して outbox に記録（on_failure に従い処理）。
+          - 引数不正（post_comment が投げる ValueError）や SQL エラー
+            （sqlite3.Error）はプログラミングバグ起因なので **再 raise**。
+            上位の `_dispatch_design_writeback` 側でログ + skip される。
         """
         idempotency_key = build_idempotency_key(
             workflow_id=args.workflow_id,

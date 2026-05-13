@@ -7203,9 +7203,17 @@ class DashboardHandler(SimpleHTTPRequestHandler):
     # ------------------------------------------------------------------
 
     def _get_writeback_target(self, source: str):
-        """source 文字列から WritebackTarget enum を取得。"""
+        """source 文字列から WritebackTarget enum を取得。
+
+        未知の値（typo / 不正値）は silent に Miro 扱いにならないよう
+        ValueError を投げる。呼び出し側で catch して 400 を返す。
+        """
         from hokusai.integrations.design.writeback import WritebackTarget
-        return WritebackTarget.FIGMA if source == "figma" else WritebackTarget.MIRO
+        if source == "figma":
+            return WritebackTarget.FIGMA
+        if source == "miro":
+            return WritebackTarget.MIRO
+        raise ValueError(f"unknown writeback source: {source!r}")
 
     def _handle_writeback_list_get(self, source: str, kind: str, query: dict):
         """GET /api/{figma,miro}/{outbox,errors}
@@ -7295,8 +7303,11 @@ class DashboardHandler(SimpleHTTPRequestHandler):
           2. `hokusai cleanup --stale` で 30 日経過 errors を削除して上記 1 を実行
           3. SQL で errors 行を直接削除（運用上は推奨されない緊急手段）
 
-        全件モードはバッチサイズ単位でループし、100 件超の pending も処理する。
-        エラーレスポンスは `{"success": False, "errors": [...]}` 配列形式で統一。
+        全件モードは最初に `store.list_outbox(limit=max_total)` で snapshot を取得し、
+        その固定リストを順次 retry する。retry 中に updated_at が変わっても snapshot
+        は固定なので 100 件超の pending も漏れなく処理される（旧 100 件ループ方式の
+        バグを修正済み）。エラーレスポンスは `{"success": False, "errors": [...]}`
+        配列形式で統一。
         """
         try:
             from hokusai.config import get_config

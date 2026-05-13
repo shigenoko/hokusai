@@ -204,3 +204,38 @@ def test_dispatcher_requires_miro_target(store, mock_client):
     figma_store = OutboxStore(store.db_path, target=WritebackTarget.FIGMA)
     with pytest.raises(ValueError):
         MiroWritebackDispatcher(mock_client, figma_store)
+
+
+def test_dispatcher_rejects_unknown_on_failure(store, mock_client):
+    """on_failure に未知の値を渡すとエラー"""
+    with pytest.raises(ValueError):
+        MiroWritebackDispatcher(mock_client, store, on_failure="unknown")
+
+
+def test_on_failure_warn_enqueues_outbox(store, mock_client):
+    """on_failure=warn: 失敗時 outbox に積み status=enqueued（既定動作）"""
+    mock_client.create_card.side_effect = MiroAPIError(500, "err")
+    dispatcher = MiroWritebackDispatcher(mock_client, store, on_failure="warn")
+    result = dispatcher.dispatch(_args())
+    assert result["status"] == "enqueued"
+    assert len(store.list_outbox()) == 1
+
+
+def test_on_failure_block_returns_blocked_status(store, mock_client):
+    """on_failure=block: 失敗時 outbox に積み status=blocked（呼び出し側が止める）"""
+    mock_client.create_card.side_effect = MiroAPIError(500, "err")
+    dispatcher = MiroWritebackDispatcher(mock_client, store, on_failure="block")
+    result = dispatcher.dispatch(_args())
+    assert result["status"] == "blocked"
+    assert result["on_failure"] == "block"
+    assert len(store.list_outbox()) == 1
+
+
+def test_on_failure_skip_no_enqueue(store, mock_client):
+    """on_failure=skip: 失敗時 outbox にも積まない、status=skipped"""
+    mock_client.create_card.side_effect = MiroAPIError(500, "err")
+    dispatcher = MiroWritebackDispatcher(mock_client, store, on_failure="skip")
+    result = dispatcher.dispatch(_args())
+    assert result["status"] == "skipped"
+    assert result.get("on_failure") == "skip"
+    assert len(store.list_outbox()) == 0
