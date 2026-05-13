@@ -7322,18 +7322,25 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             _get_store()
             store = OutboxStore(DB_PATH, target=target)
 
-            # 無効 JSON で body={} にフォールバックすると、空 body と同じ意味で
-            # 「pending 全件再送」が走るため、操作系 API として安全側に倒す。
-            # body 無し（空リクエスト）は許容、body 付きで JSON が壊れていれば 400。
-            # Content-Length ヘッダが不正値（"abc" 等）の場合も body 無し扱いに
-            # フォールバックして 500 を返さないようにする。
-            content_length_raw = self.headers.get("Content-Length", 0)
-            try:
-                content_length = int(content_length_raw)
-                if content_length < 0:
-                    content_length = 0
-            except (TypeError, ValueError):
+            # 操作系 API として安全側に倒すため:
+            # - body 無し（Content-Length 0 / 欠落）: 「pending 全件再送」を許容
+            # - body 付きで JSON が壊れている: 400
+            # - Content-Length ヘッダが不正値（"abc" 等）: 400（誤って全件再送が
+            #   走らないようにする）
+            content_length_raw = self.headers.get("Content-Length")
+            if content_length_raw is None:
                 content_length = 0
+            else:
+                try:
+                    content_length = int(content_length_raw)
+                    if content_length < 0:
+                        raise ValueError("negative Content-Length")
+                except (TypeError, ValueError):
+                    self._send_json_response(
+                        {"success": False, "errors": ["invalid Content-Length header"]},
+                        status_code=400,
+                    )
+                    return
             if content_length == 0:
                 body = {}
             else:

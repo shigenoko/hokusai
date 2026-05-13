@@ -330,14 +330,17 @@ def _build_miro_screens(
             data = frame.get("data") if isinstance(frame.get("data"), dict) else {}
             name = data.get("title") or frame.get("id") or ""
             buckets = _collect(by_frame.get(frame.get("id"), []))
-            # Phase E (v0.4.0): writeback の card 配置位置計算のため geometry を保持
+            # Phase E (v0.4.0): writeback の card 配置位置計算のため座標情報を保持。
+            # Miro REST v2 では x/y は `position` フィールド、width/height は
+            # `geometry` フィールドに分かれている（create_card() の payload と整合）。
+            position = frame.get("position") if isinstance(frame.get("position"), dict) else {}
             geometry = frame.get("geometry") if isinstance(frame.get("geometry"), dict) else {}
             screens.append({
                 "name": name,
                 "node_id": frame.get("id", ""),
                 "description": "",
-                "x": geometry.get("x", 0),
-                "y": geometry.get("y", 0),
+                "x": position.get("x", 0),
+                "y": position.get("y", 0),
                 "width": geometry.get("width", 0),
                 "height": geometry.get("height", 0),
                 "texts": buckets["texts"],
