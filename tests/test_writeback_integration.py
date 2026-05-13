@@ -167,7 +167,21 @@ def test_decide_primary_figma_from_target_node():
 
 
 def test_decide_primary_figma_from_first_screen():
-    """target_node_id が無ければ screens 先頭"""
+    """target_node_id が無ければ screens 先頭（FigmaClient._screen_from_node が
+    生成する実スキーマ node_id キーを使う）"""
+    state = {
+        "figma_file_key": "file-abc",
+        "figma_target_node_id": None,
+        "figma_context": {
+            "screens": [{"node_id": "node-1"}, {"node_id": "node-2"}],
+        },
+    }
+    result = decide_primary_figma(state)
+    assert result["primary_figma_node_id"] == "node-1"
+
+
+def test_decide_primary_figma_legacy_id_fallback():
+    """旧 / 別形式の "id" キーも fallback として受け付ける"""
     state = {
         "figma_file_key": "file-abc",
         "figma_target_node_id": None,
