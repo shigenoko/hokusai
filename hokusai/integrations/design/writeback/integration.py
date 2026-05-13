@@ -78,11 +78,21 @@ def load_writeback_config(workflow_config: Any) -> WritebackEnabledConfig:
     figma_writeback = _get(figma_cfg, "writeback") or {}
     miro_writeback = _get(miro_cfg, "writeback") or {}
 
+    # enabled は bool 厳密判定（dict 経路で "false" / "0" のような文字列が
+    # truthy 扱いされて writeback が誤有効化されるのを防ぐ。loaders.py の
+    # _parse_writeback_config と同じ方針）。
+    figma_enabled = _get(figma_writeback, "enabled", False)
+    if not isinstance(figma_enabled, bool):
+        figma_enabled = False
+    miro_enabled = _get(miro_writeback, "enabled", False)
+    if not isinstance(miro_enabled, bool):
+        miro_enabled = False
+
     return WritebackEnabledConfig(
-        figma_enabled=bool(_get(figma_writeback, "enabled", False)),
+        figma_enabled=figma_enabled,
         figma_on_failure=_normalize_on_failure(_get(figma_writeback, "on_failure")),
         figma_token_env=_get(figma_cfg, "api_token_env"),
-        miro_enabled=bool(_get(miro_writeback, "enabled", False)),
+        miro_enabled=miro_enabled,
         miro_on_failure=_normalize_on_failure(_get(miro_writeback, "on_failure")),
         miro_token_env=_get(miro_cfg, "api_token_env"),
     )

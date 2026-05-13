@@ -102,6 +102,27 @@ def test_load_writeback_config_no_figma_miro_attrs():
     assert cfg.miro_enabled is False
 
 
+def test_load_writeback_config_rejects_non_bool_enabled():
+    """enabled に "false" / "0" / 数値などの非 bool が来たら False にフォールバック。
+
+    Copilot 指摘: bool("false") は True なので、誤って writeback が
+    有効化されてしまうのを防ぐ。
+    """
+    class Cfg:
+        figma = {"writeback": {"enabled": "false"}}
+        miro = {"writeback": {"enabled": "0"}}
+    cfg = load_writeback_config(Cfg())
+    assert cfg.figma_enabled is False
+    assert cfg.miro_enabled is False
+
+    class Cfg2:
+        figma = {"writeback": {"enabled": 1}}  # int も拒否
+        miro = {"writeback": {"enabled": "true"}}  # 文字列 true も拒否
+    cfg2 = load_writeback_config(Cfg2())
+    assert cfg2.figma_enabled is False
+    assert cfg2.miro_enabled is False
+
+
 # ---------------------------------------------------------------------------
 # build_*_dispatcher
 # ---------------------------------------------------------------------------
