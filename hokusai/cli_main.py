@@ -343,13 +343,15 @@ def main():
     # profile config の env 名（notion_dashboard.api_token_env 等）を採用するため、
     # best-effort で config を読む。
     #
-    # エラー方針:
+    # エラー方針（v0.4.1〜）:
     #   - profile 解決自体の失敗（ProfileError 系: 指定 profile が見つからない、
-    #     registry がない等）→ 既定 env 名で続行すると意図しない Notion
-    #     ワークスペースに対してセットアップを走らせるリスクがあるため、明示
-    #     エラーで終了する。
+    #     registry がない、引数併用エラー等）→ 既定 env 名で続行すると意図しない
+    #     Notion ワークスペースに対してセットアップを走らせるリスクがあるため、
+    #     原因別のメッセージを出して明示エラーで終了する。
     #   - YAML 解析失敗・I/O エラーなど「profile は解決できたが config が壊れて
-    #     いる」系 → best-effort で既定 env 名にフォールバックして続行する。
+    #     いる」系 → 原則中断する（同様の誤注入リスクのため）。例外として
+    #     `--api-token-env` が明示指定されている場合は、ユーザーが token env を
+    #     明示選択しているため警告のみで続行する。
     if args.command == "notion-setup":
         from .config.profiles import (
             ConflictingProfileAndConfigError,
@@ -360,8 +362,18 @@ def main():
         )
 
         notion_setup_profile = getattr(args, "profile", None)
+        # 空文字や空白のみの profile 名は明示エラー（truthy 判定でスルーすると
+        # 後段で profile 指定なし扱いとなり、--persist 時に rc 書き込みが失敗し
+        # 得るため早期に弾く）。
+        if notion_setup_profile is not None and not str(notion_setup_profile).strip():
+            print(
+                f"✗ --profile に空文字（または空白のみ）が指定されました: "
+                f"{notion_setup_profile!r}"
+            )
+            print("  --profile を省略するか、有効な profile 名を指定してください")
+            sys.exit(1)
         notion_setup_config = None
-        if notion_setup_profile:
+        if notion_setup_profile is not None:
             try:
                 notion_setup_config_arg = getattr(args, "config", None)
                 notion_setup_config = create_config_from_env_and_file(
