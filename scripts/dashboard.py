@@ -7253,7 +7253,8 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             else:
                 items = store.list_errors(limit=limit, profile_name=profile)
             self._send_json_response({"success": True, "items": items, "count": len(items)})
-        except Exception as e:
+        except (ImportError, sqlite3.Error, OSError, ValueError, TypeError,
+                KeyError, json.JSONDecodeError) as e:
             # 例外詳細は logger に、レスポンスには型名のみ（情報漏洩防止）
             import logging
             logging.getLogger("dashboard").exception(
@@ -7376,7 +7377,8 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 "count": len(results),
                 "limit_reached": (specific_id is None and len(results) >= max_total),
             })
-        except Exception as e:
+        except (ImportError, sqlite3.Error, OSError, ValueError, TypeError,
+                KeyError, json.JSONDecodeError) as e:
             import logging
             logging.getLogger("dashboard").exception(
                 "writeback retry failed (%s)", source,
@@ -7430,7 +7432,8 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 )
                 return
             self._send_json_response({"success": True, "moved_id": outbox_id})
-        except Exception as e:
+        except (ImportError, sqlite3.Error, OSError, ValueError, TypeError,
+                KeyError, json.JSONDecodeError) as e:
             import logging
             logging.getLogger("dashboard").exception(
                 "writeback move-to-errors failed (%s)", source,

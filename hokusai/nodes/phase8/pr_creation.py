@@ -371,8 +371,11 @@ def phase8a_pr_draft_node(state: WorkflowState) -> WorkflowState:
         # 失敗は dispatcher 内で outbox に積まれるため workflow を止めない。
         try:
             _dispatch_design_writeback(state, pull_requests)
-        except Exception as e:
-            # 安全網: integration 層の予期せぬ例外で workflow を止めない
+        except (ImportError, AttributeError, KeyError, ValueError, TypeError,
+                OSError, RuntimeError) as e:
+            # 安全網: integration 層の予期せぬ例外で workflow を止めない。
+            # 想定: writeback モジュール import 失敗 / config 構造異常 /
+            #       state キー欠落 / 型不一致 / DB I/O エラー / 内部 raise
             logger.warning(
                 "design writeback dispatch raised unexpected exception: %s",
                 type(e).__name__,
