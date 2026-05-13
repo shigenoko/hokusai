@@ -7,6 +7,7 @@ build_notion_identification の挙動を検証する。
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -197,6 +198,89 @@ def test_get_bot_info_returns_none_on_unexpected_exception(monkeypatch):
     )
 
     assert get_bot_info("token") is None
+
+
+def test_get_bot_info_negative_caches_api_error(monkeypatch):
+    """API エラーは TTL 内では再試行されず、警告ログも増えない (negative caching)"""
+    from hokusai.integrations.notion_dashboard import identification as ident_mod
+    from hokusai.integrations.notion_dashboard.client import NotionAPIError
+
+    mock_client = MagicMock()
+    mock_client.get_bot_info.side_effect = NotionAPIError(401, "Unauthorized")
+    monkeypatch.setattr(
+        ident_mod, "NotionAPIClient", lambda api_token: mock_client
+    )
+
+    # 3 回呼び出しても、API は 1 回しか叩かれない
+    assert get_bot_info("token-bad") is None
+    assert get_bot_info("token-bad") is None
+    assert get_bot_info("token-bad") is None
+    assert mock_client.get_bot_info.call_count == 1
+
+
+def test_get_bot_info_negative_cache_expires_on_ttl(monkeypatch):
+    """negative cache も TTL 後は再試行される"""
+    from hokusai.integrations.notion_dashboard import identification as ident_mod
+    from hokusai.integrations.notion_dashboard.client import NotionAPIError
+
+    mock_client = MagicMock()
+    mock_client.get_bot_info.side_effect = NotionAPIError(401, "Unauthorized")
+    monkeypatch.setattr(
+        ident_mod, "NotionAPIClient", lambda api_token: mock_client
+    )
+
+    current_time = [1000.0]
+    monkeypatch.setattr(ident_mod, "_now", lambda: current_time[0])
+
+    get_bot_info("token", ttl_seconds=60)
+    current_time[0] = 1070.0  # TTL 超過 → 再試行される
+    get_bot_info("token", ttl_seconds=60)
+    assert mock_client.get_bot_info.call_count == 2
+
+
+def test_get_bot_info_thread_safe(monkeypatch):
+    """並行アクセスでも単一 API call（thundering herd 抑止）"""
+    import threading
+
+    from hokusai.integrations.notion_dashboard import identification as ident_mod
+
+    call_count = [0]
+    call_lock = threading.Lock()
+
+    def _make_client(api_token):
+        client = MagicMock()
+
+        def _slow_get_bot_info():
+            # API call をシミュレート（少し時間がかかる）
+            time.sleep(0.05)
+            with call_lock:
+                call_count[0] += 1
+            return {"name": "Bot", "type": "bot"}
+
+        client.get_bot_info = _slow_get_bot_info
+        return client
+
+    monkeypatch.setattr(ident_mod, "NotionAPIClient", _make_client)
+
+    results: list[dict | None] = []
+    results_lock = threading.Lock()
+
+    def _worker():
+        r = get_bot_info("shared-token")
+        with results_lock:
+            results.append(r)
+
+    threads = [threading.Thread(target=_worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    # 8 スレッドが同時に叩いても API call は 1 回だけ
+    assert call_count[0] == 1
+    # 全スレッドが同じ結果を得る
+    assert len(results) == 8
+    assert all(r == {"name": "Bot", "type": "bot"} for r in results)
 
 
 # ---------------------------------------------------------------------------

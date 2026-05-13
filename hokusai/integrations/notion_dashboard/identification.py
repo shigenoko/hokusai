@@ -10,6 +10,7 @@ Issue: https://github.com/shigenoko/hokusai/issues/19
 from __future__ import annotations
 
 import os
+import threading
 import time
 from typing import Any
 
@@ -53,7 +54,16 @@ def notion_db_url(db_id: str | None) -> str:
 # process memory cache: api_token (or env name) をキーに、bot info と取得時刻を保持。
 # Operations Console は常駐 dashboard で同じ profile を見続ける想定のため、
 # 短い TTL でも API 呼び出しを大幅に削減できる。
-_BOT_INFO_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+#
+# キャッシュ値は `dict | None`:
+#   - dict: API 呼び出し成功時の戻り値
+#   - None: 失敗（negative caching）。同 TTL 内は再試行せずログ抑制
+#
+# dashboard は HTTPServer で複数スレッドからレンダリングされ得るため、
+# キャッシュアクセスは threading.Lock で保護する（thundering herd 抑止と
+# 内部 dict の競合書き込み防止）。
+_BOT_INFO_CACHE: dict[str, tuple[float, dict[str, Any] | None]] = {}
+_BOT_INFO_CACHE_LOCK = threading.Lock()
 _BOT_INFO_CACHE_TTL_SECONDS = 300  # 5 分
 
 
@@ -64,7 +74,8 @@ def _now() -> float:
 
 def clear_bot_info_cache() -> None:
     """テスト用 / 設定変更時用にキャッシュをクリアする。"""
-    _BOT_INFO_CACHE.clear()
+    with _BOT_INFO_CACHE_LOCK:
+        _BOT_INFO_CACHE.clear()
 
 
 def get_bot_info(
@@ -75,11 +86,23 @@ def get_bot_info(
 ) -> dict[str, Any] | None:
     """Notion API GET /users/me を呼んで bot info を取得（キャッシュつき）。
 
+    並行性:
+        dashboard は HTTPServer 経由で複数スレッドからレンダされ得るため、
+        キャッシュ確認 → API 呼び出し → キャッシュ書き込みの全工程を
+        単一 Lock 内で実行する（thundering herd 抑止）。
+        Notion API call は dashboard のレンダー単位（人手操作）でしか走らず、
+        シリアル化のコストは無視できる。
+
+    Negative caching:
+        Notion API 呼び出しが失敗した場合も `None` を TTL 付きで保存する。
+        これにより token が無効 / Notion が停止中等の状況で、dashboard を
+        開くたびに API を叩いて警告ログが連発するのを抑える。
+
     Args:
         api_token: Notion Internal Integration Token
         cache_key: キャッシュキー。省略時は token そのもの。Operations Console
             では env 変数名 + token のハッシュ等を使うのが安全。
-        ttl_seconds: キャッシュ TTL（秒）
+        ttl_seconds: キャッシュ TTL（秒）。成功・失敗ともこの TTL で保持。
 
     Returns:
         Notion API のレスポンス dict。失敗時は `None`（呼び出し側で
@@ -89,30 +112,34 @@ def get_bot_info(
         return None
 
     key = cache_key or api_token
-    now = _now()
-    cached = _BOT_INFO_CACHE.get(key)
-    if cached is not None:
-        cached_at, value = cached
-        if now - cached_at < ttl_seconds:
-            return value
+    with _BOT_INFO_CACHE_LOCK:
+        now = _now()
+        cached = _BOT_INFO_CACHE.get(key)
+        if cached is not None:
+            cached_at, value = cached
+            if now - cached_at < ttl_seconds:
+                return value
 
-    try:
-        client = NotionAPIClient(api_token=api_token)
-        bot_info = client.get_bot_info()
-    except (NotionAPIError, NotionRateLimitError) as e:
-        # 認証エラーや rate limit はパネル落とさず graceful degrade
-        logger.warning(
-            "Notion bot info fetch failed (%s): %s",
-            type(e).__name__, str(e),
-        )
-        return None
-    except Exception as e:
-        # ネットワーク / 例外は型名のみログに残す（token 漏洩防止）
-        logger.warning("Notion bot info fetch error: %s", type(e).__name__)
-        return None
+        # キャッシュミス / 期限切れ → API 呼び出し
+        bot_info: dict[str, Any] | None
+        try:
+            client = NotionAPIClient(api_token=api_token)
+            bot_info = client.get_bot_info()
+        except (NotionAPIError, NotionRateLimitError) as e:
+            # 認証エラーや rate limit はパネル落とさず graceful degrade
+            logger.warning(
+                "Notion bot info fetch failed (%s): %s",
+                type(e).__name__, str(e),
+            )
+            bot_info = None
+        except Exception as e:
+            # ネットワーク / 例外は型名のみログに残す（token 漏洩防止）
+            logger.warning("Notion bot info fetch error: %s", type(e).__name__)
+            bot_info = None
 
-    _BOT_INFO_CACHE[key] = (now, bot_info)
-    return bot_info
+        # 成功・失敗ともキャッシュ（negative caching でログ抑制）
+        _BOT_INFO_CACHE[key] = (now, bot_info)
+        return bot_info
 
 
 def get_bot_display_name(bot_info: dict[str, Any] | None) -> str:
