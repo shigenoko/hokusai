@@ -126,11 +126,113 @@ def _get_notion_dispatcher():
     )
 
 
+def _render_notion_identification_section() -> str:
+    """Issue #19: 接続先 Notion の識別情報セクションを HTML として返す。
+
+    profile / env 名 / DB ID / DB URL / Bot user を表示。Bot info 取得は
+    process memory に 5 分 cache される。
+
+    取得失敗時は graceful degrade（panel 全体は落とさない）。
+    panel を落とさない方針は維持しつつ、例外型名は warning ログに残して
+    設定不整合・実装バグを追跡可能にする。
+    """
+    import html as _html
+    import logging
+
+    try:
+        from hokusai.config import get_config
+        from hokusai.integrations.notion_dashboard import (
+            build_notion_identification,
+        )
+
+        cfg = get_config()
+        nd_cfg = getattr(cfg, "notion_dashboard", None)
+        if nd_cfg is None:
+            return ""
+
+        # profile 名取得の優先順位:
+        #   1. dashboard 起動時に渡された HOKUSAI_DASHBOARD_PROFILE (= HOKUSAI_PROFILE_NAME)
+        #   2. WorkflowConfig.profile_name（v0.4.x 時点では未公開属性のため
+        #      フォールバックとしてのみ使う）
+        # WorkflowConfig 自体は profile_name 属性を持たない実装が多く、
+        # 1 を優先しないと profile 起動でも識別欄が (none) になってしまう。
+        resolved_profile = HOKUSAI_PROFILE_NAME or getattr(
+            cfg, "profile_name", None
+        )
+
+        ident = build_notion_identification(
+            profile_name=resolved_profile,
+            api_token_env=nd_cfg.api_token_env,
+            workflows_db_id_env=nd_cfg.workflows_db_id_env,
+            pull_requests_db_id_env=nd_cfg.pull_requests_db_id_env,
+        )
+    except Exception as e:
+        # 設定読み込み失敗 / 想定外エラーは panel 全体に影響させないが、
+        # 設定不整合や実装バグを後から追えるようログには型名を残す。
+        # stacktrace は debug レベル（必要時のみ詳細を確認できる）。
+        _log = logging.getLogger("dashboard.notion_identification")
+        _log.warning(
+            "Notion identification section render failed: %s", type(e).__name__,
+        )
+        _log.debug("Stacktrace:", exc_info=True)
+        return ""
+
+    def _esc(s: object) -> str:
+        return _html.escape(str(s) if s is not None else "")
+
+    profile_label = _esc(ident["profile_name"]) if ident["profile_name"] else "(none)"
+    wf_full = _esc(ident["workflows_db_id_full"])
+    pr_full = _esc(ident["pull_requests_db_id_full"])
+    wf_masked = _esc(ident["workflows_db_id_masked"])
+    pr_masked = _esc(ident["pull_requests_db_id_masked"])
+    wf_url = _esc(ident["workflows_db_url"])
+    pr_url = _esc(ident["pull_requests_db_url"])
+
+    def _db_cell(masked: str, full: str, url: str) -> str:
+        if not url:
+            return masked
+        return (
+            f'<a href="{url}" target="_blank" rel="noopener noreferrer" '
+            f'title="{full}">{masked}</a>'
+        )
+
+    return f"""
+      <details style="margin-top:8px;" open>
+        <summary style="cursor:pointer; font-size:0.9em; color:#444;">
+          接続先 Notion
+        </summary>
+        <table style="margin-top:6px; font-size:0.85em; border-collapse:collapse;">
+          <tr>
+            <th style="text-align:left; padding:2px 8px; color:#666;">Profile</th>
+            <td style="padding:2px 8px;"><code>{profile_label}</code></td>
+          </tr>
+          <tr>
+            <th style="text-align:left; padding:2px 8px; color:#666;">API token env</th>
+            <td style="padding:2px 8px;"><code>{_esc(ident["api_token_env"])}</code></td>
+          </tr>
+          <tr>
+            <th style="text-align:left; padding:2px 8px; color:#666;">Workflows DB</th>
+            <td style="padding:2px 8px;">{_db_cell(wf_masked, wf_full, wf_url)}</td>
+          </tr>
+          <tr>
+            <th style="text-align:left; padding:2px 8px; color:#666;">Pull Requests DB</th>
+            <td style="padding:2px 8px;">{_db_cell(pr_masked, pr_full, pr_url)}</td>
+          </tr>
+          <tr>
+            <th style="text-align:left; padding:2px 8px; color:#666;">Bot user</th>
+            <td style="padding:2px 8px;">{_esc(ident["bot_display_name"])}</td>
+          </tr>
+        </table>
+      </details>
+    """
+
+
 def render_notion_dashboard_panel() -> str:
     """HOKUSAI Web Dashboard 上に表示する「Notion 同期状態」パネル。
 
-    Operations Console の責務として、Notion メインダッシュボードへの誘導と、
-    Notion 同期失敗時の状況把握・再送操作を提供する。
+    Operations Console の責務として、Notion メインダッシュボードへの誘導、
+    Notion 同期失敗時の状況把握・再送操作、および接続先 Notion の識別情報
+    （Issue #19）を提供する。
     """
     try:
         dispatcher = _get_notion_dispatcher()
@@ -149,6 +251,8 @@ def render_notion_dashboard_panel() -> str:
         else "🟡 設定済み（環境変数未設定のため送信は no-op）"
     )
 
+    identification_html = _render_notion_identification_section()
+
     return f"""
     <div class="card" id="notion-dashboard-panel">
       <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px;">
@@ -165,6 +269,7 @@ def render_notion_dashboard_panel() -> str:
           </button>
         </div>
       </div>
+      {identification_html}
       <div id="notion-dashboard-result" style="margin-top:8px; font-size:0.85em;"></div>
     </div>
     <script>

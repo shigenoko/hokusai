@@ -105,6 +105,19 @@ class NotionAPIClient:
             "PATCH", f"/blocks/{block_id}/children", body={"children": children}
         )
 
+    def get_bot_info(self) -> dict:
+        """Notion API GET /users/me を呼んで bot ユーザー情報を取得する。
+
+        Operations Console の接続状態パネルで「どの integration に接続しているか」
+        を識別するために使う。Notion API は workspace 名を直接返さないため、
+        bot user name と integration の所有者情報（owner.workspace 等）で代用する。
+
+        Returns:
+            Notion API のレスポンスをそのまま返す:
+            {"id": "...", "name": "...", "type": "bot", "bot": {"owner": {...}}}
+        """
+        return self._request("GET", "/users/me")
+
     def _request(self, method: str, path: str, *, body: dict | None = None) -> dict:
         url = f"{NOTION_API_BASE}{path}"
         data = json.dumps(body).encode("utf-8") if body is not None else None
