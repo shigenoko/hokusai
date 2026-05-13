@@ -365,6 +365,22 @@ def phase8a_pr_draft_node(state: WorkflowState) -> WorkflowState:
         else:
             print("⚠️ Phase 8a: PRが作成されませんでした（変更がないか、ブランチが存在しません）")
 
+        # Phase E (v0.4.0): Figma / Miro 書き戻し
+        # PR 作成成功時に primary frame / board へ進捗コメント / カードを投稿する。
+        # primary_* が未設定 or writeback 無効 / token 未設定なら silent に skip。
+        # 失敗は dispatcher 内で outbox に積まれるため workflow を止めない。
+        try:
+            _dispatch_design_writeback(state, pull_requests)
+        except (ImportError, AttributeError, KeyError, ValueError, TypeError,
+                OSError, RuntimeError) as e:
+            # 安全網: integration 層の予期せぬ例外で workflow を止めない。
+            # 想定: writeback モジュール import 失敗 / config 構造異常 /
+            #       state キー欠落 / 型不一致 / DB I/O エラー / 内部 raise
+            logger.warning(
+                "design writeback dispatch raised unexpected exception: %s",
+                type(e).__name__,
+            )
+
         # Note: Copilotレビュー待ちは統合レビューループ（phase8b_unified_wait）で処理する。
         # Phase 8a はPR作成のみを担当し、後続の phase8b_unified_wait へ進む。
 
@@ -378,3 +394,89 @@ def phase8a_pr_draft_node(state: WorkflowState) -> WorkflowState:
     state = update_phase_status(state, 8, PhaseStatus.COMPLETED)
 
     return state
+
+
+def _dispatch_design_writeback(state, pull_requests: list) -> None:
+    """Phase E (v0.4.0): Figma / Miro への進捗書き戻し。
+
+    config.figma.writeback / config.miro.writeback が enabled かつ
+    primary_* が state に設定されている場合のみ実行。それ以外は silent に skip。
+
+    失敗は dispatcher 内で outbox に積まれ、workflow を止めない。
+
+    参考: docs/hokusai-figma-miro-writeback-implementation-plan.md §11 (Step 5)
+    """
+    if not pull_requests:
+        return
+
+    try:
+        from ...integrations.design.writeback import (
+            build_figma_dispatcher,
+            build_miro_dispatcher,
+            dispatch_phase8a_writeback,
+            load_writeback_config,
+            populate_primary_writeback_targets,
+        )
+    except ImportError:
+        return  # writeback モジュールが無い環境では何もしない
+
+    config = get_config()
+    writeback_cfg = load_writeback_config(config)
+    if not (writeback_cfg.figma_enabled or writeback_cfg.miro_enabled):
+        return
+
+    db_path = Path(getattr(config, "database_path", "workflow.db"))
+    figma_dispatcher = build_figma_dispatcher(db_path, writeback_cfg)
+    miro_dispatcher = build_miro_dispatcher(db_path, writeback_cfg)
+    if figma_dispatcher is None and miro_dispatcher is None:
+        return
+
+    # 1 件目の PR を「主 PR」として書き戻し対象に採用
+    primary_pr = pull_requests[0]
+    mr_url = primary_pr.get("url")
+    # cherry_picked_commits は存在するが空リストの場合があるため安全に取得
+    commits = state.get("cherry_picked_commits") or []
+    commit_sha = commits[0] if commits else ""
+
+    profile_name = state.get("profile_name") or getattr(config, "profile_name", None)
+
+    # Phase 3 で populate されているはずだが、ノード呼び出し順や旧 workflow
+    # state の場合に未設定のケースがあるため、ここでも補完を試みる
+    # （既存値は上書きしない）。これがないと figma_context / miro_context は
+    # 揃っていても primary_* が空で dispatch_phase8a_writeback が常に skip 扱い
+    # になってしまう。
+    populate_primary_writeback_targets(state)
+
+    result = dispatch_phase8a_writeback(
+        state,
+        mr_url=mr_url,
+        commit_sha=commit_sha,
+        figma_dispatcher=figma_dispatcher,
+        miro_dispatcher=miro_dispatcher,
+        profile_name=profile_name,
+        workflow_id=state.get("workflow_id"),
+    )
+    if result.figma:
+        logger.info("figma writeback: %s", result.figma.get("status"))
+    if result.miro:
+        logger.info("miro writeback: %s", result.miro.get("status"))
+
+    # on_failure: block の場合は workflow を waiting_for_human に遷移
+    # （計画書 §8.2: block で投稿失敗 → 重要案件として人判断を求める運用）
+    blocked = []
+    if result.figma and result.figma.get("status") == "blocked":
+        blocked.append(f"figma: {result.figma.get('error')}")
+    if result.miro and result.miro.get("status") == "blocked":
+        blocked.append(f"miro: {result.miro.get('error')}")
+    if blocked:
+        # workflow_runner は human_input_request を理由表示の正本として参照するため、
+        # waiting_for_human_reason だけでなく human_input_request にも同内容をセット
+        # する（UI / 通知での待機理由表示が "writeback failed: ..." になる）。
+        reason = "design writeback failed with on_failure=block: " + "; ".join(blocked)
+        state["waiting_for_human"] = True
+        state["waiting_for_human_reason"] = reason
+        state["human_input_request"] = reason
+        logger.warning(
+            "workflow %s: waiting_for_human due to design writeback block",
+            state.get("workflow_id"),
+        )

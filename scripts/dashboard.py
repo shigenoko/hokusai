@@ -6972,6 +6972,18 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             service_id = unquote(parsed.path[len("/api/connections/"):])
             self._handle_connections_get(service_id, query)
             return
+        elif parsed.path == "/api/figma/outbox":
+            self._handle_writeback_list_get("figma", "outbox", query)
+            return
+        elif parsed.path == "/api/figma/errors":
+            self._handle_writeback_list_get("figma", "errors", query)
+            return
+        elif parsed.path == "/api/miro/outbox":
+            self._handle_writeback_list_get("miro", "outbox", query)
+            return
+        elif parsed.path == "/api/miro/errors":
+            self._handle_writeback_list_get("miro", "errors", query)
+            return
         elif "id" in query:
             # 詳細ページ
             workflow_id = query["id"][0]
@@ -7146,6 +7158,14 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._handle_design_cache_refresh_post("figma")
         elif parsed.path == "/api/miro/refresh-cache":
             self._handle_design_cache_refresh_post("miro")
+        elif parsed.path == "/api/figma/retry-pending":
+            self._handle_writeback_retry_post("figma")
+        elif parsed.path == "/api/figma/move-to-errors":
+            self._handle_writeback_move_to_errors_post("figma")
+        elif parsed.path == "/api/miro/retry-pending":
+            self._handle_writeback_retry_post("miro")
+        elif parsed.path == "/api/miro/move-to-errors":
+            self._handle_writeback_move_to_errors_post("miro")
         elif parsed.path.startswith("/api/prompts/"):
             from urllib.parse import unquote
             prompt_id = unquote(parsed.path[len("/api/prompts/"):])
@@ -7174,6 +7194,367 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         except Exception as e:
             self._send_json_response(
                 {"success": False, "error": f"{type(e).__name__}"},
+                status_code=500,
+            )
+
+    # ------------------------------------------------------------------
+    # Phase E (v0.4.0): Figma / Miro 書き戻し outbox の Operations Console API
+    # 計画書 §10 参照
+    # ------------------------------------------------------------------
+
+    def _get_writeback_target(self, source: str):
+        """source 文字列から WritebackTarget enum を取得。
+
+        未知の値（typo / 不正値）は silent に Miro 扱いにならないよう
+        ValueError を投げる。呼び出し側はこの ValueError を catch して
+        400（"unknown writeback source"）を返す。**500 ではない**ことに
+        注意（API クライアント側のバグ起因なので 400 が正しい）。
+        """
+        from hokusai.integrations.design.writeback import WritebackTarget
+        if source == "figma":
+            return WritebackTarget.FIGMA
+        if source == "miro":
+            return WritebackTarget.MIRO
+        raise ValueError(f"unknown writeback source: {source!r}")
+
+    def _handle_writeback_list_get(self, source: str, kind: str, query: dict):
+        """GET /api/{figma,miro}/{outbox,errors}
+
+        Query:
+            limit (int, default 100、最大 1000、不正値は default にフォールバック)
+            profile (str, optional)
+
+        エラーレスポンスは既存の `_handle_design_cache_refresh_post` と統一して
+        `{"success": False, "errors": [...]}`（配列）形式を返す。
+        内部実装の詳細（例外メッセージ）はサーバ側ログに留め、レスポンスには
+        例外型のみ含める（パス等の情報漏洩防止）。
+        """
+        # GET の limit 上限。極端な値で fetch / レスポンス生成負荷が跳ねないよう clamp。
+        # 運用上は 100 / 数百件で足りる想定。
+        _MAX_LIST_LIMIT = 1000
+        # source の検証は try の外で行う（不正値は 400 を返す）
+        try:
+            target = self._get_writeback_target(source)
+        except ValueError as e:
+            self._send_json_response(
+                {"success": False, "errors": [str(e)]},
+                status_code=400,
+            )
+            return
+        try:
+            from hokusai.integrations.design.writeback import OutboxStore
+            # limit のバリデーション: 不正値 / 負数はデフォルト 100、上限超は 1000 で clamp
+            limit_raw = query.get("limit", ["100"])[0]
+            try:
+                limit = int(limit_raw)
+                if limit <= 0:
+                    limit = 100
+                elif limit > _MAX_LIST_LIMIT:
+                    limit = _MAX_LIST_LIMIT
+            except (TypeError, ValueError):
+                limit = 100
+            profile = query.get("profile", [None])[0]
+            # スキーマ初期化を保証する（OutboxStore は直接接続するため、
+            # DB ファイル未作成だと空 sqlite が作られ "no such table" になる）
+            _get_store()
+            store = OutboxStore(DB_PATH, target=target)
+            if kind == "outbox":
+                entries = store.list_outbox(limit=limit, profile_name=profile)
+                items = [
+                    {
+                        "id": e.id,
+                        "idempotency_key": e.idempotency_key,
+                        "workflow_id": e.workflow_id,
+                        "profile_name": e.profile_name,
+                        "event_type": e.event_type,
+                        "resource": e.payload.get("node_id")
+                            or e.payload.get("frame_id"),
+                        "attempt_count": e.attempt_count,
+                        "last_error": e.last_error,
+                        "created_at": e.created_at,
+                        "updated_at": e.updated_at,
+                    }
+                    for e in entries
+                ]
+            else:
+                items = store.list_errors(limit=limit, profile_name=profile)
+            self._send_json_response({"success": True, "items": items, "count": len(items)})
+        except (ImportError, sqlite3.Error, OSError, ValueError, TypeError,
+                KeyError, json.JSONDecodeError) as e:
+            # 例外詳細は logger に、レスポンスには型名のみ（情報漏洩防止）
+            import logging
+            logging.getLogger("dashboard").exception(
+                "writeback list failed (%s %s)", source, kind,
+            )
+            self._send_json_response(
+                {"success": False, "errors": [type(e).__name__]},
+                status_code=500,
+            )
+
+    def _handle_writeback_retry_post(self, source: str):
+        """POST /api/{figma,miro}/retry-pending
+
+        body:
+            {"id": <outbox_id:int>}  個別再送（指定 outbox 行のみ）
+            {}                       outbox の pending 全件を snapshot 取得して再送
+            {"limit": <int>}         1 リクエストあたりの上限（既定 500、最大 5000）
+            {"force": true}          dispatch 時の 3 段階チェックのうち `errors` にある
+                                     idempotency_key を bypass する。通常運用では outbox
+                                     と errors は排他（5 回失敗で outbox → errors 移動時に
+                                     outbox 行を削除）のため意味を持たないが、外部から
+                                     SQL で errors 行を残したまま同じ payload を再投入
+                                     したケース等のレアな復旧用途で有効。
+
+        **重要**: 本 API は outbox 行のみが対象。errors テーブル上の行を直接再送する
+        経路は v0.4.0 にはなく、Operations Console から errors 行を outbox に戻す
+        手段も提供していない（v0.4.1 で検討予定）。errors 行の再送が必要な場合は
+        以下のいずれかで対応:
+          1. 新しい commit で Phase 8a を再実行（idempotency_key が変わって新規 dispatch）
+          2. `hokusai cleanup --stale` で 30 日経過 errors を削除して上記 1 を実行
+          3. SQL で errors 行を直接削除（運用上は推奨されない緊急手段）
+
+        全件モードは最初に `store.list_outbox(limit=max_total)` で snapshot を取得し、
+        その固定リストを順次 retry する。retry 中に updated_at が変わっても snapshot
+        は固定なので 100 件超の pending も漏れなく処理される（旧 100 件ループ方式の
+        バグを修正済み）。エラーレスポンスは `{"success": False, "errors": [...]}`
+        配列形式で統一。
+        """
+        # source の検証は try の外で行う（不正値は 400 を返す）
+        try:
+            target = self._get_writeback_target(source)
+        except ValueError as e:
+            self._send_json_response(
+                {"success": False, "errors": [str(e)]},
+                status_code=400,
+            )
+            return
+        try:
+            from hokusai.config import get_config
+            from hokusai.integrations.design.writeback import (
+                OutboxStore,
+                build_figma_dispatcher,
+                build_miro_dispatcher,
+                load_writeback_config,
+            )
+            # スキーマ初期化保証（OutboxStore 直接接続のため）
+            _get_store()
+            store = OutboxStore(DB_PATH, target=target)
+
+            # 操作系 API として安全側に倒すため:
+            # - body 無し（Content-Length 0 / 欠落）: 「pending 全件再送」を許容
+            # - body 付きで JSON が壊れている: 400
+            # - Content-Length ヘッダが不正値（"abc" 等）: 400（誤って全件再送が
+            #   走らないようにする）
+            content_length_raw = self.headers.get("Content-Length")
+            if content_length_raw is None:
+                content_length = 0
+            else:
+                try:
+                    content_length = int(content_length_raw)
+                    if content_length < 0:
+                        raise ValueError("negative Content-Length")
+                except (TypeError, ValueError):
+                    self._send_json_response(
+                        {"success": False, "errors": ["invalid Content-Length header"]},
+                        status_code=400,
+                    )
+                    return
+            if content_length == 0:
+                body = {}
+            else:
+                try:
+                    body = self._read_json_body()
+                except (ValueError, json.JSONDecodeError, UnicodeDecodeError, OSError):
+                    self._send_json_response(
+                        {"success": False, "errors": ["request body must be valid JSON"]},
+                        status_code=400,
+                    )
+                    return
+                # JSON が配列 / 文字列 / 数値 / null 等の場合は body.get(...) で
+                # AttributeError になるため dict のみ許容する。
+                if not isinstance(body, dict):
+                    self._send_json_response(
+                        {"success": False, "errors": ["request body must be a JSON object"]},
+                        status_code=400,
+                    )
+                    return
+
+            # force: 真の boolean のみ True 扱い（"false" 文字列は False に）
+            force = body.get("force") is True
+
+            specific_id = body.get("id")
+            if specific_id is not None:
+                try:
+                    specific_id = int(specific_id)
+                except (TypeError, ValueError):
+                    self._send_json_response(
+                        {"success": False, "errors": ["id must be an integer"]},
+                        status_code=400,
+                    )
+                    return
+
+            req_limit = body.get("limit")
+            # 1 リクエストあたりの上限は 5000、既定 500（運用安全のため）
+            if req_limit is None:
+                max_total = 500
+            else:
+                try:
+                    max_total = min(int(req_limit), 5000)
+                    if max_total <= 0:
+                        max_total = 500
+                except (TypeError, ValueError):
+                    self._send_json_response(
+                        {"success": False, "errors": ["limit must be a positive integer"]},
+                        status_code=400,
+                    )
+                    return
+
+            config = get_config()
+            wcfg = load_writeback_config(config)
+            if source == "figma":
+                dispatcher = build_figma_dispatcher(DB_PATH, wcfg)
+            else:
+                dispatcher = build_miro_dispatcher(DB_PATH, wcfg)
+            if dispatcher is None:
+                self._send_json_response({
+                    "success": False,
+                    "errors": [
+                        f"{source} writeback is not configured (disabled or token missing)",
+                    ],
+                }, status_code=409)
+                return
+
+            results: list[dict] = []
+            if specific_id is not None:
+                results.append(dispatcher.retry(specific_id, force=force))
+            else:
+                # snapshot 方式: 最初に max_total 件を一括取得して、その snapshot を
+                # 処理する。
+                #
+                # 旧実装（ループで list_outbox を呼び直す方式）には問題があった:
+                # retry が失敗すると updated_at が更新され、その行が常に DESC 順の
+                # 上位 100 件に残り続けるため、new_entries が空になって break。
+                # 結果、100 件超の古い pending が永遠に処理されない。
+                #
+                # snapshot 方式なら、retry 中に updated_at が変わっても snapshot は
+                # 固定なので、最初に取得した max_total 件を確実に処理できる。
+                # retry で削除 / errors 移動された行は次の取得対象から自然に消える。
+                snapshot = store.list_outbox(limit=max_total)
+                for e in snapshot:
+                    if len(results) >= max_total:
+                        break
+                    results.append(dispatcher.retry(e.id, force=force))
+
+            self._send_json_response({
+                "success": True,
+                "results": results,
+                "count": len(results),
+                "limit_reached": (specific_id is None and len(results) >= max_total),
+            })
+        except (ImportError, sqlite3.Error, OSError, ValueError, TypeError,
+                KeyError, json.JSONDecodeError) as e:
+            import logging
+            logging.getLogger("dashboard").exception(
+                "writeback retry failed (%s)", source,
+            )
+            self._send_json_response(
+                {"success": False, "errors": [type(e).__name__]},
+                status_code=500,
+            )
+
+    def _handle_writeback_move_to_errors_post(self, source: str):
+        """POST /api/{figma,miro}/move-to-errors
+
+        body: {"id": <int>}（必須）
+        outbox から errors へ強制移動。
+        必須フィールド欠落 / 非数値は 400 を返す。
+        retry-pending と同様に Content-Length 不正値 / JSON 不正 / 非 dict body は
+        すべて 400 で返す（500 にしない）。
+        """
+        # source の検証は try の外で行う（不正値は 400 を返す）
+        try:
+            target = self._get_writeback_target(source)
+        except ValueError as e:
+            self._send_json_response(
+                {"success": False, "errors": [str(e)]},
+                status_code=400,
+            )
+            return
+        try:
+            from hokusai.integrations.design.writeback import OutboxStore
+            # Content-Length パース（retry-pending と同パターン）。
+            # 不正値で 500 にならないよう、ここで明示的にバリデーション。
+            content_length_raw = self.headers.get("Content-Length")
+            if content_length_raw is None:
+                content_length = 0
+            else:
+                try:
+                    content_length = int(content_length_raw)
+                    if content_length < 0:
+                        raise ValueError("negative Content-Length")
+                except (TypeError, ValueError):
+                    self._send_json_response(
+                        {"success": False, "errors": ["invalid Content-Length header"]},
+                        status_code=400,
+                    )
+                    return
+            if content_length == 0:
+                # body 必須なので body 無しも 400
+                self._send_json_response(
+                    {"success": False, "errors": ["id is required"]},
+                    status_code=400,
+                )
+                return
+            try:
+                body = self._read_json_body()
+            except (ValueError, json.JSONDecodeError, UnicodeDecodeError, OSError):
+                self._send_json_response(
+                    {"success": False, "errors": ["request body must be valid JSON"]},
+                    status_code=400,
+                )
+                return
+            if not isinstance(body, dict):
+                self._send_json_response(
+                    {"success": False, "errors": ["request body must be a JSON object"]},
+                    status_code=400,
+                )
+                return
+
+            raw_id = body.get("id")
+            if raw_id is None:
+                self._send_json_response(
+                    {"success": False, "errors": ["id is required"]},
+                    status_code=400,
+                )
+                return
+            try:
+                outbox_id = int(raw_id)
+            except (TypeError, ValueError):
+                self._send_json_response(
+                    {"success": False, "errors": ["id must be an integer"]},
+                    status_code=400,
+                )
+                return
+
+            # スキーマ初期化保証
+            _get_store()
+            store = OutboxStore(DB_PATH, target=target)
+            ok = store.move_to_errors(outbox_id, error="manually moved by operator")
+            if not ok:
+                self._send_json_response(
+                    {"success": False, "errors": [f"outbox id {outbox_id} not found"]},
+                    status_code=404,
+                )
+                return
+            self._send_json_response({"success": True, "moved_id": outbox_id})
+        except (ImportError, sqlite3.Error, OSError, ValueError, TypeError,
+                KeyError, json.JSONDecodeError) as e:
+            import logging
+            logging.getLogger("dashboard").exception(
+                "writeback move-to-errors failed (%s)", source,
+            )
+            self._send_json_response(
+                {"success": False, "errors": [type(e).__name__]},
                 status_code=500,
             )
 

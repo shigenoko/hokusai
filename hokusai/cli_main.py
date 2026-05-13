@@ -900,9 +900,46 @@ def _handle_cleanup(args, config):
 
         print(f"✓ {cleaned} 件の stale worktree を削除しました")
 
+        # Phase E (v0.4.0): writeback errors / idempotency を 30 日経過で削除
+        try:
+            _cleanup_writeback_old_errors(config)
+        except Exception as e:
+            print(f"⚠️ writeback cleanup でエラー: {type(e).__name__}: {e}")
+
     else:
         print("✗ workflow_id または --stale を指定してください")
         sys.exit(1)
+
+
+def _cleanup_writeback_old_errors(config) -> None:
+    """Phase E (v0.4.0): figma/miro_sync_errors と design_writeback_idempotency の
+    30 日経過行を削除する。
+
+    `hokusai cleanup --stale` 実行時に同時に呼ばれる。Notion outbox cleanup と同様に
+    backward-compatible（テーブル無くてもエラーにしない）。
+
+    参考: docs/hokusai-figma-miro-writeback-implementation-plan.md §5.3, §11 (Step 7)
+    """
+    import sqlite3
+
+    try:
+        from .integrations.design.writeback import OutboxStore, WritebackTarget
+    except ImportError:
+        return  # writeback モジュール未配置（古い環境）
+
+    db_path = config.database_path
+    total = 0
+    for target in (WritebackTarget.FIGMA, WritebackTarget.MIRO):
+        try:
+            store = OutboxStore(db_path, target=target)
+            total += store.cleanup_old_errors(retention_days=30)
+        except sqlite3.Error:
+            # テーブル不在 / スキーマ古い等（v0.3.x DB）は無視
+            # OS / I/O エラーやその他の異常は上位に伝播させ、運用者が
+            # `hokusai cleanup --stale` の出力で気付けるようにする。
+            continue
+    if total > 0:
+        print(f"🧹 writeback cleanup: {total} 件の 30 日経過 errors / idempotency を削除")
 
 
 if __name__ == "__main__":

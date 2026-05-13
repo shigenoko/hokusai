@@ -1,15 +1,18 @@
 """
-Miro REST API クライアント（read-only）。
+Miro REST API クライアント（v0.4.0 から書き戻し対応）。
 
 責務:
 - board 情報の取得
 - item 一覧の取得（frame / sticky_note / text / shape / connector）
 - 共通コンテキスト形式への正規化
+- card 作成（v0.4.0, Phase E の書き戻し）
 
 設計方針:
 - 標準ライブラリ urllib のみで実装し、依存追加なし。
 - token は Authorization: Bearer ヘッダにのみ載せる。
 - レート制限と 5xx は指数バックオフで再送、4xx は即時失敗。
+- 書き戻し（create_card）は MVP 範囲外で、Phase E (v0.4.0) から有効。
+  詳細: docs/hokusai-figma-miro-writeback-implementation-plan.md
 """
 
 from __future__ import annotations
@@ -135,13 +138,58 @@ class MiroClient:
 
     # ---------- 内部 ----------
 
-    def _request(self, method: str, path: str) -> dict[str, Any]:
+    def create_card(
+        self,
+        board_id: str,
+        *,
+        title: str,
+        description: str | None = None,
+        position: dict[str, float] | None = None,
+        style: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Miro board に card を作成する（Phase E, v0.4.0）。
+
+        Miro REST API:
+            POST /v2/boards/{board_id}/cards
+            body: {"data": {"title": "...", "description": "..."},
+                   "position": {"x": ..., "y": ...},
+                   "style": {"fillColor": "..."}}
+
+        Args:
+            board_id: Miro board ID
+            title: card タイトル
+            description: card 本文（HTML 可）
+            position: 配置位置（x, y）
+            style: スタイル（fillColor 等）
+
+        Returns:
+            API レスポンス（"id" に card ID が入る）
+        """
+        if not board_id or not title:
+            raise ValueError("board_id / title は必須")
+        body: dict[str, Any] = {"data": {"title": title}}
+        if description is not None:
+            body["data"]["description"] = description
+        if position is not None:
+            body["position"] = position
+        if style is not None:
+            body["style"] = style
+        path = f"/boards/{urllib.parse.quote(board_id, safe='')}/cards"
+        return self._request("POST", path, body=body)
+
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        body: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         url = f"{MIRO_API_BASE}{path}"
         last_exception: Exception | None = None
         for attempt in range(1, self._max_attempts + 1):
             self._enforce_rate_limit()
             try:
-                return self._send(method, url)
+                return self._send(method, url, body=body)
             except MiroRateLimitError as e:
                 last_exception = e
                 logger.warning(
@@ -179,19 +227,31 @@ class MiroClient:
             time.sleep(wait)
         self._last_request_at = time.monotonic()
 
-    def _send(self, method: str, url: str) -> dict[str, Any]:
+    def _send(
+        self,
+        method: str,
+        url: str,
+        *,
+        body: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        headers = {
+            "Authorization": f"Bearer {self._api_token}",
+            "Accept": "application/json",
+        }
+        data: bytes | None = None
+        if body is not None:
+            data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+            headers["Content-Type"] = "application/json"
         req = urllib.request.Request(
             url,
             method=method,
-            headers={
-                "Authorization": f"Bearer {self._api_token}",
-                "Accept": "application/json",
-            },
+            headers=headers,
+            data=data,
         )
         try:
             with urllib.request.urlopen(req, timeout=self._timeout) as response:
-                body = response.read().decode("utf-8")
-                return json.loads(body) if body else {}
+                body_text = response.read().decode("utf-8")
+                return json.loads(body_text) if body_text else {}
         except urllib.error.HTTPError as e:
             status = e.code
             try:
@@ -270,10 +330,19 @@ def _build_miro_screens(
             data = frame.get("data") if isinstance(frame.get("data"), dict) else {}
             name = data.get("title") or frame.get("id") or ""
             buckets = _collect(by_frame.get(frame.get("id"), []))
+            # Phase E (v0.4.0): writeback の card 配置位置計算のため座標情報を保持。
+            # Miro REST v2 では x/y は `position` フィールド、width/height は
+            # `geometry` フィールドに分かれている（create_card() の payload と整合）。
+            position = frame.get("position") if isinstance(frame.get("position"), dict) else {}
+            geometry = frame.get("geometry") if isinstance(frame.get("geometry"), dict) else {}
             screens.append({
                 "name": name,
                 "node_id": frame.get("id", ""),
                 "description": "",
+                "x": position.get("x", 0),
+                "y": position.get("y", 0),
+                "width": geometry.get("width", 0),
+                "height": geometry.get("height", 0),
                 "texts": buckets["texts"],
                 "components": buckets["components"],
                 "notes": buckets["notes"],

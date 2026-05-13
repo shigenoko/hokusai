@@ -453,6 +453,29 @@ def _parse_design_rate_limit(raw: object) -> DesignRateLimitConfig:
     return DesignRateLimitConfig(requests_per_second=rps)
 
 
+def _parse_writeback_config(raw: object):
+    """Phase E (v0.4.0): figma.writeback / miro.writeback サブ設定をパース。
+
+    設定例:
+        writeback:
+          enabled: true
+          on_failure: warn
+
+    無効値は既定（disabled, warn）にフォールバック。
+    """
+    from .models import WritebackConfig
+    if not isinstance(raw, dict):
+        return WritebackConfig()
+    defaults = WritebackConfig()
+    enabled = raw.get("enabled", defaults.enabled)
+    if not isinstance(enabled, bool):
+        enabled = defaults.enabled
+    on_failure = raw.get("on_failure", defaults.on_failure)
+    if on_failure not in {"warn", "block", "skip"}:
+        on_failure = defaults.on_failure
+    return WritebackConfig(enabled=enabled, on_failure=on_failure)
+
+
 def _parse_figma_config(config_dict: dict) -> FigmaIntegrationConfig:
     """figma 設定をパース
 
@@ -470,6 +493,9 @@ def _parse_figma_config(config_dict: dict) -> FigmaIntegrationConfig:
             backoff_seconds: 5
           rate_limit:
             requests_per_second: 1.5
+          writeback:                # Phase E (v0.4.0)
+            enabled: true
+            on_failure: warn        # warn | block | skip
     """
     raw = config_dict.get("figma")
     if not isinstance(raw, dict):
@@ -521,6 +547,7 @@ def _parse_figma_config(config_dict: dict) -> FigmaIntegrationConfig:
         on_failure=on_failure,
         retry=_parse_design_retry(raw.get("retry")),
         rate_limit=_parse_design_rate_limit(raw.get("rate_limit")),
+        writeback=_parse_writeback_config(raw.get("writeback")),
     )
 
 
@@ -591,6 +618,7 @@ def _parse_miro_config(config_dict: dict) -> MiroIntegrationConfig:
         on_failure=on_failure,
         retry=_parse_design_retry(raw.get("retry")),
         rate_limit=_parse_design_rate_limit(raw.get("rate_limit")),
+        writeback=_parse_writeback_config(raw.get("writeback")),
     )
 
 

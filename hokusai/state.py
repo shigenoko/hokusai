@@ -224,6 +224,16 @@ class WorkflowState(TypedDict):
     # 例: {"figma": {"status": "ok", "error": null}, "miro": {"status": "failed", "error": "401"}}
     design_per_source_status: dict
 
+    # === Phase E (v0.4.0): Figma / Miro 書き戻し（writeback）===
+    # 主 frame / board の識別子。Phase 3 で確定、Phase 8a 完了時に dispatcher へ渡す。
+    # 詳細: docs/hokusai-figma-miro-writeback-implementation-plan.md §7.1
+    primary_figma_file_key: Optional[str]   # Figma URL から抽出
+    primary_figma_frame_id: Optional[str]   # 参照用、Operations Console 表示
+    primary_figma_node_id: Optional[str]    # API client_meta.node_id に渡す
+    primary_figma_node_offset: Optional[dict]  # 既定 {"x":0,"y":0}、frame 左上 pin
+    primary_miro_frame_id: Optional[str]
+    primary_miro_board_id: Optional[str]
+
     # === メタデータ ===
     created_at: str
     updated_at: str
@@ -234,6 +244,7 @@ class WorkflowState(TypedDict):
 
     # === Human-in-the-loop ===
     waiting_for_human: bool
+    waiting_for_human_reason: Optional[str]  # waiting_for_human=True の理由（書き戻し失敗等）
     human_input_request: Optional[str]
     last_environment_error: Optional[dict]  # Phase 6で検出された環境問題の情報
 
@@ -364,11 +375,19 @@ def create_initial_state(
         design_review_result=None,
         design_sync_errors=[],
         design_per_source_status={},
+        # Phase E (v0.4.0): writeback 用 primary frame / board
+        primary_figma_file_key=None,
+        primary_figma_frame_id=None,
+        primary_figma_node_id=None,
+        primary_figma_node_offset=None,
+        primary_miro_frame_id=None,
+        primary_miro_board_id=None,
         created_at=now,
         updated_at=now,
         total_retry_count=0,
         audit_log=[],
         waiting_for_human=False,
+        waiting_for_human_reason=None,
         human_input_request=None,
         last_environment_error=None,
         waiting_for_pr_approval=False,
