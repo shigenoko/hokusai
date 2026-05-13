@@ -351,7 +351,13 @@ def main():
     #   - YAML 解析失敗・I/O エラーなど「profile は解決できたが config が壊れて
     #     いる」系 → best-effort で既定 env 名にフォールバックして続行する。
     if args.command == "notion-setup":
-        from .config.profiles import ProfileError
+        from .config.profiles import (
+            ConflictingProfileAndConfigError,
+            InvalidProfileNameError,
+            ProfileError,
+            ProfileNotFoundError,
+            ProfileRegistryNotFoundError,
+        )
 
         notion_setup_profile = getattr(args, "profile", None)
         notion_setup_config = None
@@ -361,15 +367,39 @@ def main():
                 notion_setup_config = create_config_from_env_and_file(
                     notion_setup_config_arg, profile_name=notion_setup_profile
                 )
-            except ProfileError as e:
-                # ユーザーが明示指定した profile が解決できない → 中断
+            except ConflictingProfileAndConfigError as e:
+                # --profile と --config の同時指定（引数の併用不可）
+                print(f"✗ 引数の併用エラー: {e}")
+                print("  --profile と --config はどちらか一方のみ指定してください")
+                sys.exit(1)
+            except ProfileNotFoundError as e:
+                print(f"✗ profile '{notion_setup_profile}' が見つかりません: {e}")
                 print(
-                    f"✗ profile '{notion_setup_profile}' を解決できませんでした: "
+                    "  確認: ~/.hokusai/profiles.yaml に "
+                    f"'{notion_setup_profile}' が登録されているか"
+                )
+                sys.exit(1)
+            except ProfileRegistryNotFoundError as e:
+                print(f"✗ profile registry が見つかりません: {e}")
+                print(
+                    "  確認: ~/.hokusai/profiles.yaml を作成するか、"
+                    "HOKUSAI_PROFILES_FILE 環境変数で path を指定してください"
+                )
+                sys.exit(1)
+            except InvalidProfileNameError as e:
+                print(f"✗ profile 名の形式が不正: {e}")
+                sys.exit(1)
+            except ProfileError as e:
+                # 上記でカバーされない ProfileError 派生（YAML 構造エラー等）
+                print(
+                    f"✗ profile '{notion_setup_profile}' の registry 解析に失敗: "
                     f"{type(e).__name__}: {e}"
                 )
                 sys.exit(1)
             except Exception as e:
-                # profile は解決できたが config が壊れている / I/O エラー等
+                # profile 解決自体は成功したが config 読み込みで失敗（YAML 解析失敗・
+                # I/O エラー等）。意図しない Notion 操作にはつながらないため、警告
+                # を出して既定 env 名で続行する。
                 print(
                     f"⚠️ profile '{notion_setup_profile}' の config 読み込みに失敗: "
                     f"{type(e).__name__}: {e}"

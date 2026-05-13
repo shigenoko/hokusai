@@ -44,7 +44,11 @@ profile config の env 変数名を自動採用する。
 
 - `--profile` を指定しない実行は従来通り `HOKUSAI_NOTION_API_TOKEN` /
   `HOKUSAI_NOTION_WORKFLOWS_DB_ID` / `HOKUSAI_NOTION_PR_DB_ID` を使う。
-- 既存の rc マーカー（profile 名なし）はそのまま尊重され、上書きされない。
+- `--profile` 未指定（`profile_name=None`）での `--persist` は従来マーカー
+  （`# === HOKUSAI Notion Dashboard ... ===`）を使うため、既存ブロックは
+  従来通り置換される。
+- `--profile <name>` を指定した実行は profile 別マーカー（`profile=<name>`）を
+  使うため、既存の legacy ブロックを上書きせず、同じ rc ファイル内に共存できる。
 
 詳細は `docs/hokusai-issue-17-notion-setup-profile-aware-implementation-plan.md` に対応。
 

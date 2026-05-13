@@ -94,37 +94,43 @@ def persist_env_vars(
 
 ### 3.4 PERSIST マーカーの profile-aware 化
 
-#### 3.4.1 マーカー仕様
+#### 3.4.1 マーカー仕様（実装版）
+
+実装した最終仕様は既存の `# === ... ===` 形式を踏襲して以下のとおり。
 
 ```
-# >>> HOKUSAI Notion Dashboard env (profile=default) >>>
+# === HOKUSAI Notion Dashboard (managed by `hokusai notion-setup`) ===
 ...
-# <<< HOKUSAI Notion Dashboard env (profile=default) <<<
+# === END HOKUSAI Notion Dashboard ===
 
-# >>> HOKUSAI Notion Dashboard env (profile=hokusai) >>>
+# === HOKUSAI Notion Dashboard (managed by `hokusai notion-setup`, profile=hokusai) ===
 ...
-# <<< HOKUSAI Notion Dashboard env (profile=hokusai) <<<
+# === END HOKUSAI Notion Dashboard (profile=hokusai) ===
 ```
 
 - profile 名を含めることで、複数 profile の env を同じ rc ファイル内に並べて持てる
-- 既存マーカー（profile 名なし）が見つかった場合は `profile=default` 扱いとして互換的に扱う（後方互換）
+- 既存ユーザー向けの「profile 名なしマーカー」と profile マーカーは**別マーカー**として共存させる（legacy ブロックを `profile=default` で置換しない）
 
-#### 3.4.2 マーカー検出ロジック
+> 検討初期は `# >>> ... >>>` / `# <<< ... <<<` 形式 + 「legacy を `profile=default` で置換」を案としていたが、既存ブロックを破壊しないために legacy / profile を独立マーカーとし、書式も既存の `# === ... ===` を踏襲する実装に最終化した。
+
+#### 3.4.2 マーカー検出ロジック（実装版）
 
 ```python
-def _build_markers(profile_name: str | None) -> tuple[str, str]:
-    name = profile_name or "default"
+def _build_profile_markers(profile_name: str) -> tuple[str, str]:
     return (
-        f"# >>> HOKUSAI Notion Dashboard env (profile={name}) >>>",
-        f"# <<< HOKUSAI Notion Dashboard env (profile={name}) <<<",
+        f"# === HOKUSAI Notion Dashboard "
+        f"(managed by `hokusai notion-setup`, profile={profile_name}) ===",
+        f"# === END HOKUSAI Notion Dashboard (profile={profile_name}) ===",
     )
 ```
 
-既存マーカー `# >>> HOKUSAI Notion Dashboard env >>>` 形式が rc 内にある場合は、warning を出した上で `profile=default` として置換する（または手動移行を促す）。
+`profile_name=None` の呼び出しでは従来の `PERSIST_BEGIN_MARKER` / `PERSIST_END_MARKER` 定数を使う。
 
 #### 3.4.3 既存マーカーとの後方互換
 
-`PERSIST_BEGIN_MARKER` / `PERSIST_END_MARKER` 定数は残し、profile 名指定なしの呼び出し（既存ユーザー）には従来マーカーを使う。
+`PERSIST_BEGIN_MARKER` / `PERSIST_END_MARKER` 定数はそのまま保持。
+- profile 名指定なしの呼び出し（既存ユーザー）→ 従来マーカーを使うので既存ブロックは置換される
+- profile 名指定ありの呼び出し → profile 別マーカーを使うので既存 legacy ブロックは**残ったまま共存**する
 
 ### 3.5 設定モデルの拡張不要
 
