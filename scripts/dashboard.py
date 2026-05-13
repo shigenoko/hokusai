@@ -133,8 +133,11 @@ def _render_notion_identification_section() -> str:
     process memory に 5 分 cache される。
 
     取得失敗時は graceful degrade（panel 全体は落とさない）。
+    panel を落とさない方針は維持しつつ、例外型名は warning ログに残して
+    設定不整合・実装バグを追跡可能にする。
     """
     import html as _html
+    import logging
 
     try:
         from hokusai.config import get_config
@@ -153,8 +156,15 @@ def _render_notion_identification_section() -> str:
             workflows_db_id_env=nd_cfg.workflows_db_id_env,
             pull_requests_db_id_env=nd_cfg.pull_requests_db_id_env,
         )
-    except Exception:
-        # 設定読み込み失敗等は panel 全体に影響させない
+    except Exception as e:
+        # 設定読み込み失敗 / 想定外エラーは panel 全体に影響させないが、
+        # 設定不整合や実装バグを後から追えるようログには型名を残す。
+        # stacktrace は debug レベル（必要時のみ詳細を確認できる）。
+        _log = logging.getLogger("dashboard.notion_identification")
+        _log.warning(
+            "Notion identification section render failed: %s", type(e).__name__,
+        )
+        _log.debug("Stacktrace:", exc_info=True)
         return ""
 
     def _esc(s: object) -> str:
