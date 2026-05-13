@@ -8,6 +8,7 @@ Phase 8a 完了時に Miro board に進捗 card を作成する。
 
 from __future__ import annotations
 
+import urllib.error
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -141,9 +142,10 @@ class MiroWritebackDispatcher:
                 payload_for_outbox=payload_for_outbox,
                 error=str(e),
             )
-        except Exception as e:
+        except (urllib.error.URLError, TimeoutError, OSError, RuntimeError) as e:
+            # ネットワーク / OS エラー / _request 内最終 raise の RuntimeError
             logger.warning(
-                "miro create_card unexpected error: %s",
+                "miro create_card network/runtime error: %s",
                 type(e).__name__,
             )
             return self._handle_failure(

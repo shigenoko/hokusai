@@ -21,7 +21,6 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-
 # 計画書 §8.4: 5 回手動再送で errors に自動移動
 MAX_ATTEMPT_COUNT = 5
 

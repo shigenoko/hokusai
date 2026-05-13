@@ -21,7 +21,6 @@ from __future__ import annotations
 
 from urllib.parse import quote
 
-
 # 構成要素のエンコード時に安全文字として残すもの（英数字に加えて）
 # `:` は区切り文字として使うため必ずエンコードする
 _SAFE_CHARS = "-_.~"

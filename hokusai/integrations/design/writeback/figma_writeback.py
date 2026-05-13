@@ -8,6 +8,7 @@ Phase 8a 完了時に Figma frame コメントを投稿する。
 
 from __future__ import annotations
 
+import urllib.error
 from dataclasses import dataclass
 from typing import Any
 
@@ -150,11 +151,12 @@ class FigmaWritebackDispatcher:
                 payload_for_outbox=payload_for_outbox,
                 error=str(e),
             )
-        except Exception as e:
-            # ネットワーク / urllib エラー等。token は ValueError で弾く想定なので
-            # ここでは例外メッセージから token を漏らさないため type 名のみ記録。
+        except (urllib.error.URLError, TimeoutError, OSError, RuntimeError) as e:
+            # ネットワーク / OS エラー / _request 内最終 raise の RuntimeError。
+            # token は ValueError で post_comment 入口で弾く想定なので、ここでは
+            # 例外メッセージから token を漏らさないため type 名のみ記録。
             logger.warning(
-                "figma post_comment unexpected error: %s",
+                "figma post_comment network/runtime error: %s",
                 type(e).__name__,
             )
             return self._handle_failure(

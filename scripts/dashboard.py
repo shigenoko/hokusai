@@ -7278,13 +7278,13 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         エラーレスポンスは `{"success": False, "errors": [...]}` 配列形式で統一。
         """
         try:
+            from hokusai.config import get_config
             from hokusai.integrations.design.writeback import (
                 OutboxStore,
                 build_figma_dispatcher,
                 build_miro_dispatcher,
                 load_writeback_config,
             )
-            from hokusai.config import get_config
             target = self._get_writeback_target(source)
             store = OutboxStore(DB_PATH, target=target)
 
