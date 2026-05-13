@@ -266,11 +266,17 @@ def dispatch_phase8a_writeback(
             )
             result.figma = figma_dispatcher.dispatch(args)
         else:
-            logger.info(
-                "figma writeback skipped: primary_figma_* not set (workflow=%s)",
-                wf_id,
-            )
-            result.figma = {"status": "skipped", "error": "primary_figma_* not set"}
+            # 何が欠けていたか正確に伝える（workflow_id / primary_* を区別）
+            missing = []
+            if not wf_id:
+                missing.append("workflow_id")
+            if not file_key:
+                missing.append("primary_figma_file_key")
+            if not node_id:
+                missing.append("primary_figma_node_id")
+            reason = "missing: " + ", ".join(missing)
+            logger.info("figma writeback skipped: %s (workflow=%s)", reason, wf_id)
+            result.figma = {"status": "skipped", "error": reason}
 
     if miro_dispatcher is not None:
         board_id = state.get("primary_miro_board_id")
@@ -278,7 +284,8 @@ def dispatch_phase8a_writeback(
         if board_id and frame_id and wf_id:
             # frame_meta は miro_context から復元（無ければ 0 で構築）
             # MiroClient.to_common_context() の screens は node_id キーを使う。
-            # 座標情報（x/y/width）は _build_miro_screens が geometry から保存する。
+            # _build_miro_screens は x/y を position フィールドから、width/height を
+            # geometry フィールドから取得して screens に格納する（Miro API スキーマ準拠）。
             miro_ctx = state.get("miro_context") or {}
             screens = miro_ctx.get("screens") or []
             frame_meta: dict[str, Any] = {}
@@ -308,10 +315,16 @@ def dispatch_phase8a_writeback(
             )
             result.miro = miro_dispatcher.dispatch(args)
         else:
-            logger.info(
-                "miro writeback skipped: primary_miro_* not set (workflow=%s)",
-                wf_id,
-            )
-            result.miro = {"status": "skipped", "error": "primary_miro_* not set"}
+            # 何が欠けていたか正確に伝える（workflow_id / primary_* を区別）
+            missing = []
+            if not wf_id:
+                missing.append("workflow_id")
+            if not board_id:
+                missing.append("primary_miro_board_id")
+            if not frame_id:
+                missing.append("primary_miro_frame_id")
+            reason = "missing: " + ", ".join(missing)
+            logger.info("miro writeback skipped: %s (workflow=%s)", reason, wf_id)
+            result.miro = {"status": "skipped", "error": reason}
 
     return result
