@@ -920,6 +920,8 @@ def _cleanup_writeback_old_errors(config) -> None:
 
     参考: docs/hokusai-figma-miro-writeback-implementation-plan.md §5.3, §11 (Step 7)
     """
+    import sqlite3
+
     try:
         from .integrations.design.writeback import OutboxStore, WritebackTarget
     except ImportError:
@@ -931,8 +933,10 @@ def _cleanup_writeback_old_errors(config) -> None:
         try:
             store = OutboxStore(db_path, target=target)
             total += store.cleanup_old_errors(retention_days=30)
-        except Exception:
-            # テーブル不在等（v0.3.x DB）は無視
+        except sqlite3.Error:
+            # テーブル不在 / スキーマ古い等（v0.3.x DB）は無視
+            # OS / I/O エラーやその他の異常は上位に伝播させ、運用者が
+            # `hokusai cleanup --stale` の出力で気付けるようにする。
             continue
     if total > 0:
         print(f"🧹 writeback cleanup: {total} 件の 30 日経過 errors / idempotency を削除")

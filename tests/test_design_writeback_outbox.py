@@ -68,7 +68,11 @@ def test_writeback_tables_created_on_new_db(tmp_path):
 
 
 def test_writeback_indexes_created_on_new_db(tmp_path):
-    """新規 DB を開くと Phase E の 7 index が全て作成される"""
+    """新規 DB を開くと Phase E の 9 index が全て作成される。
+
+    errors 側の idempotency_key index は writeback の 3 段階チェック
+    （is_in_errors）が O(1) で動くために必須。
+    """
     db_path = tmp_path / "wf.db"
     SQLiteStore(db_path)
 
@@ -76,9 +80,11 @@ def test_writeback_indexes_created_on_new_db(tmp_path):
         "idx_figma_outbox_workflow",
         "idx_figma_outbox_event",
         "idx_figma_errors_workflow",
+        "idx_figma_errors_idempotency",
         "idx_miro_outbox_workflow",
         "idx_miro_outbox_event",
         "idx_miro_errors_workflow",
+        "idx_miro_errors_idempotency",
         "idx_writeback_idempotency_workflow",
     ]
     for index in expected_indexes:
