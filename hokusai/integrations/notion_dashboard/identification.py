@@ -39,12 +39,26 @@ def mask_db_id(db_id: str | None) -> str:
 def notion_db_url(db_id: str | None) -> str:
     """Notion DB の Web URL を生成する。
 
-    Notion の DB URL は `https://www.notion.so/<id_without_dashes>` 形式。
-    `None` / 空の場合は空文字を返す。
+    Notion の DB ID は UUID v4 形式（ダッシュ除去後 32 桁の hex）。
+    不正な入力（空 / 短すぎ / 非 hex）からはリンクを生成せず空文字を返す。
+    これにより panel のリンクをクリックしても 404 になるような表示を抑止する。
+
+    Returns:
+        妥当な ID の場合: `https://www.notion.so/<id_without_dashes>`
+        不正な入力: 空文字
     """
     if not db_id or not isinstance(db_id, str):
         return ""
-    return f"https://www.notion.so/{db_id.replace('-', '')}"
+    normalized = db_id.replace("-", "")
+    # Notion DB ID は 32 桁の hex（UUID）。長さと文字種を検証して
+    # 不正な値からはリンクを生成しない。
+    if len(normalized) != 32:
+        return ""
+    try:
+        int(normalized, 16)
+    except ValueError:
+        return ""
+    return f"https://www.notion.so/{normalized}"
 
 
 # ---------------------------------------------------------------------------

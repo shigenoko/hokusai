@@ -150,8 +150,18 @@ def _render_notion_identification_section() -> str:
         if nd_cfg is None:
             return ""
 
+        # profile 名取得の優先順位:
+        #   1. dashboard 起動時に渡された HOKUSAI_DASHBOARD_PROFILE (= HOKUSAI_PROFILE_NAME)
+        #   2. WorkflowConfig.profile_name（v0.4.x 時点では未公開属性のため
+        #      フォールバックとしてのみ使う）
+        # WorkflowConfig 自体は profile_name 属性を持たない実装が多く、
+        # 1 を優先しないと profile 起動でも識別欄が (none) になってしまう。
+        resolved_profile = HOKUSAI_PROFILE_NAME or getattr(
+            cfg, "profile_name", None
+        )
+
         ident = build_notion_identification(
-            profile_name=getattr(cfg, "profile_name", None),
+            profile_name=resolved_profile,
             api_token_env=nd_cfg.api_token_env,
             workflows_db_id_env=nd_cfg.workflows_db_id_env,
             pull_requests_db_id_env=nd_cfg.pull_requests_db_id_env,

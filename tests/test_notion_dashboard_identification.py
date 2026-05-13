@@ -72,6 +72,28 @@ def test_notion_db_url_empty():
     assert notion_db_url(None) == ""
 
 
+def test_notion_db_url_rejects_invalid_inputs():
+    """ダッシュ除去後 32 桁の hex 以外はリンク生成を抑止"""
+    # 短すぎる
+    assert notion_db_url("abc") == ""
+    # 長すぎる
+    assert notion_db_url("a" * 33) == ""
+    # 非 hex
+    assert notion_db_url("g" * 32) == ""
+    assert notion_db_url("not-a-valid-notion-id-zzzzzzzzzzz") == ""
+    # ダッシュは除去された後の長さで判定するので、別の文字を含む UUID 形式も拒否
+    assert notion_db_url("35f85495-565d-81c9-aea4-f4a137ed82fX") == ""
+
+
+def test_notion_db_url_accepts_uuid_with_or_without_dashes():
+    """ダッシュ有無どちらの 32 桁 hex も受け入れる"""
+    canonical = "35f85495565d81c9aea4f4a137ed82ff"
+    assert notion_db_url("35f85495-565d-81c9-aea4-f4a137ed82ff") == (
+        f"https://www.notion.so/{canonical}"
+    )
+    assert notion_db_url(canonical) == f"https://www.notion.so/{canonical}"
+
+
 # ---------------------------------------------------------------------------
 # get_bot_display_name
 # ---------------------------------------------------------------------------
