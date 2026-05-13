@@ -122,7 +122,7 @@ POST:
 | `/api/figma/move-to-errors` | `{"id": <outbox_id>}` | outbox から errors へ強制移動 |
 | `/api/miro/*` | 同上 | Miro 版 |
 
-**v0.4.0 の制約**: 本 API は **outbox 行のみ** が対象。errors テーブル上の行を直接再送する経路は v0.4.0 では提供していない。errors 行の再送が必要な場合は、Phase 8a を同じ commit で再実行することで dispatcher を新規呼び出しできる。errors 行の手動再送 API は v0.4.1 以降で追加検討。
+**v0.4.0 の制約**: 本 API は **outbox 行のみ** が対象。errors テーブル上の行を直接再送する経路は v0.4.0 では提供していない（v0.4.1 以降で追加検討）。errors 行の復旧手順は §5.4 を参照。
 
 ### 5.2. 再送のフロー
 
@@ -134,13 +134,27 @@ attempt_count +1
 成功 → idempotency に記録、outbox から削除
 失敗 → outbox 維持、last_error 更新
     ↓ (attempt_count == 5)
-errors テーブルへ自動移動（自動経路では再投稿しない）
-    ↓ (運用者が必要なら)
-Phase 8a を同じ commit で再実行 → dispatcher が新規呼び出しされ、errors は
-"3 段階チェック" の skip 対象だが force=True 経路で再試行できる（内部 API）
+errors テーブルへ自動移動（自動経路では再投稿しない、§5.4 参照）
 ```
 
-### 5.3. UI 拡張（v0.4.1 以降）
+### 5.4. errors 行の復旧手順（v0.4.0）
+
+errors テーブルに移動した行は、retry-pending API では復旧できない（API は outbox 行のみが対象、Phase 8a の自動 dispatch も `force=True` を渡さない）。以下のいずれかで対応:
+
+1. **新しい commit で Phase 8a を再実行**（推奨）
+   - 冪等キーが `commit_sha`（revision）を含むため、commit が変われば新規 dispatch
+   - 元の errors 行は残るが、新規投稿は成功する
+2. **SQL で errors 行を直接削除**（緊急手段、運用上は推奨されない）
+   ```sql
+   DELETE FROM figma_sync_errors WHERE idempotency_key = '...';
+   -- 必要に応じて idempotency 記録も削除すれば、同 idempotency_key で再 dispatch 可能
+   DELETE FROM design_writeback_idempotency WHERE idempotency_key = '...';
+   ```
+3. **30 日待機して `hokusai cleanup --stale`** で自動削除（緊急性が低い場合）
+
+v0.4.1 以降では Operations Console に「errors → outbox 復帰」API を追加検討。
+
+### 5.5. UI 拡張（v0.4.1 以降）
 
 計画書 §10.1 のパネル統合（HTML 表示）は v0.4.1 以降の対応。現状は API 経由で外部ツール（curl / jq）から確認:
 
@@ -219,7 +233,7 @@ profile ごとに `data_dir` が分離されているため、outbox / errors / 
 - Figma: PAT が target file に書き込み権限を持っているか
 - Miro: app token が board に access できるか
 
-errors テーブルに溜まっている場合は token を修正後、`force=true` で再送。
+errors テーブルに溜まっている場合は token を修正後、§5.4 の手順で復旧する（v0.4.0 では「新しい commit で Phase 8a を再実行」が最も安全）。
 
 ### 9.3. 重複投稿
 

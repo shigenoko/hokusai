@@ -7277,16 +7277,20 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             {"id": <outbox_id:int>}  個別再送（指定 outbox 行のみ）
             {}                       outbox の pending 全件を snapshot 取得して再送
             {"limit": <int>}         1 リクエストあたりの上限（既定 500、最大 5000）
-            {"force": true}          ※「同一 idempotency_key の payload が errors にあっても
-                                     新規 dispatch を許可する」フラグ。本 API では使われない
-                                     が、Phase 8a 等の他経路 dispatch から errors を bypass
-                                     する用途で予約されている。
+            {"force": true}          dispatch 時の 3 段階チェックのうち `errors` にある
+                                     idempotency_key を bypass する。通常運用では outbox
+                                     と errors は排他（5 回失敗で outbox → errors 移動時に
+                                     outbox 行を削除）のため意味を持たないが、外部から
+                                     SQL で errors 行を残したまま同じ payload を再投入
+                                     したケース等のレアな復旧用途で有効。
 
         **重要**: 本 API は outbox 行のみが対象。errors テーブル上の行を直接再送する
         経路は v0.4.0 にはなく、Operations Console から errors 行を outbox に戻す
         手段も提供していない（v0.4.1 で検討予定）。errors 行の再送が必要な場合は
-        Phase 8a を同じ commit で再実行することで、`force=true` 経路を通って
-        dispatcher を新規呼び出しできる。
+        以下のいずれかで対応:
+          1. 新しい commit で Phase 8a を再実行（idempotency_key が変わって新規 dispatch）
+          2. `hokusai cleanup --stale` で 30 日経過 errors を削除して上記 1 を実行
+          3. SQL で errors 行を直接削除（運用上は推奨されない緊急手段）
 
         全件モードはバッチサイズ単位でループし、100 件超の pending も処理する。
         エラーレスポンスは `{"success": False, "errors": [...]}` 配列形式で統一。
