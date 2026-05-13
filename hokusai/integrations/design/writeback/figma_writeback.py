@@ -240,8 +240,10 @@ class FigmaWritebackDispatcher:
     def retry(self, outbox_id: int, *, force: bool = False) -> dict[str, Any]:
         """手動再送（Operations Console から呼ぶ）。
 
-        attempt_count を +1 して **再試行を実行**し、その結果が enqueued（再失敗）で
-        かつ attempt_count が MAX に到達していたら errors へ移動する。
+        attempt_count を +1 して **再試行を実行**し、その結果が「失敗で outbox が
+        残るケース」（enqueued / blocked）で attempt_count が MAX に到達していたら
+        errors へ移動する。on_failure="block" の dispatcher でも MAX 到達時に確実に
+        errors 移動されるよう、blocked も対象に含める。
         5 回目の再送リクエストでも実際に投稿を試みる動作にするため、
         判定タイミングを dispatch 後にする。
         """
@@ -270,8 +272,13 @@ class FigmaWritebackDispatcher:
         )
         result = self.dispatch(args, force=force, from_retry=True)
 
-        # 再失敗かつ MAX 到達なら errors 移動
-        if result.get("status") == "enqueued" and new_count >= MAX_ATTEMPT_COUNT:
+        # 再失敗かつ MAX 到達なら errors 移動。
+        # enqueued（on_failure=warn）と blocked（on_failure=block）どちらも
+        # 「outbox に残っている失敗」なので、5 回目で errors に動かす。
+        if (
+            result.get("status") in ("enqueued", "blocked")
+            and new_count >= MAX_ATTEMPT_COUNT
+        ):
             self.store.move_to_errors(
                 outbox_id,
                 error=(

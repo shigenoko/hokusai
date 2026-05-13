@@ -311,6 +311,29 @@ def test_retry_moves_to_errors_at_max_attempts(store, mock_client):
     assert len(store.list_errors()) == 1
 
 
+def test_retry_moves_to_errors_at_max_with_block_policy(store, mock_client):
+    """on_failure="block" でも MAX 到達時に errors に移動する。
+
+    Copilot 指摘: block ポリシーだと dispatch 結果が status=blocked になり、
+    旧実装では "enqueued" だけを判定対象にしていたため errors 移動が起きなかった。
+    """
+    from hokusai.integrations.design.writeback import MAX_ATTEMPT_COUNT
+    mock_client.post_comment.side_effect = FigmaAPIError(500, "ServerError")
+    dispatcher = FigmaWritebackDispatcher(mock_client, store, on_failure="block")
+
+    dispatcher.dispatch(_args())
+    outbox = store.list_outbox()[0]
+
+    last_result = None
+    for _ in range(MAX_ATTEMPT_COUNT):
+        last_result = dispatcher.retry(outbox.id)
+
+    assert last_result is not None
+    assert last_result["status"] == "moved_to_errors"
+    assert len(store.list_outbox()) == 0
+    assert len(store.list_errors()) == 1
+
+
 def test_retry_not_found(store, mock_client):
     dispatcher = FigmaWritebackDispatcher(mock_client, store)
     result = dispatcher.retry(99999)

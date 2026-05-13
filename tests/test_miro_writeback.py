@@ -200,6 +200,28 @@ def test_retry_moves_to_errors_at_max(store, mock_client):
     assert len(store.list_errors()) == 1
 
 
+def test_retry_moves_to_errors_at_max_with_block_policy(store, mock_client):
+    """on_failure="block" でも MAX 到達時に errors に移動する。
+
+    Copilot 指摘: block ポリシーだと dispatch 結果が status=blocked になり、
+    旧実装では "enqueued" だけを判定対象にしていたため errors 移動が起きなかった。
+    """
+    mock_client.create_card.side_effect = MiroAPIError(500, "err")
+    dispatcher = MiroWritebackDispatcher(mock_client, store, on_failure="block")
+
+    dispatcher.dispatch(_args())
+    outbox = store.list_outbox()[0]
+
+    last = None
+    for _ in range(MAX_ATTEMPT_COUNT):
+        last = dispatcher.retry(outbox.id)
+
+    assert last is not None
+    assert last["status"] == "moved_to_errors"
+    assert len(store.list_outbox()) == 0
+    assert len(store.list_errors()) == 1
+
+
 def test_dispatcher_requires_miro_target(store, mock_client):
     figma_store = OutboxStore(store.db_path, target=WritebackTarget.FIGMA)
     with pytest.raises(ValueError):
