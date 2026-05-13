@@ -7342,20 +7342,22 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             if specific_id is not None:
                 results.append(dispatcher.retry(specific_id, force=force))
             else:
-                # ページング処理: 100 件単位で取得し、limit 到達 or 取得 0 件で停止
-                processed_ids: set[int] = set()
-                while len(results) < max_total:
-                    entries = store.list_outbox(limit=100)
-                    # retry で outbox から削除 / errors 移動される行があるため、
-                    # 同じ id を 2 度処理しないよう既処理集合で除外
-                    new_entries = [e for e in entries if e.id not in processed_ids]
-                    if not new_entries:
+                # snapshot 方式: 最初に max_total 件を一括取得して、その snapshot を
+                # 処理する。
+                #
+                # 旧実装（ループで list_outbox を呼び直す方式）には問題があった:
+                # retry が失敗すると updated_at が更新され、その行が常に DESC 順の
+                # 上位 100 件に残り続けるため、new_entries が空になって break。
+                # 結果、100 件超の古い pending が永遠に処理されない。
+                #
+                # snapshot 方式なら、retry 中に updated_at が変わっても snapshot は
+                # 固定なので、最初に取得した max_total 件を確実に処理できる。
+                # retry で削除 / errors 移動された行は次の取得対象から自然に消える。
+                snapshot = store.list_outbox(limit=max_total)
+                for e in snapshot:
+                    if len(results) >= max_total:
                         break
-                    for e in new_entries:
-                        if len(results) >= max_total:
-                            break
-                        processed_ids.add(e.id)
-                        results.append(dispatcher.retry(e.id, force=force))
+                    results.append(dispatcher.retry(e.id, force=force))
 
             self._send_json_response({
                 "success": True,

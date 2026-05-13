@@ -43,15 +43,29 @@ def test_build_idempotency_key_rejects_empty():
         )
 
 
-def test_build_idempotency_key_rejects_colon():
-    """構成要素に ':' が含まれると曖昧化するため拒否"""
-    with pytest.raises(ValueError):
-        build_idempotency_key(
-            workflow_id="wf:1",
-            event_type="phase8a_completed",
-            resource="frame",
-            revision="r",
-        )
+def test_build_idempotency_key_encodes_colons():
+    """構成要素に ':' を含む値は URL エンコードして結合（Figma node_id 対応）"""
+    # Figma node_id 例: "0:1" → "0%3A1" にエンコードされて区切り文字と曖昧化しない
+    key = build_idempotency_key(
+        workflow_id="wf_1",
+        event_type="phase8a_completed",
+        resource="figma_0:1",
+        revision="rev",
+    )
+    assert key == "wf_1:phase8a_completed:figma_0%3A1:rev"
+
+
+def test_build_idempotency_key_round_trip_decode():
+    """エンコード後の key を split + unquote で元の値を復元できる"""
+    from urllib.parse import unquote
+    key = build_idempotency_key(
+        workflow_id="wf_1",
+        event_type="phase8a_completed",
+        resource="figma_0:1",
+        revision="abc",
+    )
+    parts = [unquote(p) for p in key.split(":")]
+    assert parts == ["wf_1", "phase8a_completed", "figma_0:1", "abc"]
 
 
 # ---------------------------------------------------------------------------
@@ -127,6 +141,34 @@ def test_enqueue_is_upsert(figma_store: OutboxStore):
     entries = figma_store.list_outbox()
     assert len(entries) == 1
     assert entries[0].last_error == "error B"
+
+
+def test_enqueue_upsert_refreshes_payload_and_metadata(figma_store: OutboxStore):
+    """upsert 時に payload_json / workflow_id / profile_name / event_type も更新"""
+    figma_store.enqueue(
+        idempotency_key="key-1",
+        workflow_id="wf-old",
+        profile_name="company-a",
+        event_type="phase8a_completed",
+        payload={"mr_url": "https://old"},
+        error="initial",
+    )
+    figma_store.enqueue(
+        idempotency_key="key-1",
+        workflow_id="wf-new",
+        profile_name="company-b",
+        event_type="phase8a_completed",
+        payload={"mr_url": "https://new"},
+        error="updated",
+    )
+
+    entries = figma_store.list_outbox()
+    assert len(entries) == 1
+    e = entries[0]
+    assert e.workflow_id == "wf-new"
+    assert e.profile_name == "company-b"
+    assert e.payload["mr_url"] == "https://new"
+    assert e.last_error == "updated"
 
 
 def test_mark_succeeded_records_idempotency_and_removes_outbox(

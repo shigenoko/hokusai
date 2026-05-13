@@ -207,6 +207,9 @@ class OutboxStore:
         now = datetime.now().isoformat()
         payload_json = json.dumps(payload, ensure_ascii=False, default=str)
         with self._connect() as conn:
+            # 同じ idempotency_key で再 enqueue する場合、最新の payload / メタ情報も
+            # 更新する。Operations Console や手動再送で stale な内容を参照しないため。
+            # attempt_count はリセットせず保持（再送回数の累積を維持）。
             cursor = conn.execute(
                 f"""
                 INSERT INTO {self.target.outbox_table}
@@ -214,6 +217,10 @@ class OutboxStore:
                      payload_json, attempt_count, last_error, created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)
                 ON CONFLICT(idempotency_key) DO UPDATE SET
+                    workflow_id = excluded.workflow_id,
+                    profile_name = excluded.profile_name,
+                    event_type = excluded.event_type,
+                    payload_json = excluded.payload_json,
                     last_error = excluded.last_error,
                     updated_at = excluded.updated_at
                 """,
