@@ -17,6 +17,37 @@ HOKUSAI のすべての特筆すべき変更をこのファイルに記録する
 
 ---
 
+## [0.4.2] - 2026-05-14
+
+Operations Console の Notion 接続状態パネルに **「どの Notion か」識別情報を表示**
+（[#19](https://github.com/shigenoko/hokusai/issues/19) 対応）。
+
+v0.4.1 の profile-aware notion-setup（#17 / #18）の続編。複数 Notion ワークスペース
+を profile 単位で使い分けるときに、現在 dashboard がどの Notion につながっているかを
+一目で確認できるようにする。
+
+### Added
+
+- Notion 接続状態パネルに「接続先 Notion」セクションを追加:
+  - 現在 active な profile 名
+  - 使用中の env 変数名（`api_token_env`）
+  - Workflows DB / Pull Requests DB の ID（先頭 8 桁 + 末尾 4 桁マスク）
+  - 各 DB の Notion URL（クリック可能なリンク、title 属性に完全 ID）
+  - Bot user 名（Notion API `GET /users/me` から取得）
+- `NotionAPIClient.get_bot_info()` メソッドを追加。
+- `hokusai.integrations.notion_dashboard.identification` モジュール（`mask_db_id` /
+  `notion_db_url` / `get_bot_info`（5 分 TTL キャッシュ）/ `build_notion_identification`）。
+
+### 後方互換
+
+- Notion 連携が disabled の場合、Notion パネル自体が表示されない（従来通り）。
+- Notion API への bot info 取得に失敗しても panel は落とさず、`(unable to fetch)`
+  と表示して他項目（profile / env 名 / DB ID / DB URL）は通常通り表示する。
+
+詳細は `docs/hokusai-issue-19-notion-dashboard-panel-identification-implementation-plan.md` に対応。
+
+---
+
 ## [0.4.1] - 2026-05-14
 
 `hokusai notion-setup` の **profile-aware 化**（[#17](https://github.com/shigenoko/hokusai/issues/17) 対応）。

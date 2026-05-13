@@ -6,6 +6,14 @@ HOKUSAI 専用 Notion Integration を経由して、ワークフロー状態を 
 
 from .client import NotionAPIClient, NotionAPIError, NotionRateLimitError
 from .dispatcher import NotionSyncDispatcher
+from .identification import (
+    build_notion_identification,
+    clear_bot_info_cache,
+    get_bot_display_name,
+    get_bot_info,
+    mask_db_id,
+    notion_db_url,
+)
 from .pull_requests_db import PullRequestsDBClient
 from .setup import (
     NotionSetupError,
@@ -24,8 +32,14 @@ __all__ = [
     "NotionSyncDispatcher",
     "PullRequestsDBClient",
     "WorkflowsDBClient",
+    "build_notion_identification",
+    "clear_bot_info_cache",
     "detect_shell_rc",
+    "get_bot_display_name",
+    "get_bot_info",
     "is_valid_env_var_name",
+    "mask_db_id",
+    "notion_db_url",
     "persist_env_vars",
     "setup_notion_workspace",
 ]

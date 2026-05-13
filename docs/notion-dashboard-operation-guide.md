@@ -189,8 +189,26 @@ hokusai continue <workflow-id>
 | 設定 YAML の編集・バックアップ・復元 | 設定ページ |
 | 接続状態（gh / glab / notion / codex / claude）の再チェック | 接続状態ページ |
 | Notion 同期失敗の再送 | トップページの「Notion 同期パネル」 |
+| **接続先 Notion の識別**（v0.4.2〜） | トップページの「Notion 同期パネル」内「接続先 Notion」セクション |
 | ワークフローの緊急停止・cleanup | 一覧ページの操作ボタン |
 | ログ・checkpoint 詳細確認 | ワークフロー詳細ページ |
+
+##### 「接続先 Notion」セクションの見方（v0.4.2〜）
+
+複数の Notion ワークスペースを profile 単位で使い分けている場合、dashboard 起動時に
+「自分は今どの Notion につながっているか」を一目で確認できる:
+
+| 項目 | 例 | 意味 |
+|---|---|---|
+| Profile | `hokusai` | 現在 active な profile 名 |
+| API token env | `HOKUSAI_NOTION_API_TOKEN_4HOKUSAI` | 使用中の token env 変数名 |
+| Workflows DB | `35f85495...82ff`（リンク） | Workflows DB の ID（マスク済み、クリックで Notion に遷移） |
+| Pull Requests DB | `35f85495...c0dc`（リンク） | PR DB の ID（同上） |
+| Bot user | `HOKUSAI Integration (bot)` | Notion API `GET /users/me` から取得した integration 名 |
+
+DB ID は先頭 8 桁 + 末尾 4 桁のマスク表示。完全 ID はリンクの `title` 属性に持って
+おり、マウスホバーで確認可能。Bot user 情報は 5 分間 process memory にキャッシュ
+される（Notion API の rate limit 消費を抑えるため）。
 
 > Service Status は各ユーザーのローカル CLI 状態（claude / codex / gh / glab 認証、Figma / Miro / Notion / Jira / Linear の token 設定）の集合。複数ユーザーで共有する Notion ページに同期するのは last-writer-wins になるため Notion 連携は廃止。Operations Console の「接続状態ページ」で各自確認する。
 
