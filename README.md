@@ -140,13 +140,17 @@ HOKUSAI is an **operational framework** for integrating AI into real-world workf
 ### Standard
 
 - 10-phase LangGraph workflow (research → design → plan → implement → verify → review → branch hygiene → PR draft → unified review loop → record)
-- CLI commands: `start`, `continue`, `status`, `list`, `cleanup`, `pr-status`, `connect`
-- Web dashboard (`scripts/dashboard.py`) with a service connection status panel and a re-check button
+- CLI commands: `start`, `continue`, `status`, `list`, `cleanup`, `pr-status`, `connect`, `notion-setup`, `profile`, `dashboard`
+- Operations Console (`hokusai dashboard`) with service connection status, profile display, Basic Auth support, and retry/diagnostic panels
 - SQLite-based persistence and LangGraph checkpointing
 - LLM-based coding agent integration for autonomous implementation (Claude Code by default)
 - GitHub integration via the `gh` CLI
 - GitHub Issue task backend
+- Notion task backend and Notion dashboard sync with SQLite outbox-based retry
+- `hokusai notion-setup` for initial Notion workspace setup
+- Profile-based execution scopes for multiple projects/accounts (`--profile`, `hokusai profile list/show/doctor`)
 - Phase 7.5 branch hygiene checks (file scope, base-branch sync)
+- Figma / Miro design context integration, including read-only context extraction and optional writeback support
 - Customizable prompts in `prompts/`
 - `hokusai connect <github|gitlab>` / `hokusai connect --status` for guided CLI authentication and a quick connection-status read-out
 - Slack notifications (Incoming Webhook) for workflow start, human-review pauses, failures, PR creation, and completion
@@ -155,10 +159,11 @@ HOKUSAI is an **operational framework** for integrating AI into real-world workf
 
 The following components are present in the codebase but are not enabled by default. Behavior may change without notice.
 
-- **Notion task backend** — set `HOKUSAI_SKIP_NOTION=1` to skip Notion access.
 - **Multiple repositories** (mono-repo style) — single-repository setup is the default.
 - **Cross-LLM review** — requires multi-LLM setup.
-- **Jira / Linear / GitLab / Bitbucket integrations** — interfaces exist but are unfinished.
+- **Figma / Miro writeback** — disabled by default; enable per config and profile.
+- **Jira / Linear task backends and Bitbucket hosting** — interfaces exist but are unfinished.
+- **GitLab hosting** — client support exists, but the Phase 8 unified review loop is still GitHub-first.
 
 ## Prerequisites
 
@@ -197,10 +202,16 @@ hokusai continue <workflow-id>
 hokusai status <workflow-id>
 
 # Open the dashboard
-python scripts/dashboard.py
+hokusai dashboard
+
+# Use a profile for a specific project/account
+hokusai --profile company-a start https://github.com/your-org/your-repo/issues/1
+
+# Inspect configured profiles
+hokusai profile list
 ```
 
-State is stored under `~/.hokusai/` by default (`workflow.db`, `checkpoint.db`, `logs/`). Override with the `data_dir` config option if needed.
+State is stored under `~/.hokusai/` by default (`workflow.db`, `checkpoint.db`, `logs/`). Override with the `data_dir` config option if needed. For multi-project operation, use profiles to isolate `data_dir`, databases, worktrees, dashboard ports, and environment-variable names per project.
 
 ## Configuration
 
@@ -216,6 +227,51 @@ task_backend:
 git_hosting:
   type: github
 ```
+
+For profile-based operation, start from:
+
+- `configs/example-profiles.yaml` — profile registry example (`~/.hokusai/profiles.yaml`)
+- `configs/example-profile-company.yaml` — per-project configuration example
+
+Common profile commands:
+
+```bash
+hokusai profile list
+hokusai profile show company-a
+hokusai profile doctor company-a
+hokusai --profile company-a dashboard
+```
+
+### Notion dashboard setup (optional)
+
+HOKUSAI can create and sync a Notion operations dashboard through the Notion API. Token values are passed through environment variables, not YAML.
+
+```bash
+export HOKUSAI_NOTION_API_TOKEN="secret_..."
+hokusai notion-setup --parent-page-id <notion-page-id> --persist
+```
+
+After setup, the generated database IDs can be referenced through environment variables such as `HOKUSAI_NOTION_WORKFLOWS_DB_ID` and `HOKUSAI_NOTION_PR_DB_ID`.
+
+### Figma / Miro integration (optional)
+
+Figma and Miro integrations can read design context into the workflow. Writeback for comments/cards is available behind explicit config flags.
+
+```yaml
+figma:
+  enabled: true
+  api_token_env: HOKUSAI_FIGMA_API_TOKEN
+  writeback:
+    enabled: false
+
+miro:
+  enabled: true
+  api_token_env: HOKUSAI_MIRO_API_TOKEN
+  writeback:
+    enabled: false
+```
+
+API tokens should be provided through environment variables. Do not store them in YAML.
 
 ### Slack notifications (optional)
 
@@ -247,11 +303,14 @@ If sending fails (timeout, HTTP error, network error), the workflow continues ru
 - Implementation prompts: `prompts/`
 - Phase node sources: `hokusai/nodes/`
 - Configuration model: `hokusai/config/models.py`
+- Profile operation guide: `docs/profile-operation-guide.md`
+- Notion dashboard operation guide: `docs/notion-dashboard-operation-guide.md`
+- Figma / Miro operation guide: `docs/figma-miro-integration-operation-guide.md`
 
 ## Limitations
 
 - The unified review loop in Phase 8 currently assumes GitHub-based pull requests. GitLab/Bitbucket support is experimental.
-- The CLI is single-user; concurrent workflows on the same task URL are not supported.
+- Profiles support multiple projects/accounts in parallel, but concurrent workflows for the same task URL within the same profile are not supported.
 - Prompts in `prompts/` are tuned for Japanese-language tasks; English-language tuning is under way.
 
 ## License

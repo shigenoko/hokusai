@@ -140,13 +140,17 @@ HOKUSAI は、AI を実世界のワークフローに統合する **運用フレ
 ### 標準機能
 
 - 10 フェーズの LangGraph ワークフロー（調査 → 設計 → 計画 → 実装 → 検証 → レビュー → ブランチ衛生 → PR draft → 統合レビューループ → 記録）
-- CLI コマンド: `start`、`continue`、`status`、`list`、`cleanup`、`pr-status`、`connect`
-- Web ダッシュボード（`scripts/dashboard.py`）にサービス接続状態パネルと再チェックボタンを内蔵
+- CLI コマンド: `start`、`continue`、`status`、`list`、`cleanup`、`pr-status`、`connect`、`notion-setup`、`profile`、`dashboard`
+- Operations Console（`hokusai dashboard`）にサービス接続状態、profile 表示、Basic 認証、再送・診断パネルを内蔵
 - SQLite による永続化と LangGraph checkpoint
 - LLM ベースのコーディングエージェント連携による自律実装（デフォルトは Claude Code）
 - `gh` CLI 経由の GitHub 連携
 - GitHub Issue タスクバックエンド
+- Notion タスクバックエンドと Notion dashboard 同期（SQLite outbox による再送つき）
+- `hokusai notion-setup` による Notion workspace 初期セットアップ
+- 複数案件・複数アカウントを分離する profile 実行スコープ（`--profile`、`hokusai profile list/show/doctor`）
 - Phase 7.5 ブランチ衛生チェック（ファイルスコープ、ベースブランチ同期）
+- Figma / Miro デザインコンテキスト連携（read-only 取得と、設定で有効化する書き戻し）
 - `prompts/` 配下のカスタマイズ可能なプロンプト
 - `hokusai connect <github|gitlab>` / `hokusai connect --status` による CLI 認証導線と接続状態の一括表示
 - Slack 通知（Incoming Webhook 経由）— ワークフロー開始 / Human-in-the-loop 待機 / 失敗 / PR 作成 / 完了をチームへ通知
@@ -155,10 +159,11 @@ HOKUSAI は、AI を実世界のワークフローに統合する **運用フレ
 
 以下のコンポーネントはコードベースに含まれるがデフォルトでは有効化されない。挙動は予告なく変更される可能性がある。
 
-- **Notion タスクバックエンド** — `HOKUSAI_SKIP_NOTION=1` で Notion アクセスをスキップする
 - **複数リポジトリ対応**（モノレポ風） — デフォルトは単一リポジトリ
 - **クロス LLM レビュー** — 複数 LLM のセットアップが必要
-- **Jira / Linear / GitLab / Bitbucket 連携** — インターフェースは存在するが未完成
+- **Figma / Miro 書き戻し** — デフォルトでは無効。config / profile 単位で明示的に有効化する
+- **Jira / Linear タスクバックエンド、Bitbucket hosting** — インターフェースは存在するが未完成
+- **GitLab hosting** — クライアント実装はあるが、Phase 8 の統合レビューループは GitHub 優先
 
 ## 前提条件
 
@@ -197,10 +202,16 @@ hokusai continue <workflow-id>
 hokusai status <workflow-id>
 
 # ダッシュボードを開く
-python scripts/dashboard.py
+hokusai dashboard
+
+# 案件・アカウントごとの profile を指定して開始
+hokusai --profile company-a start https://github.com/your-org/your-repo/issues/1
+
+# profile 一覧を確認
+hokusai profile list
 ```
 
-状態はデフォルトで `~/.hokusai/` 配下に保存される（`workflow.db`、`checkpoint.db`、`logs/`）。必要に応じて設定の `data_dir` で上書き可能。
+状態はデフォルトで `~/.hokusai/` 配下に保存される（`workflow.db`、`checkpoint.db`、`logs/`）。必要に応じて設定の `data_dir` で上書き可能。複数案件で運用する場合は profile を使い、`data_dir`、DB、worktree、dashboard port、環境変数名を案件ごとに分離する。
 
 ## 設定
 
@@ -216,6 +227,51 @@ task_backend:
 git_hosting:
   type: github
 ```
+
+profile ベースで運用する場合は、以下のサンプルから始める。
+
+- `configs/example-profiles.yaml` — profile registry の例（`~/.hokusai/profiles.yaml`）
+- `configs/example-profile-company.yaml` — 案件ごとの config 例
+
+代表的な profile コマンド:
+
+```bash
+hokusai profile list
+hokusai profile show company-a
+hokusai profile doctor company-a
+hokusai --profile company-a dashboard
+```
+
+### Notion dashboard セットアップ（任意）
+
+HOKUSAI は Notion API 経由で Operations Dashboard を作成・同期できる。token 値は YAML ではなく環境変数で渡す。
+
+```bash
+export HOKUSAI_NOTION_API_TOKEN="secret_..."
+hokusai notion-setup --parent-page-id <notion-page-id> --persist
+```
+
+セットアップ後に生成された DB ID は、`HOKUSAI_NOTION_WORKFLOWS_DB_ID`、`HOKUSAI_NOTION_PR_DB_ID` などの環境変数から参照する。
+
+### Figma / Miro 連携（任意）
+
+Figma / Miro 連携は、デザインコンテキストを workflow に取り込む。コメント / card の書き戻しは明示的な config で有効化する。
+
+```yaml
+figma:
+  enabled: true
+  api_token_env: HOKUSAI_FIGMA_API_TOKEN
+  writeback:
+    enabled: false
+
+miro:
+  enabled: true
+  api_token_env: HOKUSAI_MIRO_API_TOKEN
+  writeback:
+    enabled: false
+```
+
+API token は環境変数で渡し、YAML には保存しない。
 
 ### Slack 通知（任意）
 
@@ -247,11 +303,14 @@ notifications:
 - 実装プロンプト: `prompts/`
 - 各フェーズノードのソース: `hokusai/nodes/`
 - 設定モデル: `hokusai/config/models.py`
+- profile 運用ガイド: `docs/profile-operation-guide.md`
+- Notion dashboard 運用ガイド: `docs/notion-dashboard-operation-guide.md`
+- Figma / Miro 運用ガイド: `docs/figma-miro-integration-operation-guide.md`
 
 ## 制限事項
 
 - Phase 8 の統合レビューループは現状 GitHub のプルリクエスト前提。GitLab/Bitbucket 対応は実験的。
-- CLI はシングルユーザー想定。同一タスク URL に対する並行ワークフローはサポートしない。
+- profile により複数案件・複数アカウントの分離運用は可能。ただし、同一 profile 内で同一タスク URL に対する並行ワークフローはサポートしない。
 - `prompts/` 配下のプロンプトは日本語タスク向けに調整されている。英語タスク向けの調整は進行中。
 
 ## ライセンス
