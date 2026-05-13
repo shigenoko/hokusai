@@ -36,18 +36,45 @@ class MiroWritebackArgs:
 
 
 class MiroWritebackDispatcher:
-    """Miro card 投稿の dispatcher。"""
+    """Miro card 投稿の dispatcher。
 
-    def __init__(self, client: MiroClient, store: OutboxStore):
+    on_failure ポリシー（計画書 §8.2）:
+      - warn（既定）: outbox に積んで継続
+      - block: outbox に積み、result.status を "blocked" にする（呼び出し側が
+               workflow を waiting_for_human に遷移）
+      - skip: outbox にも積まずに warning のみ
+    """
+
+    def __init__(
+        self,
+        client: MiroClient,
+        store: OutboxStore,
+        *,
+        on_failure: str = "warn",
+    ):
         if store.target != WritebackTarget.MIRO:
             raise ValueError(
                 f"MiroWritebackDispatcher requires MIRO target, got {store.target}"
             )
+        if on_failure not in ("warn", "block", "skip"):
+            raise ValueError(f"on_failure must be warn|block|skip, got {on_failure!r}")
         self.client = client
         self.store = store
+        self.on_failure = on_failure
 
-    def dispatch(self, args: MiroWritebackArgs, *, force: bool = False) -> dict[str, Any]:
-        """1 回の投稿試行。"""
+    def dispatch(
+        self,
+        args: MiroWritebackArgs,
+        *,
+        force: bool = False,
+        from_retry: bool = False,
+    ) -> dict[str, Any]:
+        """1 回の投稿試行。
+
+        Args:
+            force: True なら errors にあっても再試行
+            from_retry: True なら is_pending チェックを skip（retry 経路用）
+        """
         idempotency_key = build_idempotency_key(
             workflow_id=args.workflow_id,
             event_type=args.event_type,
@@ -55,11 +82,24 @@ class MiroWritebackDispatcher:
             revision=args.revision,
         )
 
-        if self.store.should_skip(idempotency_key, force=force):
-            logger.info(
-                "miro writeback skipped (already delivered or pending): %s",
-                idempotency_key,
-            )
+        if self.store.is_already_delivered(idempotency_key):
+            logger.info("miro writeback skipped (already delivered): %s", idempotency_key)
+            return {
+                "status": "skipped",
+                "idempotency_key": idempotency_key,
+                "response_id": None,
+                "error": None,
+            }
+        if not from_retry and self.store.is_pending(idempotency_key):
+            logger.info("miro writeback skipped (pending): %s", idempotency_key)
+            return {
+                "status": "skipped",
+                "idempotency_key": idempotency_key,
+                "response_id": None,
+                "error": None,
+            }
+        if not force and self.store.is_in_errors(idempotency_key):
+            logger.info("miro writeback skipped (in errors): %s", idempotency_key)
             return {
                 "status": "skipped",
                 "idempotency_key": idempotency_key,
@@ -95,39 +135,23 @@ class MiroWritebackDispatcher:
                 "miro create_card failed (%s): %s",
                 type(e).__name__, str(e),
             )
-            self.store.enqueue(
+            return self._handle_failure(
                 idempotency_key=idempotency_key,
-                workflow_id=args.workflow_id,
-                profile_name=args.profile_name,
-                event_type=args.event_type,
-                payload=payload_for_outbox,
+                args=args,
+                payload_for_outbox=payload_for_outbox,
                 error=str(e),
             )
-            return {
-                "status": "enqueued",
-                "idempotency_key": idempotency_key,
-                "response_id": None,
-                "error": str(e),
-            }
         except Exception as e:
             logger.warning(
                 "miro create_card unexpected error: %s",
                 type(e).__name__,
             )
-            self.store.enqueue(
+            return self._handle_failure(
                 idempotency_key=idempotency_key,
-                workflow_id=args.workflow_id,
-                profile_name=args.profile_name,
-                event_type=args.event_type,
-                payload=payload_for_outbox,
+                args=args,
+                payload_for_outbox=payload_for_outbox,
                 error=f"{type(e).__name__}: {e}",
             )
-            return {
-                "status": "enqueued",
-                "idempotency_key": idempotency_key,
-                "response_id": None,
-                "error": f"{type(e).__name__}: {e}",
-            }
 
         response_id = str(response.get("id") or "") or None
         self.store.mark_succeeded(
@@ -148,24 +172,61 @@ class MiroWritebackDispatcher:
             "error": None,
         }
 
+    def _handle_failure(
+        self,
+        *,
+        idempotency_key: str,
+        args: MiroWritebackArgs,
+        payload_for_outbox: dict[str, Any],
+        error: str,
+    ) -> dict[str, Any]:
+        """on_failure に応じて失敗を処理する。"""
+        if self.on_failure == "skip":
+            return {
+                "status": "skipped",
+                "idempotency_key": idempotency_key,
+                "response_id": None,
+                "error": error,
+                "on_failure": "skip",
+            }
+        self.store.enqueue(
+            idempotency_key=idempotency_key,
+            workflow_id=args.workflow_id,
+            profile_name=args.profile_name,
+            event_type=args.event_type,
+            payload=payload_for_outbox,
+            error=error,
+        )
+        if self.on_failure == "block":
+            return {
+                "status": "blocked",
+                "idempotency_key": idempotency_key,
+                "response_id": None,
+                "error": error,
+                "on_failure": "block",
+            }
+        return {
+            "status": "enqueued",
+            "idempotency_key": idempotency_key,
+            "response_id": None,
+            "error": error,
+        }
+
     def retry(self, outbox_id: int, *, force: bool = False) -> dict[str, Any]:
-        """手動再送（Operations Console から呼ぶ）"""
+        """手動再送（Operations Console から呼ぶ）。
+
+        attempt_count を +1 して **再試行を実行**し、その結果が enqueued（再失敗）で
+        かつ MAX 到達していたら errors へ移動する。5 回目の再送でも実際に投稿を
+        試みるよう、判定を dispatch 後に行う。
+        """
         entry = self.store.get_outbox(outbox_id)
         if entry is None:
             return {"status": "not_found", "error": f"outbox id {outbox_id} not found"}
 
+        # attempt_count を +1（dispatch 前に記録）
         new_count = self.store.increment_attempt(outbox_id)
-        if new_count >= MAX_ATTEMPT_COUNT:
-            self.store.move_to_errors(
-                outbox_id,
-                error=f"max attempts ({MAX_ATTEMPT_COUNT}) exceeded after retry",
-            )
-            return {
-                "status": "moved_to_errors",
-                "idempotency_key": entry.idempotency_key,
-                "error": f"max attempts ({MAX_ATTEMPT_COUNT}) exceeded",
-            }
 
+        # 5 回目でも実際に試行する
         p = entry.payload
         args = MiroWritebackArgs(
             workflow_id=entry.workflow_id,
@@ -178,4 +239,17 @@ class MiroWritebackDispatcher:
             mr_url=p.get("mr_url"),
             commit_sha=p.get("commit_sha"),
         )
-        return self.dispatch(args, force=force)
+        result = self.dispatch(args, force=force, from_retry=True)
+
+        # 再失敗かつ MAX 到達なら errors 移動
+        if result.get("status") == "enqueued" and new_count >= MAX_ATTEMPT_COUNT:
+            self.store.move_to_errors(
+                outbox_id,
+                error=(
+                    f"max attempts ({MAX_ATTEMPT_COUNT}) exceeded "
+                    f"(last error: {result.get('error')})"
+                ),
+            )
+            result["status"] = "moved_to_errors"
+
+        return result

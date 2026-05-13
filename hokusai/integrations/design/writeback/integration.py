@@ -87,7 +87,9 @@ def build_figma_dispatcher(
         return None
     client = FigmaClient(api_token=token)
     store = OutboxStore(db_path, target=WritebackTarget.FIGMA)
-    return FigmaWritebackDispatcher(client, store)
+    return FigmaWritebackDispatcher(
+        client, store, on_failure=writeback_cfg.figma_on_failure,
+    )
 
 
 def build_miro_dispatcher(
@@ -106,7 +108,9 @@ def build_miro_dispatcher(
         return None
     client = MiroClient(api_token=token)
     store = OutboxStore(db_path, target=WritebackTarget.MIRO)
-    return MiroWritebackDispatcher(client, store)
+    return MiroWritebackDispatcher(
+        client, store, on_failure=writeback_cfg.miro_on_failure,
+    )
 
 
 # ---------------------------------------------------------------------------

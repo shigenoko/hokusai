@@ -322,3 +322,62 @@ def test_dispatcher_requires_figma_target(store, mock_client):
     miro_store = OutboxStore(store.db_path, target=WritebackTarget.MIRO)
     with pytest.raises(ValueError):
         FigmaWritebackDispatcher(mock_client, miro_store)
+
+
+def test_dispatcher_rejects_unknown_on_failure(store, mock_client):
+    """on_failure に未知の値を渡すとエラー"""
+    with pytest.raises(ValueError):
+        FigmaWritebackDispatcher(mock_client, store, on_failure="unknown")
+
+
+def test_on_failure_warn_enqueues_outbox(store, mock_client):
+    """on_failure=warn: 失敗時 outbox に積み status=enqueued（既定動作）"""
+    mock_client.post_comment.side_effect = FigmaAPIError(500, "err")
+    dispatcher = FigmaWritebackDispatcher(mock_client, store, on_failure="warn")
+    result = dispatcher.dispatch(_args())
+    assert result["status"] == "enqueued"
+    assert len(store.list_outbox()) == 1
+
+
+def test_on_failure_block_returns_blocked_status(store, mock_client):
+    """on_failure=block: 失敗時 outbox に積み status=blocked（呼び出し側が止める）"""
+    mock_client.post_comment.side_effect = FigmaAPIError(500, "err")
+    dispatcher = FigmaWritebackDispatcher(mock_client, store, on_failure="block")
+    result = dispatcher.dispatch(_args())
+    assert result["status"] == "blocked"
+    assert result["on_failure"] == "block"
+    # outbox にも積まれる（再送のため）
+    assert len(store.list_outbox()) == 1
+
+
+def test_on_failure_skip_no_enqueue(store, mock_client):
+    """on_failure=skip: 失敗時 outbox にも積まない、status=skipped"""
+    mock_client.post_comment.side_effect = FigmaAPIError(500, "err")
+    dispatcher = FigmaWritebackDispatcher(mock_client, store, on_failure="skip")
+    result = dispatcher.dispatch(_args())
+    assert result["status"] == "skipped"
+    assert result.get("on_failure") == "skip"
+    # outbox に何も積まれない
+    assert len(store.list_outbox()) == 0
+
+
+def test_retry_executes_5th_attempt(store, mock_client):
+    """retry の閾値到達回（5 回目）も実際に dispatch が走り、その結果として errors 移動"""
+    from hokusai.integrations.design.writeback import MAX_ATTEMPT_COUNT
+    mock_client.post_comment.side_effect = FigmaAPIError(500, "ServerError")
+    dispatcher = FigmaWritebackDispatcher(mock_client, store)
+
+    # 1 回目 dispatch（attempt_count=0 で enqueue）
+    dispatcher.dispatch(_args())
+    outbox = store.list_outbox()[0]
+    initial_call_count = mock_client.post_comment.call_count
+
+    # MAX_ATTEMPT_COUNT 回 retry → 各回で API 呼び出しが行われる
+    for _ in range(MAX_ATTEMPT_COUNT):
+        dispatcher.retry(outbox.id)
+
+    # 初回 dispatch + retry × MAX_ATTEMPT_COUNT 回 = MAX_ATTEMPT_COUNT+1 回の API call
+    assert mock_client.post_comment.call_count == initial_call_count + MAX_ATTEMPT_COUNT
+    # 最終的に errors 移動
+    assert len(store.list_outbox()) == 0
+    assert len(store.list_errors()) == 1

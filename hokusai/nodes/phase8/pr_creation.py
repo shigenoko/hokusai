@@ -447,3 +447,20 @@ def _dispatch_design_writeback(state, pull_requests: list) -> None:
         logger.info("figma writeback: %s", result.figma.get("status"))
     if result.miro:
         logger.info("miro writeback: %s", result.miro.get("status"))
+
+    # on_failure: block の場合は workflow を waiting_for_human に遷移
+    # （計画書 §8.2: block で投稿失敗 → 重要案件として人判断を求める運用）
+    blocked = []
+    if result.figma and result.figma.get("status") == "blocked":
+        blocked.append(f"figma: {result.figma.get('error')}")
+    if result.miro and result.miro.get("status") == "blocked":
+        blocked.append(f"miro: {result.miro.get('error')}")
+    if blocked:
+        state["waiting_for_human"] = True
+        state["waiting_for_human_reason"] = (
+            "design writeback failed with on_failure=block: " + "; ".join(blocked)
+        )
+        logger.warning(
+            "workflow %s: waiting_for_human due to design writeback block",
+            state.get("workflow_id"),
+        )

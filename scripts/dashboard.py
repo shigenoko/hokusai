@@ -7213,6 +7213,9 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         Query:
             limit (int, default 100)
             profile (str, optional)
+
+        エラーレスポンスは既存の `_handle_design_cache_refresh_post` と統一して
+        `{"success": False, "errors": [...]}`（配列）形式を返す。
         """
         try:
             from hokusai.integrations.design.writeback import OutboxStore
@@ -7243,7 +7246,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._send_json_response({"success": True, "items": items, "count": len(items)})
         except Exception as e:
             self._send_json_response(
-                {"success": False, "error": f"{type(e).__name__}: {e}"},
+                {"success": False, "errors": [f"{type(e).__name__}: {e}"]},
                 status_code=500,
             )
 
@@ -7252,15 +7255,16 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 
         body:
             {"id": <int>}        個別再送（指定 outbox id のみ）
-            {}                   pending 全件再送
+            {}                   pending 全件再送（ページング処理）
             {"force": true}      errors にあっても再試行
+            {"limit": <int>}     1 リクエストあたりの上限（既定 500、最大 5000）
 
-        v0.4.0: 1 行ずつ attempt_count を +1。MAX(5) で errors に自動移動。
+        全件モードはバッチサイズ単位でループし、100 件超の pending も処理する。
+
+        エラーレスポンスは `{"success": False, "errors": [...]}` 配列形式で統一。
         """
         try:
             from hokusai.integrations.design.writeback import (
-                FigmaWritebackDispatcher,
-                MiroWritebackDispatcher,
                 OutboxStore,
                 build_figma_dispatcher,
                 build_miro_dispatcher,
@@ -7276,6 +7280,9 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 body = {}
             force = bool(body.get("force", False))
             specific_id = body.get("id")
+            req_limit = body.get("limit")
+            # 1 リクエストあたりの上限は 5000、既定 500（運用安全のため）
+            max_total = min(int(req_limit) if req_limit else 500, 5000)
 
             config = get_config()
             wcfg = load_writeback_config(config)
@@ -7286,7 +7293,9 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             if dispatcher is None:
                 self._send_json_response({
                     "success": False,
-                    "error": f"{source} writeback is not configured (disabled or token missing)",
+                    "errors": [
+                        f"{source} writeback is not configured (disabled or token missing)",
+                    ],
                 }, status_code=409)
                 return
 
@@ -7294,18 +7303,30 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             if specific_id is not None:
                 results.append(dispatcher.retry(int(specific_id), force=force))
             else:
-                entries = store.list_outbox(limit=100)
-                for e in entries:
-                    results.append(dispatcher.retry(e.id, force=force))
+                # ページング処理: 100 件単位で取得し、limit 到達 or 取得 0 件で停止
+                processed_ids: set[int] = set()
+                while len(results) < max_total:
+                    entries = store.list_outbox(limit=100)
+                    # retry で outbox から削除 / errors 移動される行があるため、
+                    # 同じ id を 2 度処理しないよう既処理集合で除外
+                    new_entries = [e for e in entries if e.id not in processed_ids]
+                    if not new_entries:
+                        break
+                    for e in new_entries:
+                        if len(results) >= max_total:
+                            break
+                        processed_ids.add(e.id)
+                        results.append(dispatcher.retry(e.id, force=force))
 
             self._send_json_response({
                 "success": True,
                 "results": results,
                 "count": len(results),
+                "limit_reached": (specific_id is None and len(results) >= max_total),
             })
         except Exception as e:
             self._send_json_response(
-                {"success": False, "error": f"{type(e).__name__}: {e}"},
+                {"success": False, "errors": [f"{type(e).__name__}: {e}"]},
                 status_code=500,
             )
 
@@ -7324,14 +7345,14 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             ok = store.move_to_errors(outbox_id, error="manually moved by operator")
             if not ok:
                 self._send_json_response(
-                    {"success": False, "error": f"outbox id {outbox_id} not found"},
+                    {"success": False, "errors": [f"outbox id {outbox_id} not found"]},
                     status_code=404,
                 )
                 return
             self._send_json_response({"success": True, "moved_id": outbox_id})
         except Exception as e:
             self._send_json_response(
-                {"success": False, "error": f"{type(e).__name__}: {e}"},
+                {"success": False, "errors": [f"{type(e).__name__}: {e}"]},
                 status_code=500,
             )
 
