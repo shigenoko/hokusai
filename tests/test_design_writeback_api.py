@@ -418,8 +418,9 @@ def test_idempotency_table_shared_between_targets(
 def test_cleanup_old_errors(figma_store: OutboxStore, db_path: Path):
     """retention_days を超える errors / idempotency を削除"""
     import sqlite3
-    # 31 日前の行を直接 INSERT
-    old = "2026-04-12T00:00:00"  # 仮想的に古い日時
+    from datetime import datetime, timedelta
+    # 31 日前の行を動的に生成（テスト実行日に依存しないため）
+    old = (datetime.now() - timedelta(days=31)).isoformat()
     with sqlite3.connect(db_path) as conn:
         conn.execute(
             """
