@@ -397,14 +397,38 @@ def main():
                 )
                 sys.exit(1)
             except Exception as e:
-                # profile 解決自体は成功したが config 読み込みで失敗（YAML 解析失敗・
-                # I/O エラー等）。意図しない Notion 操作にはつながらないため、警告
-                # を出して既定 env 名で続行する。
+                # profile 解決自体は成功したが config 読み込みで失敗（YAML 解析
+                # 失敗・I/O エラー等）。
+                #
+                # 既定の HOKUSAI_NOTION_API_TOKEN が別案件用に設定されている場合、
+                # それを使って意図しない Notion ワークスペースにセットアップを
+                #走らせてしまうリスクがあるため、安全側に倒して中断する。
+                # ただし `--api-token-env` が明示指定されている場合は、ユーザー
+                # が token env を明示的に選択している（誤注入リスクは限定的）ため
+                # 警告のみで続行する。
+                explicit_api_token_env = getattr(args, "api_token_env", None)
+                if not explicit_api_token_env:
+                    print(
+                        f"✗ profile '{notion_setup_profile}' の config 読み込みに失敗: "
+                        f"{type(e).__name__}: {e}"
+                    )
+                    print(
+                        "  既定の env 変数名で続行すると、別案件用の "
+                        "HOKUSAI_NOTION_API_TOKEN を誤って使うリスクがあるため中断します"
+                    )
+                    print(
+                        "  対処: config の YAML を修正するか、"
+                        "--api-token-env で env 名を明示指定してください"
+                    )
+                    sys.exit(1)
                 print(
                     f"⚠️ profile '{notion_setup_profile}' の config 読み込みに失敗: "
                     f"{type(e).__name__}: {e}"
                 )
-                print("  既定の env 変数名で続行します")
+                print(
+                    f"  --api-token-env={explicit_api_token_env!r} が明示指定されているため "
+                    f"既定 env 名フォールバックで続行します"
+                )
         sys.exit(_handle_notion_setup(args, notion_setup_config))
 
     # profile コマンドは registry のみ参照し、WorkflowConfig は不要

@@ -32,6 +32,10 @@ profile config の env 変数名を自動採用する。
 - `--api-token-env` の既定値を `None` に変更。明示指定 / profile config / 既定値
   （`HOKUSAI_NOTION_API_TOKEN`）の優先順位で env 名を解決する。
 - `--persist` で rc に書き込む env 名も profile config に追従するようになった。
+- `--profile` 指定時に config 読み込みが失敗した場合は、原則として中断する
+  ようになった（既定 `HOKUSAI_NOTION_API_TOKEN` で続行すると別案件用の token を
+  誤って使うリスクがあるため）。`--api-token-env` が明示指定されている場合のみ
+  警告のうえ既定 env フォールバックで続行する。
 
 ### Added
 
