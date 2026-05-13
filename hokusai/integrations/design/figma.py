@@ -1,5 +1,9 @@
 """
-Figma REST API クライアント（read-only）。
+Figma REST API クライアント（v0.4.0 から書き戻し対応）。
+
+提供 API:
+- 読み取り: get_file / get_file_nodes / get_comments / get_image_urls / to_common_context
+- 書き戻し: post_comment（v0.4.0, Phase E）
 
 設計方針:
 - 標準ライブラリ urllib のみで実装し、依存追加なし。
@@ -7,6 +11,8 @@ Figma REST API クライアント（read-only）。
 - レスポンスは要約済み共通形式に正規化してから返す。
 - レート制限と 5xx は指数バックオフで再送、4xx は即時失敗。
 - 画像 export 失敗は致命でない（partial として扱う）。
+- 書き戻し（post_comment）は MVP 範囲外で、Phase E (v0.4.0) から有効。
+  詳細: docs/hokusai-figma-miro-writeback-implementation-plan.md
 """
 
 from __future__ import annotations

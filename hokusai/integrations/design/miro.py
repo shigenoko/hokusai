@@ -1,15 +1,18 @@
 """
-Miro REST API クライアント（read-only）。
+Miro REST API クライアント（v0.4.0 から書き戻し対応）。
 
 責務:
 - board 情報の取得
 - item 一覧の取得（frame / sticky_note / text / shape / connector）
 - 共通コンテキスト形式への正規化
+- card 作成（v0.4.0, Phase E の書き戻し）
 
 設計方針:
 - 標準ライブラリ urllib のみで実装し、依存追加なし。
 - token は Authorization: Bearer ヘッダにのみ載せる。
 - レート制限と 5xx は指数バックオフで再送、4xx は即時失敗。
+- 書き戻し（create_card）は MVP 範囲外で、Phase E (v0.4.0) から有効。
+  詳細: docs/hokusai-figma-miro-writeback-implementation-plan.md
 """
 
 from __future__ import annotations

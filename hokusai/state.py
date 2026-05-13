@@ -244,6 +244,7 @@ class WorkflowState(TypedDict):
 
     # === Human-in-the-loop ===
     waiting_for_human: bool
+    waiting_for_human_reason: Optional[str]  # waiting_for_human=True の理由（書き戻し失敗等）
     human_input_request: Optional[str]
     last_environment_error: Optional[dict]  # Phase 6で検出された環境問題の情報
 
@@ -374,11 +375,19 @@ def create_initial_state(
         design_review_result=None,
         design_sync_errors=[],
         design_per_source_status={},
+        # Phase E (v0.4.0): writeback 用 primary frame / board
+        primary_figma_file_key=None,
+        primary_figma_frame_id=None,
+        primary_figma_node_id=None,
+        primary_figma_node_offset=None,
+        primary_miro_frame_id=None,
+        primary_miro_board_id=None,
         created_at=now,
         updated_at=now,
         total_retry_count=0,
         audit_log=[],
         waiting_for_human=False,
+        waiting_for_human_reason=None,
         human_input_request=None,
         last_environment_error=None,
         waiting_for_pr_approval=False,

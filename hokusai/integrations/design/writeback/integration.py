@@ -49,7 +49,7 @@ def _normalize_on_failure(value: Any, default: str = "warn") -> str:
     """on_failure の値を warn/block/skip に正規化する。
 
     None / 不正値はすべて default にフォールバック。これがないと dispatcher
-    側 (\u00a78.1) で ValueError が出て dispatcher 構築 / retry API が 500 になる。
+    側 (§8.1) で ValueError が出て dispatcher 構築 / retry API が 500 になる。
     """
     if value is None:
         return default
