@@ -173,10 +173,12 @@ class SQLiteStore:
             # - next_attempt_at なし（自動 retry なし、Operations Console からの手動再送のみ）
             # - attempt_count（attempts ではなく明示的な命名）
             #
-            # 5 テーブル + 7 index:
-            #   figma_sync_outbox + 2 idx / figma_sync_errors + 1 idx
-            #   miro_sync_outbox + 2 idx / miro_sync_errors + 1 idx
+            # 5 テーブル + 9 index:
+            #   figma_sync_outbox + 2 idx / figma_sync_errors + 2 idx
+            #   miro_sync_outbox + 2 idx / miro_sync_errors + 2 idx
             #   design_writeback_idempotency + 1 idx
+            # errors 側の idempotency_key index は is_in_errors() の 3 段階チェック
+            # で毎回引くために必要。
 
             # Figma 同期用 outbox
             conn.execute("""
@@ -223,6 +225,14 @@ class SQLiteStore:
                 ON figma_sync_errors(workflow_id)
             """)
 
+            # writeback 3 段階チェック（idempotency → outbox → errors）で
+            # is_in_errors() が毎回引くため、idempotency_key を index 化する。
+            # errors が増えても dispatch / retry のレイテンシが O(1)。
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_figma_errors_idempotency
+                ON figma_sync_errors(idempotency_key)
+            """)
+
             # Miro 同期用 outbox（構造は figma と同じ）
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS miro_sync_outbox (
@@ -266,6 +276,12 @@ class SQLiteStore:
             conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_miro_errors_workflow
                 ON miro_sync_errors(workflow_id)
+            """)
+
+            # writeback 3 段階チェック（is_in_errors）用 index。Figma 側と同じ意図。
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_miro_errors_idempotency
+                ON miro_sync_errors(idempotency_key)
             """)
 
             # 冪等キー記録（§9.2 参照、API call 成功後の重複抑止用）
