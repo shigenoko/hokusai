@@ -9,6 +9,7 @@ Issue: https://github.com/shigenoko/hokusai/issues/19
 
 from __future__ import annotations
 
+import hashlib
 import os
 import threading
 import time
@@ -18,6 +19,16 @@ from ...logging_config import get_logger
 from .client import NotionAPIClient, NotionAPIError, NotionRateLimitError
 
 logger = get_logger("notion_dashboard.identification")
+
+
+def _token_fingerprint(token: str) -> str:
+    """token から非可逆な短いフィンガープリントを生成する。
+
+    cache key の一部に組み込み、env 変数名が同じでも token 値が変わった場合に
+    キャッシュを自動 invalidate するために使う。SHA-256 を取って先頭 12 文字を
+    用いる（衝突確率は無視できる範囲、token 値そのものは復元不可能）。
+    """
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()[:12]
 
 
 def mask_db_id(db_id: str | None) -> str:
@@ -217,7 +228,13 @@ def build_notion_identification(
     workflows_db_id = os.environ.get(workflows_db_id_env, "").strip()
     pull_requests_db_id = os.environ.get(pull_requests_db_id_env, "").strip()
 
-    bot_info = get_bot_info(api_token, cache_key=api_token_env) if api_token else None
+    # cache key には env 変数名 + token のフィンガープリントを使う。
+    # env 変数名が同じでも token 値が変わった場合（rotation / refresh_from_env 等）
+    # に自動でキャッシュ invalidate されるようにする。token そのものは保存しない。
+    bot_info = None
+    if api_token:
+        cache_key = f"{api_token_env}:{_token_fingerprint(api_token)}"
+        bot_info = get_bot_info(api_token, cache_key=cache_key)
 
     return {
         "profile_name": profile_name,

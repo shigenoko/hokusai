@@ -347,6 +347,87 @@ def test_build_notion_identification_full(monkeypatch):
     assert ident["bot_display_name"] == "HOKUSAI Integration (bot)"
 
 
+def test_build_notion_identification_invalidates_cache_on_token_rotation(
+    monkeypatch,
+):
+    """token 値を rotate すると cache が自動 invalidate され、新しい bot info を取得する。
+
+    Copilot 指摘: cache_key を env 変数名だけにすると、token rotation 後も
+    TTL 内は古い bot info が残る。token fingerprint を含めることで解消。
+    """
+    from hokusai.integrations.notion_dashboard import identification as ident_mod
+
+    call_log: list[str] = []
+
+    class _FakeClient:
+        def __init__(self, *, api_token):
+            self._token = api_token
+
+        def get_bot_info(self):
+            call_log.append(self._token)
+            # token によって異なる bot 名を返す
+            return {"name": f"Bot for {self._token[:6]}", "type": "bot"}
+
+    monkeypatch.setattr(ident_mod, "NotionAPIClient", _FakeClient)
+
+    # 最初は token-A
+    monkeypatch.setenv("HOKUSAI_TEST_TOKEN", "token-AAAAA")
+    monkeypatch.setenv("HOKUSAI_TEST_WF_DB", "35f85495565d81c9aea4f4a137ed82ff")
+    monkeypatch.setenv("HOKUSAI_TEST_PR_DB", "35f85495565d81c9aea4f4a137ed82dd")
+
+    ident1 = build_notion_identification(
+        profile_name="test",
+        api_token_env="HOKUSAI_TEST_TOKEN",
+        workflows_db_id_env="HOKUSAI_TEST_WF_DB",
+        pull_requests_db_id_env="HOKUSAI_TEST_PR_DB",
+    )
+    assert ident1["bot_display_name"] == "Bot for token- (bot)"
+
+    # 同じ token で再度呼ぶ → cache hit、API call は増えない
+    build_notion_identification(
+        profile_name="test",
+        api_token_env="HOKUSAI_TEST_TOKEN",
+        workflows_db_id_env="HOKUSAI_TEST_WF_DB",
+        pull_requests_db_id_env="HOKUSAI_TEST_PR_DB",
+    )
+    assert len(call_log) == 1
+
+    # token を rotate（env 名は同じ）
+    monkeypatch.setenv("HOKUSAI_TEST_TOKEN", "token-BBBBB")
+
+    ident2 = build_notion_identification(
+        profile_name="test",
+        api_token_env="HOKUSAI_TEST_TOKEN",
+        workflows_db_id_env="HOKUSAI_TEST_WF_DB",
+        pull_requests_db_id_env="HOKUSAI_TEST_PR_DB",
+    )
+    # cache invalidate されて新しい bot info が返る
+    assert ident2["bot_display_name"] == "Bot for token- (bot)"
+    # でも token が違うので新しい API call が走った
+    assert len(call_log) == 2
+    assert call_log[0] == "token-AAAAA"
+    assert call_log[1] == "token-BBBBB"
+
+
+def test_token_fingerprint_is_irreversible():
+    """fingerprint は token を復元できない（先頭 12 文字のハッシュ）"""
+    from hokusai.integrations.notion_dashboard.identification import (
+        _token_fingerprint,
+    )
+
+    fp1 = _token_fingerprint("secret-token-1")
+    fp2 = _token_fingerprint("secret-token-2")
+
+    # 別 token は別 fingerprint
+    assert fp1 != fp2
+    # 同じ token は同じ fingerprint
+    assert _token_fingerprint("secret-token-1") == fp1
+    # 12 文字
+    assert len(fp1) == 12
+    # token そのものは含まれない
+    assert "secret" not in fp1
+
+
 def test_build_notion_identification_no_token(monkeypatch):
     """token env が未設定なら Bot は (unable to fetch)、他は unknown"""
     monkeypatch.delenv("HOKUSAI_NOTION_API_TOKEN_4HOKUSAI", raising=False)
