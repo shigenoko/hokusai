@@ -17,6 +17,43 @@ HOKUSAI のすべての特筆すべき変更をこのファイルに記録する
 
 ---
 
+## [0.4.3] - 2026-05-14
+
+`hokusai notion-setup` に `--scaffold` オプションを追加
+（[#25](https://github.com/shigenoko/hokusai/issues/25) 対応）。
+
+新規 profile / 新規 workspace 立ち上げ時に、Notion governance layer の
+標準ドキュメントツリーをワンコマンドで scaffold できる。HOKUSAI が自動同期する
+DB 領域と、人間が書くドキュメント領域を視覚的・運用的に分離する。
+
+### Added
+
+- `hokusai notion-setup --scaffold` オプション
+- 親ページ配下に以下のページツリーを作成（idempotent）:
+  - 📚 HOKUSAI Documentation（ハブ）
+    - 💬 Discussions
+    - 📖 Operation Guides
+    - 📋 Requirements
+- 各ページに役割を説明する placeholder paragraph
+- `scaffold_notion_workspace()` 関数（`setup_notion_workspace(..., scaffold=True)` から呼び出し）
+- `NotionAPIClient.create_page()` 経由のページ作成 / `list_block_children()` での既存検出
+
+### 設計
+
+- **オプトイン**: `--scaffold` 未指定なら従来通り DB 作成のみ
+- **Idempotent**: 既存に同名ページがあれば skip（再実行で重複しない）
+- **partial success**: 個別サブページの作成失敗で全体を止めない（ハブ作成失敗のみ致命）
+- **DB 作成と独立**: scaffold エラーは DB 作成結果に影響しない
+
+### 後方互換
+
+- `--scaffold` 未指定での既存挙動は変わらない
+- `setup_notion_workspace()` の戻り値は scaffold=True のときのみ `scaffold` キーが追加される
+
+詳細は `docs/hokusai-issue-25-notion-setup-scaffold-implementation-plan.md` に対応。
+
+---
+
 ## [0.4.2] - 2026-05-14
 
 Operations Console の Notion 接続状態パネルに **「どの Notion か」識別情報を表示**

@@ -55,6 +55,42 @@ hokusai notion-setup --parent-page-id <PARENT_PAGE_ID> --persist
 - HOKUSAI Workflows DB（プロパティ 23 個 + Status / Waiting Reason / Priority の Select options）
 - HOKUSAI Pull Requests DB（Workflow → Workflows DB の relation 付き）
 
+##### ドキュメントツリーも同時に scaffold する（v0.4.3〜）
+
+`--scaffold` オプションを付けると、DB 作成に加えて Notion governance layer の標準ドキュメントツリーも作成される。複数プロジェクトを Notion で並走させる場合に、人間が書くドキュメントの置き場所を統一できる。
+
+```bash
+hokusai notion-setup \
+  --parent-page-id <PARENT_PAGE_ID> \
+  --scaffold \
+  --persist
+```
+
+作成されるツリー:
+
+```
+<親ページ>
+├── HOKUSAI Workflows (DB)
+├── HOKUSAI Pull Requests (DB)
+└── 📚 HOKUSAI Documentation
+    ├── 💬 Discussions          ← 議論・設計判断
+    ├── 📖 Operation Guides     ← 運用手順
+    └── 📋 Requirements         ← 要件定義書 / GitHub リンク集
+```
+
+各ページの役割:
+
+| ページ | 用途 | リポジトリ内の対応 |
+|---|---|---|
+| 💬 Discussions | コード変更前の議論・設計判断（決定後は関連 GitHub Issue を本文にリンク）| なし（議論記録は Notion） |
+| 📖 Operation Guides | 日常運用手順（profile 切替、token 更新、復旧手順）| `docs/*-operation-guide.md` |
+| 📋 Requirements | 要件定義書の Notion 版 / GitHub リンク集 | `docs/hokusai-*-requirements.md` |
+
+設計原則:
+- **オプトイン**: `--scaffold` 未指定なら従来通り DB だけ作成
+- **Idempotent**: 既存に同名ページがあれば skip（再実行で重複しない）
+- **partial success**: 個別サブページ作成失敗で全体が止まらない（ハブ作成失敗のみ致命）
+
 > 旧版に存在した「HOKUSAI Service Status ページ」は、複数ユーザー環境で各自のローカル状態を上書きしてしまう問題（last-writer-wins）があるため廃止。サービス接続状態は HOKUSAI Operations Console（`scripts/dashboard.py`）でのみ参照する。
 
 成功時に各リソースの ID と環境変数の export コマンド例が出力される。それを

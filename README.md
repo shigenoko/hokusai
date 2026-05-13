@@ -260,6 +260,19 @@ For profile-based operation with multiple Notion workspaces, the env variable na
 hokusai --profile hokusai notion-setup --parent-page-id <notion-page-id> --persist
 ```
 
+#### Documentation tree scaffold (v0.4.3+)
+
+To bootstrap a Notion governance layer with the recommended documentation tree (`📚 HOKUSAI Documentation` / `💬 Discussions` / `📖 Operation Guides` / `📋 Requirements`) alongside the DBs, pass `--scaffold`:
+
+```bash
+hokusai --profile hokusai notion-setup \
+  --parent-page-id <notion-page-id> \
+  --scaffold \
+  --persist
+```
+
+The flag is opt-in and idempotent — existing same-titled pages are skipped, so re-running is safe.
+
 ### Figma / Miro integration (optional)
 
 Figma and Miro integrations can read design context into the workflow. Writeback for comments/cards is available behind explicit config flags.

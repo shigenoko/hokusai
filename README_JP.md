@@ -260,6 +260,19 @@ hokusai notion-setup --parent-page-id <notion-page-id> --persist
 hokusai --profile hokusai notion-setup --parent-page-id <notion-page-id> --persist
 ```
 
+#### ドキュメントツリーの scaffold（v0.4.3〜）
+
+新規 profile / 新規 workspace 立ち上げ時、HOKUSAI governance layer の標準ドキュメントツリー（`📚 HOKUSAI Documentation` / `💬 Discussions` / `📖 Operation Guides` / `📋 Requirements`）を DB 作成と同時に scaffold するには `--scaffold` を付ける:
+
+```bash
+hokusai --profile hokusai notion-setup \
+  --parent-page-id <notion-page-id> \
+  --scaffold \
+  --persist
+```
+
+オプトイン + idempotent な実装で、既存に同名のページがあれば skip される（再実行も安全）。
+
 ### Figma / Miro 連携（任意）
 
 Figma / Miro 連携は、デザインコンテキストを workflow に取り込む。コメント / card の書き戻しは明示的な config で有効化する。

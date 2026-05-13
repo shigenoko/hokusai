@@ -20,6 +20,7 @@ from .setup import (
     detect_shell_rc,
     is_valid_env_var_name,
     persist_env_vars,
+    scaffold_notion_workspace,
     setup_notion_workspace,
 )
 from .workflows_db import WorkflowsDBClient
@@ -41,5 +42,6 @@ __all__ = [
     "mask_db_id",
     "notion_db_url",
     "persist_env_vars",
+    "scaffold_notion_workspace",
     "setup_notion_workspace",
 ]
