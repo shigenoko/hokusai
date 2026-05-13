@@ -549,3 +549,497 @@ def test_cli_handler_persist_disabled_shows_hint(capsys, monkeypatch):
     cli_main._handle_notion_setup(_Args())
     out = capsys.readouterr().out
     assert "--persist" in out
+
+
+# ---------------------------------------------------------------------------
+# persist_env_vars: profile-aware (v0.4.1)
+# ---------------------------------------------------------------------------
+
+
+def test_persist_env_vars_uses_profile_marker(tmp_path, sample_ids):
+    """profile_name 指定時は profile マーカー / カスタム env 名が使われる"""
+    from hokusai.integrations.notion_dashboard.setup import persist_env_vars
+
+    rc = tmp_path / "test.zshrc"
+    result = persist_env_vars(
+        rc,
+        sample_ids,
+        workflows_env_name="HOKUSAI_NOTION_WORKFLOWS_DB_ID_FOO",
+        pull_requests_env_name="HOKUSAI_NOTION_PR_DB_ID_FOO",
+        profile_name="foo",
+    )
+
+    assert result["action"] == "appended"
+    content = rc.read_text()
+    # profile マーカー
+    assert "profile=foo" in content
+    # カスタム env 名
+    assert 'export HOKUSAI_NOTION_WORKFLOWS_DB_ID_FOO="wf-id-12345"' in content
+    assert 'export HOKUSAI_NOTION_PR_DB_ID_FOO="pr-id-67890"' in content
+    # 既定 env 名は書かれない
+    assert "HOKUSAI_NOTION_WORKFLOWS_DB_ID=" not in content
+    assert "HOKUSAI_NOTION_PR_DB_ID=" not in content
+
+
+def test_persist_env_vars_keeps_separate_profile_blocks(tmp_path, sample_ids):
+    """同じ rc に複数 profile の env を並列で書ける"""
+    from hokusai.integrations.notion_dashboard.setup import persist_env_vars
+
+    rc = tmp_path / "test.zshrc"
+
+    # profile=foo を書き込み
+    persist_env_vars(
+        rc,
+        sample_ids,
+        workflows_env_name="WF_FOO",
+        pull_requests_env_name="PR_FOO",
+        profile_name="foo",
+    )
+    # profile=bar を書き込み（既存ブロックは置換されない）
+    persist_env_vars(
+        rc,
+        {"workflows_db_id": "wf-bar", "pull_requests_db_id": "pr-bar"},
+        workflows_env_name="WF_BAR",
+        pull_requests_env_name="PR_BAR",
+        profile_name="bar",
+    )
+
+    content = rc.read_text()
+    # 両方のブロックが並存
+    assert "profile=foo" in content
+    assert "profile=bar" in content
+    # 両方の env が残る
+    assert 'export WF_FOO="wf-id-12345"' in content
+    assert 'export WF_BAR="wf-bar"' in content
+    # マーカーは別ブロック（合計 2）
+    assert content.count("HOKUSAI Notion Dashboard (managed by") == 2
+
+
+def test_persist_env_vars_replaces_same_profile_block(tmp_path, sample_ids):
+    """同じ profile 名で再実行すると同じブロックを置換する"""
+    from hokusai.integrations.notion_dashboard.setup import persist_env_vars
+
+    rc = tmp_path / "test.zshrc"
+    persist_env_vars(
+        rc,
+        sample_ids,
+        workflows_env_name="WF_FOO",
+        pull_requests_env_name="PR_FOO",
+        profile_name="foo",
+    )
+    result = persist_env_vars(
+        rc,
+        {"workflows_db_id": "wf-NEW", "pull_requests_db_id": "pr-NEW"},
+        workflows_env_name="WF_FOO",
+        pull_requests_env_name="PR_FOO",
+        profile_name="foo",
+    )
+
+    assert result["action"] == "replaced"
+    content = rc.read_text()
+    assert "wf-id-12345" not in content
+    assert "wf-NEW" in content
+    # profile=foo ブロックは 1 つだけ
+    assert content.count("profile=foo") == 2  # begin + end marker
+
+
+def test_persist_env_vars_none_profile_keeps_legacy_marker(tmp_path, sample_ids):
+    """profile_name=None なら従来マーカー / 既定 env 名（後方互換）"""
+    from hokusai.integrations.notion_dashboard.setup import persist_env_vars
+
+    rc = tmp_path / "test.zshrc"
+    persist_env_vars(rc, sample_ids, profile_name=None)
+
+    content = rc.read_text()
+    # 従来マーカー（profile= 文字列を含まない）
+    assert "HOKUSAI Notion Dashboard (managed by `hokusai notion-setup`) ===" in content
+    assert "profile=" not in content
+    # 既定 env 名
+    assert 'export HOKUSAI_NOTION_WORKFLOWS_DB_ID="wf-id-12345"' in content
+    assert 'export HOKUSAI_NOTION_PR_DB_ID="pr-id-67890"' in content
+
+
+def test_persist_env_vars_profile_block_coexists_with_legacy(tmp_path, sample_ids):
+    """既存の legacy ブロック（profile 名なし）と profile ブロックが共存できる"""
+    from hokusai.integrations.notion_dashboard.setup import persist_env_vars
+
+    rc = tmp_path / "test.zshrc"
+    # 先に legacy ブロックを書き込み
+    persist_env_vars(rc, sample_ids, profile_name=None)
+    # profile ブロックを追加
+    persist_env_vars(
+        rc,
+        {"workflows_db_id": "wf-foo", "pull_requests_db_id": "pr-foo"},
+        workflows_env_name="WF_FOO",
+        pull_requests_env_name="PR_FOO",
+        profile_name="foo",
+    )
+
+    content = rc.read_text()
+    # legacy と profile の 2 ブロックが並存
+    assert content.count("HOKUSAI Notion Dashboard (managed by") == 2
+    assert 'export HOKUSAI_NOTION_WORKFLOWS_DB_ID="wf-id-12345"' in content  # legacy
+    assert 'export WF_FOO="wf-foo"' in content  # profile
+
+
+# ---------------------------------------------------------------------------
+# CLI ハンドラ: env 名解決ロジック (Issue #17 / v0.4.1)
+# ---------------------------------------------------------------------------
+
+
+def _make_notion_dashboard_config(
+    *,
+    api_token_env: str | None = None,
+    workflows_db_id_env: str | None = None,
+    pull_requests_db_id_env: str | None = None,
+):
+    """テスト用に notion_dashboard config を持つダミー config オブジェクト"""
+    from types import SimpleNamespace
+
+    nd = SimpleNamespace()
+    if api_token_env is not None:
+        nd.api_token_env = api_token_env
+    if workflows_db_id_env is not None:
+        nd.workflows_db_id_env = workflows_db_id_env
+    if pull_requests_db_id_env is not None:
+        nd.pull_requests_db_id_env = pull_requests_db_id_env
+    return SimpleNamespace(notion_dashboard=nd)
+
+
+def test_cli_handler_uses_default_env_when_no_profile_no_explicit(
+    capsys, monkeypatch
+):
+    """profile 未指定 + --api-token-env 未指定 → 既定 HOKUSAI_NOTION_API_TOKEN を読む"""
+    from hokusai import cli_main
+
+    monkeypatch.delenv("HOKUSAI_NOTION_API_TOKEN", raising=False)
+
+    class _Args:
+        api_token_env = None  # CLI 未指定（v0.4.1 default が None）
+        parent_page_id = "p"
+
+    rc = cli_main._handle_notion_setup(_Args(), config=None)
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "HOKUSAI_NOTION_API_TOKEN が設定されていません" in out
+
+
+def test_cli_handler_uses_profile_config_api_token_env(
+    capsys, monkeypatch, tmp_path
+):
+    """profile config に api_token_env がある → その env を読む"""
+    from hokusai import cli_main
+
+    # profile config 由来の env のみ設定、既定 env は意図的に未設定
+    monkeypatch.delenv("HOKUSAI_NOTION_API_TOKEN", raising=False)
+    monkeypatch.setenv("HOKUSAI_NOTION_API_TOKEN_FOO", "secret-foo")
+
+    def _fake_setup(api_token, parent_page_id):
+        return {"workflows_db_id": "wf", "pull_requests_db_id": "pr"}
+
+    monkeypatch.setattr(
+        "hokusai.integrations.notion_dashboard.setup_notion_workspace",
+        _fake_setup,
+    )
+
+    config = _make_notion_dashboard_config(
+        api_token_env="HOKUSAI_NOTION_API_TOKEN_FOO",
+        workflows_db_id_env="HOKUSAI_NOTION_WORKFLOWS_DB_ID_FOO",
+        pull_requests_db_id_env="HOKUSAI_NOTION_PR_DB_ID_FOO",
+    )
+
+    class _Args:
+        api_token_env = None
+        parent_page_id = "p"
+        profile = "foo"
+        persist = False
+        shell_rc = None
+        no_backup = False
+
+    rc = cli_main._handle_notion_setup(_Args(), config=config)
+    out = capsys.readouterr().out
+    assert rc == 0
+    # config の env 名で読み込み成功 → export 出力もカスタム env 名
+    assert "HOKUSAI_NOTION_API_TOKEN_FOO" in out
+    assert 'export HOKUSAI_NOTION_WORKFLOWS_DB_ID_FOO="wf"' in out
+    assert 'export HOKUSAI_NOTION_PR_DB_ID_FOO="pr"' in out
+    # 既定 env 名は使われない
+    assert 'export HOKUSAI_NOTION_WORKFLOWS_DB_ID="' not in out
+    assert 'export HOKUSAI_NOTION_PR_DB_ID="' not in out
+
+
+def test_cli_handler_explicit_api_token_env_wins_over_profile_config(
+    capsys, monkeypatch
+):
+    """--api-token-env 明示指定が profile config よりも優先される"""
+    from hokusai import cli_main
+
+    monkeypatch.setenv("HOKUSAI_NOTION_API_TOKEN_EXPLICIT", "secret-explicit")
+
+    def _fake_setup(api_token, parent_page_id):
+        return {"workflows_db_id": "wf", "pull_requests_db_id": "pr"}
+
+    monkeypatch.setattr(
+        "hokusai.integrations.notion_dashboard.setup_notion_workspace",
+        _fake_setup,
+    )
+
+    config = _make_notion_dashboard_config(
+        api_token_env="HOKUSAI_NOTION_API_TOKEN_FROM_CONFIG",
+    )
+
+    class _Args:
+        api_token_env = "HOKUSAI_NOTION_API_TOKEN_EXPLICIT"  # 明示指定
+        parent_page_id = "p"
+        profile = "foo"
+        persist = False
+        shell_rc = None
+        no_backup = False
+
+    rc = cli_main._handle_notion_setup(_Args(), config=config)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "HOKUSAI_NOTION_API_TOKEN_EXPLICIT" in out
+    # config 側 env 名は採用されない
+    assert "HOKUSAI_NOTION_API_TOKEN_FROM_CONFIG" not in out
+
+
+def test_cli_handler_falls_back_to_default_when_profile_config_missing_field(
+    capsys, monkeypatch
+):
+    """profile 指定 + config.notion_dashboard.api_token_env 未定義 → 既定値"""
+    from hokusai import cli_main
+
+    monkeypatch.setenv("HOKUSAI_NOTION_API_TOKEN", "secret-default")
+
+    def _fake_setup(api_token, parent_page_id):
+        return {"workflows_db_id": "wf", "pull_requests_db_id": "pr"}
+
+    monkeypatch.setattr(
+        "hokusai.integrations.notion_dashboard.setup_notion_workspace",
+        _fake_setup,
+    )
+
+    # api_token_env は config に無いが、workflows_db_id_env はある
+    config = _make_notion_dashboard_config(
+        workflows_db_id_env="HOKUSAI_NOTION_WORKFLOWS_DB_ID_BAR",
+    )
+
+    class _Args:
+        api_token_env = None
+        parent_page_id = "p"
+        profile = "bar"
+        persist = False
+        shell_rc = None
+        no_backup = False
+
+    rc = cli_main._handle_notion_setup(_Args(), config=config)
+    out = capsys.readouterr().out
+    assert rc == 0
+    # token は既定 env で読まれる
+    assert "HOKUSAI_NOTION_API_TOKEN" in out
+    # workflows env は config 側
+    assert 'export HOKUSAI_NOTION_WORKFLOWS_DB_ID_BAR="wf"' in out
+    # PR env は未指定なので既定値
+    assert 'export HOKUSAI_NOTION_PR_DB_ID="pr"' in out
+
+
+def test_persist_env_vars_rejects_invalid_profile_name(tmp_path, sample_ids):
+    """profile_name に改行・空白・制御文字を含む値を渡すと ValueError"""
+    from hokusai.integrations.notion_dashboard.setup import persist_env_vars
+
+    rc = tmp_path / "test.zshrc"
+
+    # 改行（注入リスク）
+    with pytest.raises(ValueError, match="invalid profile_name"):
+        persist_env_vars(
+            rc, sample_ids,
+            profile_name="foo\nexport EVIL=1",
+        )
+    # 空白
+    with pytest.raises(ValueError, match="invalid profile_name"):
+        persist_env_vars(rc, sample_ids, profile_name="bad name")
+    # 大文字（registry 規則と一致）
+    with pytest.raises(ValueError, match="invalid profile_name"):
+        persist_env_vars(rc, sample_ids, profile_name="BAD_CASE")
+    # 数字始まり
+    with pytest.raises(ValueError, match="invalid profile_name"):
+        persist_env_vars(rc, sample_ids, profile_name="1foo")
+    # 空文字
+    with pytest.raises(ValueError, match="invalid profile_name"):
+        persist_env_vars(rc, sample_ids, profile_name="")
+    # マーカー行を閉じる文字を含む
+    with pytest.raises(ValueError, match="invalid profile_name"):
+        persist_env_vars(rc, sample_ids, profile_name="foo)===")
+
+
+def test_persist_env_vars_accepts_valid_profile_names(tmp_path, sample_ids):
+    """profile_name として妥当な値は受け入れられる"""
+    from hokusai.integrations.notion_dashboard.setup import persist_env_vars
+
+    rc = tmp_path / "test.zshrc"
+    # 標準的な命名（英小文字 + 数字 + ハイフン / アンダースコア）
+    persist_env_vars(rc, sample_ids, profile_name="company-a")
+    persist_env_vars(rc, sample_ids, profile_name="hokusai")
+    persist_env_vars(rc, sample_ids, profile_name="proj_01")
+    # 例外が出なければ OK
+
+
+def test_persist_env_vars_rejects_invalid_env_name(tmp_path, sample_ids):
+    """シェル変数名として不正な workflows_env_name を渡すと ValueError"""
+    from hokusai.integrations.notion_dashboard.setup import persist_env_vars
+
+    rc = tmp_path / "test.zshrc"
+
+    # 空白を含む不正値
+    with pytest.raises(ValueError, match="invalid env variable name"):
+        persist_env_vars(
+            rc, sample_ids,
+            workflows_env_name="BAD NAME",
+        )
+    # 改行を含む不正値（コマンド注入リスク）
+    with pytest.raises(ValueError, match="invalid env variable name"):
+        persist_env_vars(
+            rc, sample_ids,
+            pull_requests_env_name="OK_NAME\nexport EVIL=1",
+        )
+    # 数字始まり
+    with pytest.raises(ValueError, match="invalid env variable name"):
+        persist_env_vars(
+            rc, sample_ids,
+            workflows_env_name="1BAD",
+        )
+    # 空文字
+    with pytest.raises(ValueError, match="invalid env variable name"):
+        persist_env_vars(
+            rc, sample_ids,
+            workflows_env_name="",
+        )
+
+
+def test_is_valid_env_var_name():
+    """is_valid_env_var_name の真偽パターン"""
+    from hokusai.integrations.notion_dashboard import is_valid_env_var_name
+
+    # OK
+    assert is_valid_env_var_name("HOKUSAI_NOTION_API_TOKEN")
+    assert is_valid_env_var_name("_PRIVATE")
+    assert is_valid_env_var_name("a")
+    assert is_valid_env_var_name("VAR123")
+
+    # NG
+    assert not is_valid_env_var_name("")
+    assert not is_valid_env_var_name("1VAR")
+    assert not is_valid_env_var_name("BAD NAME")
+    assert not is_valid_env_var_name("BAD;NAME")
+    assert not is_valid_env_var_name("BAD\nNAME")
+    assert not is_valid_env_var_name(None)
+    assert not is_valid_env_var_name(123)
+
+
+def test_cli_handler_rejects_invalid_explicit_api_token_env(capsys):
+    """--api-token-env に不正値が来たら 1 を返して中断する"""
+    from hokusai import cli_main
+
+    class _Args:
+        api_token_env = "BAD NAME"
+        parent_page_id = "p"
+        profile = None
+
+    rc = cli_main._handle_notion_setup(_Args(), config=None)
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "不正な env 変数名" in out
+
+
+def test_cli_handler_falls_back_when_config_env_name_invalid(
+    capsys, monkeypatch, tmp_path
+):
+    """profile config の env 名が不正なら警告 + 既定値にフォールバック"""
+    from hokusai import cli_main
+
+    monkeypatch.setenv("HOKUSAI_NOTION_API_TOKEN", "secret-default")
+
+    def _fake_setup(api_token, parent_page_id):
+        return {"workflows_db_id": "wf", "pull_requests_db_id": "pr"}
+
+    monkeypatch.setattr(
+        "hokusai.integrations.notion_dashboard.setup_notion_workspace",
+        _fake_setup,
+    )
+
+    # 不正な env 名（コマンド注入を試みた形）
+    config = _make_notion_dashboard_config(
+        api_token_env="BAD NAME",  # 空白
+        workflows_db_id_env="WF\nexport EVIL=1",  # 改行
+        pull_requests_db_id_env="1BAD",  # 数字始まり
+    )
+
+    class _Args:
+        api_token_env = None
+        parent_page_id = "p"
+        profile = "bad"
+        persist = False
+        shell_rc = None
+        no_backup = False
+
+    return_code = cli_main._handle_notion_setup(_Args(), config=config)
+    out = capsys.readouterr().out
+    assert return_code == 0
+    # 不正な env 名は警告として出力（3 件すべて）
+    assert out.count("不正な env 変数名") == 3
+    # 既定値にフォールバック（export 行が正規の env 名で出る）
+    assert 'export HOKUSAI_NOTION_WORKFLOWS_DB_ID="wf"' in out
+    assert 'export HOKUSAI_NOTION_PR_DB_ID="pr"' in out
+    # 不正値で実際の export 行（"<NAME>="<VALUE>"" フォーマット）が作られていない。
+    # 警告メッセージ内に repr 表現として `'WF\nexport EVIL=1'` が現れるのは可
+    # （改行はリテラル `\n` 2 文字としてエスケープされて表示される）
+    assert 'export "1BAD"' not in out and "export 1BAD=" not in out
+    # 注入された "export EVIL=1" が独立した行として出ない
+    export_lines = [l for l in out.splitlines() if l.lstrip().startswith("export ")]
+    assert all("EVIL" not in line for line in export_lines)
+
+
+def test_cli_handler_persist_uses_profile_marker_and_custom_env_names(
+    capsys, monkeypatch, tmp_path
+):
+    """--persist + profile 指定で、rc に profile マーカー + カスタム env 名が書かれる"""
+    from hokusai import cli_main
+
+    monkeypatch.setenv("HOKUSAI_NOTION_API_TOKEN_4HOKUSAI", "secret-4hokusai")
+
+    def _fake_setup(api_token, parent_page_id):
+        return {"workflows_db_id": "wf-4hokusai", "pull_requests_db_id": "pr-4hokusai"}
+
+    monkeypatch.setattr(
+        "hokusai.integrations.notion_dashboard.setup_notion_workspace",
+        _fake_setup,
+    )
+
+    config = _make_notion_dashboard_config(
+        api_token_env="HOKUSAI_NOTION_API_TOKEN_4HOKUSAI",
+        workflows_db_id_env="HOKUSAI_NOTION_WORKFLOWS_DB_ID_4HOKUSAI",
+        pull_requests_db_id_env="HOKUSAI_NOTION_PR_DB_ID_4HOKUSAI",
+    )
+
+    rc = tmp_path / "test.zshrc"
+
+    class _Args:
+        api_token_env = None
+        parent_page_id = "p"
+        profile = "hokusai"
+        persist = True
+        shell_rc = str(rc)
+        no_backup = True
+
+    return_code = cli_main._handle_notion_setup(_Args(), config=config)
+    assert return_code == 0
+    content = rc.read_text()
+    # profile マーカーが書かれる
+    assert "profile=hokusai" in content
+    # カスタム env 名で書かれる
+    assert 'export HOKUSAI_NOTION_WORKFLOWS_DB_ID_4HOKUSAI="wf-4hokusai"' in content
+    assert 'export HOKUSAI_NOTION_PR_DB_ID_4HOKUSAI="pr-4hokusai"' in content
+    # 既定 env 名は書かれない
+    assert 'export HOKUSAI_NOTION_WORKFLOWS_DB_ID="' not in content
+    assert 'export HOKUSAI_NOTION_PR_DB_ID="' not in content

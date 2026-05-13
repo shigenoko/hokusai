@@ -253,6 +253,13 @@ hokusai notion-setup --parent-page-id <notion-page-id> --persist
 
 セットアップ後に生成された DB ID は、`HOKUSAI_NOTION_WORKFLOWS_DB_ID`、`HOKUSAI_NOTION_PR_DB_ID` などの環境変数から参照する。
 
+複数の Notion ワークスペースを profile 単位で使い分ける場合は、profile config の `notion_dashboard.api_token_env` / `workflows_db_id_env` / `pull_requests_db_id_env` に案件固有の env 変数名を指定できる。`--profile <name>` を `notion-setup` に渡すと、HOKUSAI は profile config から env 名を自動で採用し、`--persist` で rc に書き込む際も profile 別マーカーを使って複数 profile を同じ rc ファイル内に並列保存できる:
+
+```bash
+# profile config で HOKUSAI_NOTION_API_TOKEN_4HOKUSAI 等を指定済みの想定
+hokusai --profile hokusai notion-setup --parent-page-id <notion-page-id> --persist
+```
+
 ### Figma / Miro 連携（任意）
 
 Figma / Miro 連携は、デザインコンテキストを workflow に取り込む。コメント / card の書き戻しは明示的な config で有効化する。

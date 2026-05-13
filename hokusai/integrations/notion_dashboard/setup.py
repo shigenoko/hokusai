@@ -23,6 +23,7 @@ Notion 上に HOKUSAI 用の DB / ページを一括作成する。
 from __future__ import annotations
 
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -249,10 +250,67 @@ def setup_notion_workspace(
 # ---------------------------------------------------------------------------
 
 # マーカー: ブロックを冪等に書き換えるために前後を囲む
+# 既存ユーザー（v0.4.0 以前）向けの "profile 名なし" マーカー。
+# `profile_name=None` で `persist_env_vars` を呼ぶと従来通りこのマーカーが使われる。
 PERSIST_BEGIN_MARKER = (
     "# === HOKUSAI Notion Dashboard (managed by `hokusai notion-setup`) ==="
 )
 PERSIST_END_MARKER = "# === END HOKUSAI Notion Dashboard ==="
+
+
+# v0.4.1 以降: profile 別マーカー
+# 同じ rc ファイルに複数 profile の env ブロックを並列で持てるようにする。
+# `profile_name=None` の場合は上記の従来マーカーを使い、後方互換を維持する。
+def _build_profile_markers(profile_name: str) -> tuple[str, str]:
+    """profile 名つきマーカーを生成する。
+
+    Args:
+        profile_name: profile 名（rc ファイル内で識別子として使う）
+
+    Returns:
+        (begin_marker, end_marker)
+    """
+    return (
+        f"# === HOKUSAI Notion Dashboard "
+        f"(managed by `hokusai notion-setup`, profile={profile_name}) ===",
+        f"# === END HOKUSAI Notion Dashboard (profile={profile_name}) ===",
+    )
+
+
+# シェル変数名として妥当な形式（POSIX shell の identifier）
+# 想定外の文字（空白、改行、`;` 等）を含む値を rc に書くと注入リスクがあるため、
+# `persist_env_vars` / `_handle_notion_setup` の入口でチェックする。
+_ENV_VAR_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+# profile 名として許容する形式。hokusai/config/profiles.py の _PROFILE_NAME_PATTERN
+# と一致させる。マーカー行（コメント形式）に直接埋め込むため、改行 / 制御文字 /
+# 空白などが入ると rc の構造が壊れるためここでも独立に検証する。
+_PROFILE_NAME_FOR_MARKER_PATTERN = re.compile(r"^[a-z][a-z0-9_-]*$")
+
+
+def is_valid_env_var_name(name: Any) -> bool:
+    """env 変数名がシェル identifier として妥当な形式かを返す（読みやすい述語）。
+
+    `[A-Za-z_][A-Za-z0-9_]*` に一致する非空文字列のみ True。
+    """
+    return isinstance(name, str) and bool(_ENV_VAR_NAME_PATTERN.match(name))
+
+
+def _validate_env_var_name(name: str, *, role: str) -> None:
+    """env 変数名がシェル identifier として妥当か検証する。
+
+    Args:
+        name: 検証対象の env 変数名
+        role: エラーメッセージに含める用途名（"workflows_db_id_env" 等）
+
+    Raises:
+        ValueError: name が空、または `[A-Za-z_][A-Za-z0-9_]*` の形式に合わない
+    """
+    if not is_valid_env_var_name(name):
+        raise ValueError(
+            f"invalid env variable name for {role}: {name!r} "
+            f"(must match [A-Za-z_][A-Za-z0-9_]*)"
+        )
 
 
 def detect_shell_rc() -> Path:
@@ -276,6 +334,9 @@ def persist_env_vars(
     rc_path: Path | str,
     ids: dict[str, str],
     *,
+    workflows_env_name: str = "HOKUSAI_NOTION_WORKFLOWS_DB_ID",
+    pull_requests_env_name: str = "HOKUSAI_NOTION_PR_DB_ID",
+    profile_name: str | None = None,
     backup: bool = True,
 ) -> dict[str, Any]:
     """HOKUSAI Notion ダッシュボード用の env vars を rc ファイルに書き込む。
@@ -286,6 +347,10 @@ def persist_env_vars(
     Args:
         rc_path: 書き込み先（~/.zshrc 等）
         ids: setup_notion_workspace の戻り値（workflows_db_id 等）
+        workflows_env_name: workflows DB ID を保持する env 変数名
+        pull_requests_env_name: PR DB ID を保持する env 変数名
+        profile_name: profile 名（指定時は profile 別マーカーを使う）。
+            `None` の場合は v0.4.0 以前の従来マーカーを使い、後方互換を維持する。
         backup: True なら書き込み前に <rc_path>.hokusai.bak を作成
 
     Returns:
@@ -298,12 +363,31 @@ def persist_env_vars(
     """
     rc_path = Path(rc_path).expanduser()
 
+    # シェル変数名の最終ガード（コマンド注入 / rc 破損の防止）
+    _validate_env_var_name(workflows_env_name, role="workflows_env_name")
+    _validate_env_var_name(pull_requests_env_name, role="pull_requests_env_name")
+
+    # profile 名指定時は profile 別マーカー、未指定時は従来マーカー
+    if profile_name is not None:
+        # profile 名はコメント行に直接埋め込むため、改行・空白・制御文字等が
+        # 入ると rc の構造が壊れる。hokusai/config/profiles.py の規則と一致させる。
+        if not isinstance(profile_name, str) or not _PROFILE_NAME_FOR_MARKER_PATTERN.match(
+            profile_name
+        ):
+            raise ValueError(
+                f"invalid profile_name for rc marker: {profile_name!r} "
+                f"(must match [a-z][a-z0-9_-]*)"
+            )
+        begin_marker, end_marker = _build_profile_markers(profile_name)
+    else:
+        begin_marker, end_marker = PERSIST_BEGIN_MARKER, PERSIST_END_MARKER
+
     block_lines = [
-        PERSIST_BEGIN_MARKER,
+        begin_marker,
         f"# Last updated: {datetime.now().isoformat()}",
-        f'export HOKUSAI_NOTION_WORKFLOWS_DB_ID="{ids["workflows_db_id"]}"',
-        f'export HOKUSAI_NOTION_PR_DB_ID="{ids["pull_requests_db_id"]}"',
-        PERSIST_END_MARKER,
+        f'export {workflows_env_name}="{ids["workflows_db_id"]}"',
+        f'export {pull_requests_env_name}="{ids["pull_requests_db_id"]}"',
+        end_marker,
     ]
     new_block = "\n".join(block_lines) + "\n"
 
@@ -314,17 +398,17 @@ def persist_env_vars(
         backup_path = rc_path.with_suffix(rc_path.suffix + ".hokusai.bak")
         backup_path.write_text(existing)
 
-    if PERSIST_BEGIN_MARKER in existing and PERSIST_END_MARKER in existing:
-        # 既存ブロックを置き換え
-        start_idx = existing.index(PERSIST_BEGIN_MARKER)
-        end_idx = existing.index(PERSIST_END_MARKER) + len(PERSIST_END_MARKER)
+    if begin_marker in existing and end_marker in existing:
+        # 既存ブロックを置き換え（profile が同じなら同じマーカーで上書き）
+        start_idx = existing.index(begin_marker)
+        end_idx = existing.index(end_marker) + len(end_marker)
         # 末尾の改行も含めて差し替え（次のコンテンツとの空行管理）
         if end_idx < len(existing) and existing[end_idx] == "\n":
             end_idx += 1
         new_content = existing[:start_idx] + new_block + existing[end_idx:]
         action = "replaced"
     else:
-        # 末尾に追記
+        # 末尾に追記（別 profile の既存ブロックがあっても並列で保存）
         if existing and not existing.endswith("\n"):
             existing += "\n"
         # 既存内容と空行をはさんで追加

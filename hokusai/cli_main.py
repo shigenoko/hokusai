@@ -244,8 +244,13 @@ def main():
     )
     notion_setup_parser.add_argument(
         "--api-token-env",
-        default="HOKUSAI_NOTION_API_TOKEN",
-        help="API token を保持する環境変数名（デフォルト: HOKUSAI_NOTION_API_TOKEN）",
+        default=None,
+        help=(
+            "API token を保持する環境変数名。"
+            "省略時は --profile 指定があれば profile config の "
+            "notion_dashboard.api_token_env を採用、"
+            "それも無ければ既定の HOKUSAI_NOTION_API_TOKEN を使う。"
+        ),
     )
     notion_setup_parser.add_argument(
         "--persist",
@@ -334,10 +339,109 @@ def main():
     if args.step:
         print_step_mode()
 
-    # notion-setup コマンドは config を必要とせず、Notion API token のみで動く
-    # （セットアップ時点では config の DB ID 環境変数はまだ存在しない想定）
+    # notion-setup コマンドは config を必須としないが、--profile 指定時は
+    # profile config の env 名（notion_dashboard.api_token_env 等）を採用するため、
+    # best-effort で config を読む。
+    #
+    # エラー方針（v0.4.1〜）:
+    #   - profile 解決自体の失敗（ProfileError 系: 指定 profile が見つからない、
+    #     registry がない、引数併用エラー等）→ 既定 env 名で続行すると意図しない
+    #     Notion ワークスペースに対してセットアップを走らせるリスクがあるため、
+    #     原因別のメッセージを出して明示エラーで終了する。
+    #   - YAML 解析失敗・I/O エラーなど「profile は解決できたが config が壊れて
+    #     いる」系 → 原則中断する（同様の誤注入リスクのため）。例外として
+    #     `--api-token-env` が明示指定されている場合は、ユーザーが token env を
+    #     明示選択しているため警告のみで続行する。
     if args.command == "notion-setup":
-        sys.exit(_handle_notion_setup(args))
+        from .config.profiles import (
+            ConflictingProfileAndConfigError,
+            InvalidProfileNameError,
+            ProfileError,
+            ProfileNotFoundError,
+            ProfileRegistryNotFoundError,
+        )
+
+        notion_setup_profile = getattr(args, "profile", None)
+        # 空文字や空白のみの profile 名は明示エラー（truthy 判定でスルーすると
+        # 後段で profile 指定なし扱いとなり、--persist 時に rc 書き込みが失敗し
+        # 得るため早期に弾く）。
+        if notion_setup_profile is not None and not str(notion_setup_profile).strip():
+            print(
+                f"✗ --profile に空文字（または空白のみ）が指定されました: "
+                f"{notion_setup_profile!r}"
+            )
+            print("  --profile を省略するか、有効な profile 名を指定してください")
+            sys.exit(1)
+        notion_setup_config = None
+        if notion_setup_profile is not None:
+            try:
+                notion_setup_config_arg = getattr(args, "config", None)
+                notion_setup_config = create_config_from_env_and_file(
+                    notion_setup_config_arg, profile_name=notion_setup_profile
+                )
+            except ConflictingProfileAndConfigError as e:
+                # --profile と --config の同時指定（引数の併用不可）
+                print(f"✗ 引数の併用エラー: {e}")
+                print("  --profile と --config はどちらか一方のみ指定してください")
+                sys.exit(1)
+            except ProfileNotFoundError as e:
+                print(f"✗ profile '{notion_setup_profile}' が見つかりません: {e}")
+                print(
+                    "  確認: ~/.hokusai/profiles.yaml に "
+                    f"'{notion_setup_profile}' が登録されているか"
+                )
+                sys.exit(1)
+            except ProfileRegistryNotFoundError as e:
+                print(f"✗ profile registry が見つかりません: {e}")
+                print(
+                    "  確認: ~/.hokusai/profiles.yaml を作成するか、"
+                    "HOKUSAI_PROFILES_FILE 環境変数で path を指定してください"
+                )
+                sys.exit(1)
+            except InvalidProfileNameError as e:
+                print(f"✗ profile 名の形式が不正: {e}")
+                sys.exit(1)
+            except ProfileError as e:
+                # 上記でカバーされない ProfileError 派生（YAML 構造エラー等）
+                print(
+                    f"✗ profile '{notion_setup_profile}' の registry 解析に失敗: "
+                    f"{type(e).__name__}: {e}"
+                )
+                sys.exit(1)
+            except Exception as e:
+                # profile 解決自体は成功したが config 読み込みで失敗（YAML 解析
+                # 失敗・I/O エラー等）。
+                #
+                # 既定の HOKUSAI_NOTION_API_TOKEN が別案件用に設定されている場合、
+                # それを使って意図しない Notion ワークスペースにセットアップを
+                #走らせてしまうリスクがあるため、安全側に倒して中断する。
+                # ただし `--api-token-env` が明示指定されている場合は、ユーザー
+                # が token env を明示的に選択している（誤注入リスクは限定的）ため
+                # 警告のみで続行する。
+                explicit_api_token_env = getattr(args, "api_token_env", None)
+                if not explicit_api_token_env:
+                    print(
+                        f"✗ profile '{notion_setup_profile}' の config 読み込みに失敗: "
+                        f"{type(e).__name__}: {e}"
+                    )
+                    print(
+                        "  既定の env 変数名で続行すると、別案件用の "
+                        "HOKUSAI_NOTION_API_TOKEN を誤って使うリスクがあるため中断します"
+                    )
+                    print(
+                        "  対処: config の YAML を修正するか、"
+                        "--api-token-env で env 名を明示指定してください"
+                    )
+                    sys.exit(1)
+                print(
+                    f"⚠️ profile '{notion_setup_profile}' の config 読み込みに失敗: "
+                    f"{type(e).__name__}: {e}"
+                )
+                print(
+                    f"  --api-token-env={explicit_api_token_env!r} が明示指定されているため "
+                    f"既定 env 名フォールバックで続行します"
+                )
+        sys.exit(_handle_notion_setup(args, notion_setup_config))
 
     # profile コマンドは registry のみ参照し、WorkflowConfig は不要
     if args.command == "profile":
@@ -484,12 +588,24 @@ def main():
         sys.exit(1)
 
 
-def _handle_notion_setup(args) -> int:
+def _handle_notion_setup(args, config=None) -> int:
     """Notion 上に HOKUSAI 用 DB / ページを一括作成する初期セットアップ。
 
     親ページに HOKUSAI integration が接続済みであることが前提。
     成功時は環境変数の export コマンド例を出力する。
     --persist 指定時はシェル rc ファイルへ自動追記する。
+
+    env 名解決の優先順位（v0.4.1〜）:
+      1. `--api-token-env` 等で CLI 明示指定された値
+      2. config（profile 解決済み）の notion_dashboard.{api_token_env,
+         workflows_db_id_env, pull_requests_db_id_env}
+      3. 既定値（HOKUSAI_NOTION_API_TOKEN 等）
+
+    Args:
+        args: argparse の Namespace（api_token_env / parent_page_id 等）
+        config: 任意。--profile 指定時のみ呼び出し側で best-effort に
+            create_config_from_env_and_file() の結果を渡す。None の場合は
+            既定 env 名（HOKUSAI_NOTION_API_TOKEN 等）にフォールバックする。
 
     Returns:
         終了コード（0=成功、1=失敗）
@@ -499,14 +615,67 @@ def _handle_notion_setup(args) -> int:
     from .integrations.notion_dashboard import (
         NotionSetupError,
         detect_shell_rc,
+        is_valid_env_var_name,
         persist_env_vars,
         setup_notion_workspace,
     )
 
-    api_token = os.environ.get(args.api_token_env, "").strip()
+    # config 由来の env 名は採用前にシェル変数名として妥当か検証する。
+    # 不正値（空白 / 改行 / `;` 等）が混入すると rc 破損 / コマンド注入のリスクが
+    # あるため、無効なら警告して既定値にフォールバックする。
+    def _pick_env_name(
+        cfg_value: object, default: str, role: str
+    ) -> str:
+        if cfg_value is None:
+            return default
+        if not is_valid_env_var_name(cfg_value):
+            print(
+                f"⚠️ profile config の {role}={cfg_value!r} は不正な env 変数名です。"
+                f"既定値 {default!r} を使用します（[A-Za-z_][A-Za-z0-9_]* に合致する必要）"
+            )
+            return default
+        return cfg_value
+
+    # env 名解決: CLI 明示 > profile config > 既定値
+    api_token_env = args.api_token_env  # None の可能性あり（v0.4.1〜 default が None）
+    if api_token_env is not None and not is_valid_env_var_name(api_token_env):
+        # CLI 明示でも不正値は中断する（誤って source した時に致命的なため）
+        print(
+            f"✗ --api-token-env={api_token_env!r} は不正な env 変数名です "
+            f"（[A-Za-z_][A-Za-z0-9_]* に合致する必要があります）"
+        )
+        return 1
+    workflows_env = "HOKUSAI_NOTION_WORKFLOWS_DB_ID"
+    pull_requests_env = "HOKUSAI_NOTION_PR_DB_ID"
+
+    profile_name = getattr(args, "profile", None)
+    if config is not None:
+        nd_cfg = getattr(config, "notion_dashboard", None)
+        if nd_cfg is not None:
+            if api_token_env is None:
+                api_token_env = _pick_env_name(
+                    getattr(nd_cfg, "api_token_env", None),
+                    "HOKUSAI_NOTION_API_TOKEN",
+                    "notion_dashboard.api_token_env",
+                )
+            workflows_env = _pick_env_name(
+                getattr(nd_cfg, "workflows_db_id_env", None),
+                workflows_env,
+                "notion_dashboard.workflows_db_id_env",
+            )
+            pull_requests_env = _pick_env_name(
+                getattr(nd_cfg, "pull_requests_db_id_env", None),
+                pull_requests_env,
+                "notion_dashboard.pull_requests_db_id_env",
+            )
+
+    if api_token_env is None:
+        api_token_env = "HOKUSAI_NOTION_API_TOKEN"
+
+    api_token = os.environ.get(api_token_env, "").strip()
     if not api_token:
-        print(f"環境変数 {args.api_token_env} が設定されていません")
-        print(f'  例: export {args.api_token_env}="secret_xxxxxxxxxx"')
+        print(f"環境変数 {api_token_env} が設定されていません")
+        print(f'  例: export {api_token_env}="secret_xxxxxxxxxx"')
         print(
             "  Internal Integration Token は https://www.notion.so/my-integrations から発行できます"
         )
@@ -515,6 +684,9 @@ def _handle_notion_setup(args) -> int:
     print(
         f"親ページ {args.parent_page_id} の配下に HOKUSAI 用リソースを作成します..."
     )
+    if profile_name:
+        print(f"  Profile: {profile_name}")
+    print(f"  API token env: {api_token_env}")
     print()
 
     try:
@@ -539,8 +711,8 @@ def _handle_notion_setup(args) -> int:
     print()
     print("以下を環境変数に設定してください（~/.zshrc などに追記推奨）:")
     print()
-    print(f'  export HOKUSAI_NOTION_WORKFLOWS_DB_ID="{result["workflows_db_id"]}"')
-    print(f'  export HOKUSAI_NOTION_PR_DB_ID="{result["pull_requests_db_id"]}"')
+    print(f'  export {workflows_env}="{result["workflows_db_id"]}"')
+    print(f'  export {pull_requests_env}="{result["pull_requests_db_id"]}"')
 
     # --persist 指定時は rc ファイルへ書き込む
     if getattr(args, "persist", False):
@@ -553,6 +725,9 @@ def _handle_notion_setup(args) -> int:
             persist_result = persist_env_vars(
                 rc_path,
                 result,
+                workflows_env_name=workflows_env,
+                pull_requests_env_name=pull_requests_env,
+                profile_name=profile_name,
                 backup=not getattr(args, "no_backup", False),
             )
             print()

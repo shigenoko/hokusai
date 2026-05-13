@@ -10,6 +10,7 @@ from .pull_requests_db import PullRequestsDBClient
 from .setup import (
     NotionSetupError,
     detect_shell_rc,
+    is_valid_env_var_name,
     persist_env_vars,
     setup_notion_workspace,
 )
@@ -24,6 +25,7 @@ __all__ = [
     "PullRequestsDBClient",
     "WorkflowsDBClient",
     "detect_shell_rc",
+    "is_valid_env_var_name",
     "persist_env_vars",
     "setup_notion_workspace",
 ]
