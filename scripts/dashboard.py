@@ -7206,7 +7206,9 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         """source 文字列から WritebackTarget enum を取得。
 
         未知の値（typo / 不正値）は silent に Miro 扱いにならないよう
-        ValueError を投げる。呼び出し側で catch して 400 を返す。
+        ValueError を投げる。呼び出し側はこの ValueError を catch して
+        400（"unknown writeback source"）を返す。**500 ではない**ことに
+        注意（API クライアント側のバグ起因なので 400 が正しい）。
         """
         from hokusai.integrations.design.writeback import WritebackTarget
         if source == "figma":
@@ -7230,9 +7232,17 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         # GET の limit 上限。極端な値で fetch / レスポンス生成負荷が跳ねないよう clamp。
         # 運用上は 100 / 数百件で足りる想定。
         _MAX_LIST_LIMIT = 1000
+        # source の検証は try の外で行う（不正値は 400 を返す）
+        try:
+            target = self._get_writeback_target(source)
+        except ValueError as e:
+            self._send_json_response(
+                {"success": False, "errors": [str(e)]},
+                status_code=400,
+            )
+            return
         try:
             from hokusai.integrations.design.writeback import OutboxStore
-            target = self._get_writeback_target(source)
             # limit のバリデーション: 不正値 / 負数はデフォルト 100、上限超は 1000 で clamp
             limit_raw = query.get("limit", ["100"])[0]
             try:
@@ -7309,6 +7319,15 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         バグを修正済み）。エラーレスポンスは `{"success": False, "errors": [...]}`
         配列形式で統一。
         """
+        # source の検証は try の外で行う（不正値は 400 を返す）
+        try:
+            target = self._get_writeback_target(source)
+        except ValueError as e:
+            self._send_json_response(
+                {"success": False, "errors": [str(e)]},
+                status_code=400,
+            )
+            return
         try:
             from hokusai.config import get_config
             from hokusai.integrations.design.writeback import (
@@ -7317,7 +7336,6 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 build_miro_dispatcher,
                 load_writeback_config,
             )
-            target = self._get_writeback_target(source)
             # スキーマ初期化保証（OutboxStore 直接接続のため）
             _get_store()
             store = OutboxStore(DB_PATH, target=target)
@@ -7346,9 +7364,17 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             else:
                 try:
                     body = self._read_json_body()
-                except Exception:
+                except (ValueError, json.JSONDecodeError, UnicodeDecodeError, OSError):
                     self._send_json_response(
                         {"success": False, "errors": ["request body must be valid JSON"]},
+                        status_code=400,
+                    )
+                    return
+                # JSON が配列 / 文字列 / 数値 / null 等の場合は body.get(...) で
+                # AttributeError になるため dict のみ許容する。
+                if not isinstance(body, dict):
+                    self._send_json_response(
+                        {"success": False, "errors": ["request body must be a JSON object"]},
                         status_code=400,
                     )
                     return
@@ -7442,15 +7468,54 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         body: {"id": <int>}（必須）
         outbox から errors へ強制移動。
         必須フィールド欠落 / 非数値は 400 を返す。
+        retry-pending と同様に Content-Length 不正値 / JSON 不正 / 非 dict body は
+        すべて 400 で返す（500 にしない）。
         """
+        # source の検証は try の外で行う（不正値は 400 を返す）
+        try:
+            target = self._get_writeback_target(source)
+        except ValueError as e:
+            self._send_json_response(
+                {"success": False, "errors": [str(e)]},
+                status_code=400,
+            )
+            return
         try:
             from hokusai.integrations.design.writeback import OutboxStore
-            target = self._get_writeback_target(source)
+            # Content-Length パース（retry-pending と同パターン）。
+            # 不正値で 500 にならないよう、ここで明示的にバリデーション。
+            content_length_raw = self.headers.get("Content-Length")
+            if content_length_raw is None:
+                content_length = 0
+            else:
+                try:
+                    content_length = int(content_length_raw)
+                    if content_length < 0:
+                        raise ValueError("negative Content-Length")
+                except (TypeError, ValueError):
+                    self._send_json_response(
+                        {"success": False, "errors": ["invalid Content-Length header"]},
+                        status_code=400,
+                    )
+                    return
+            if content_length == 0:
+                # body 必須なので body 無しも 400
+                self._send_json_response(
+                    {"success": False, "errors": ["id is required"]},
+                    status_code=400,
+                )
+                return
             try:
                 body = self._read_json_body()
-            except Exception:
+            except (ValueError, json.JSONDecodeError, UnicodeDecodeError, OSError):
                 self._send_json_response(
                     {"success": False, "errors": ["request body must be valid JSON"]},
+                    status_code=400,
+                )
+                return
+            if not isinstance(body, dict):
+                self._send_json_response(
+                    {"success": False, "errors": ["request body must be a JSON object"]},
                     status_code=400,
                 )
                 return
