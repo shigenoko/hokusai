@@ -415,6 +415,7 @@ def _dispatch_design_writeback(state, pull_requests: list) -> None:
             build_miro_dispatcher,
             dispatch_phase8a_writeback,
             load_writeback_config,
+            populate_primary_writeback_targets,
         )
     except ImportError:
         return  # writeback モジュールが無い環境では何もしない
@@ -438,6 +439,13 @@ def _dispatch_design_writeback(state, pull_requests: list) -> None:
     commit_sha = commits[0] if commits else ""
 
     profile_name = state.get("profile_name") or getattr(config, "profile_name", None)
+
+    # Phase 3 で populate されているはずだが、ノード呼び出し順や旧 workflow
+    # state の場合に未設定のケースがあるため、ここでも補完を試みる
+    # （既存値は上書きしない）。これがないと figma_context / miro_context は
+    # 揃っていても primary_* が空で dispatch_phase8a_writeback が常に skip 扱い
+    # になってしまう。
+    populate_primary_writeback_targets(state)
 
     result = dispatch_phase8a_writeback(
         state,
