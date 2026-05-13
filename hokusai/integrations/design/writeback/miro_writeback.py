@@ -121,6 +121,9 @@ class MiroWritebackDispatcher:
             "mr_url": args.mr_url,
             "commit_sha": args.commit_sha,
             "card_payload": card_payload,
+            "event_type": args.event_type,
+            # retry 時に同じ idempotency_key を再構築するため revision を明示保存
+            "revision": args.revision,
         }
 
         try:
@@ -229,12 +232,13 @@ class MiroWritebackDispatcher:
         new_count = self.store.increment_attempt(outbox_id)
 
         # 5 回目でも実際に試行する
+        # revision は payload に明示保存している（dispatch 時と同じキーを再生成）
         p = entry.payload
         args = MiroWritebackArgs(
             workflow_id=entry.workflow_id,
             profile_name=entry.profile_name,
-            event_type=entry.event_type,
-            revision=str(p.get("commit_sha") or "(unknown)"),
+            event_type=p.get("event_type", entry.event_type),
+            revision=str(p.get("revision") or p.get("commit_sha") or "(unknown)"),
             board_id=p.get("board_id", ""),
             frame_id=p.get("frame_id", ""),
             frame_meta=p.get("frame_meta", {}),

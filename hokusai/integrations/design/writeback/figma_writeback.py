@@ -131,6 +131,10 @@ class FigmaWritebackDispatcher:
             "message": message,
             "mr_url": args.mr_url,
             "commit_sha": args.commit_sha,
+            "event_type": args.event_type,
+            # retry 時に同じ idempotency_key を再構築するため revision を明示保存。
+            # dispatch 側で commit_sha 以外（例: MR iid）が来ても収束する。
+            "revision": args.revision,
         }
 
         try:
@@ -246,12 +250,13 @@ class FigmaWritebackDispatcher:
         new_count = self.store.increment_attempt(outbox_id)
 
         # payload から再構築して dispatch（5 回目でも実際に試行する）
+        # revision は payload に明示保存している（dispatch 時と同じキーを再生成）
         p = entry.payload
         args = FigmaWritebackArgs(
             workflow_id=entry.workflow_id,
             profile_name=entry.profile_name,
-            event_type=entry.event_type,
-            revision=str(p.get("commit_sha") or "(unknown)"),
+            event_type=p.get("event_type", entry.event_type),
+            revision=str(p.get("revision") or p.get("commit_sha") or "(unknown)"),
             file_key=p.get("file_key", ""),
             node_id=p.get("node_id", ""),
             node_offset=p.get("node_offset"),

@@ -7211,7 +7211,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         """GET /api/{figma,miro}/{outbox,errors}
 
         Query:
-            limit (int, default 100、不正値は default にフォールバック)
+            limit (int, default 100、最大 1000、不正値は default にフォールバック)
             profile (str, optional)
 
         エラーレスポンスは既存の `_handle_design_cache_refresh_post` と統一して
@@ -7219,15 +7219,20 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         内部実装の詳細（例外メッセージ）はサーバ側ログに留め、レスポンスには
         例外型のみ含める（パス等の情報漏洩防止）。
         """
+        # GET の limit 上限。極端な値で fetch / レスポンス生成負荷が跳ねないよう clamp。
+        # 運用上は 100 / 数百件で足りる想定。
+        _MAX_LIST_LIMIT = 1000
         try:
             from hokusai.integrations.design.writeback import OutboxStore
             target = self._get_writeback_target(source)
-            # limit のバリデーション: 不正値はデフォルト 100 にフォールバック
+            # limit のバリデーション: 不正値 / 負数はデフォルト 100、上限超は 1000 で clamp
             limit_raw = query.get("limit", ["100"])[0]
             try:
                 limit = int(limit_raw)
                 if limit <= 0:
                     limit = 100
+                elif limit > _MAX_LIST_LIMIT:
+                    limit = _MAX_LIST_LIMIT
             except (TypeError, ValueError):
                 limit = 100
             profile = query.get("profile", [None])[0]
@@ -7269,13 +7274,21 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         """POST /api/{figma,miro}/retry-pending
 
         body:
-            {"id": <int>}        個別再送（指定 outbox id のみ）
-            {}                   pending 全件再送（ページング処理）
-            {"force": true}      errors にあっても再試行
-            {"limit": <int>}     1 リクエストあたりの上限（既定 500、最大 5000）
+            {"id": <outbox_id:int>}  個別再送（指定 outbox 行のみ）
+            {}                       outbox の pending 全件を snapshot 取得して再送
+            {"limit": <int>}         1 リクエストあたりの上限（既定 500、最大 5000）
+            {"force": true}          ※「同一 idempotency_key の payload が errors にあっても
+                                     新規 dispatch を許可する」フラグ。本 API では使われない
+                                     が、Phase 8a 等の他経路 dispatch から errors を bypass
+                                     する用途で予約されている。
+
+        **重要**: 本 API は outbox 行のみが対象。errors テーブル上の行を直接再送する
+        経路は v0.4.0 にはなく、Operations Console から errors 行を outbox に戻す
+        手段も提供していない（v0.4.1 で検討予定）。errors 行の再送が必要な場合は
+        Phase 8a を同じ commit で再実行することで、`force=true` 経路を通って
+        dispatcher を新規呼び出しできる。
 
         全件モードはバッチサイズ単位でループし、100 件超の pending も処理する。
-
         エラーレスポンスは `{"success": False, "errors": [...]}` 配列形式で統一。
         """
         try:

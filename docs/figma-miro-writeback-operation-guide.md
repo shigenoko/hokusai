@@ -116,11 +116,13 @@ POST:
 
 | パス | body | 動作 |
 |---|---|---|
-| `/api/figma/retry-pending` | `{}` | pending 全件再送 |
-| `/api/figma/retry-pending` | `{"id": <int>}` | 個別 id を再送 |
-| `/api/figma/retry-pending` | `{"force": true}` | errors にあっても再試行 |
-| `/api/figma/move-to-errors` | `{"id": <int>}` | 強制 errors 移動 |
+| `/api/figma/retry-pending` | `{}` | outbox の pending 全件を snapshot 再送（最大 500） |
+| `/api/figma/retry-pending` | `{"id": <outbox_id>}` | 個別 outbox 行を再送 |
+| `/api/figma/retry-pending` | `{"limit": <int>}` | 1 リクエストあたりの上限指定（最大 5000） |
+| `/api/figma/move-to-errors` | `{"id": <outbox_id>}` | outbox から errors へ強制移動 |
 | `/api/miro/*` | 同上 | Miro 版 |
+
+**v0.4.0 の制約**: 本 API は **outbox 行のみ** が対象。errors テーブル上の行を直接再送する経路は v0.4.0 では提供していない。errors 行の再送が必要な場合は、Phase 8a を同じ commit で再実行することで dispatcher を新規呼び出しできる。errors 行の手動再送 API は v0.4.1 以降で追加検討。
 
 ### 5.2. 再送のフロー
 
@@ -128,13 +130,14 @@ POST:
 作成された outbox 行
     ↓ (Operations Console で再送ボタンクリック)
 attempt_count +1
-    ↓ (再 API 呼び出し)
+    ↓ (再 API 呼び出し: 5 回目も実際に dispatch を試行)
 成功 → idempotency に記録、outbox から削除
 失敗 → outbox 維持、last_error 更新
     ↓ (attempt_count == 5)
 errors テーブルへ自動移動（自動経路では再投稿しない）
     ↓ (運用者が必要なら)
-/api/figma/retry-pending body {"id": X, "force": true} で errors を無視して再試行
+Phase 8a を同じ commit で再実行 → dispatcher が新規呼び出しされ、errors は
+"3 段階チェック" の skip 対象だが force=True 経路で再試行できる（内部 API）
 ```
 
 ### 5.3. UI 拡張（v0.4.1 以降）
@@ -145,9 +148,12 @@ errors テーブルへ自動移動（自動経路では再投稿しない）
 # pending 件数確認
 curl http://localhost:8765/api/figma/outbox | jq '.count'
 
-# errors を見て手動再送
-curl http://localhost:8765/api/figma/errors | jq '.items[] | {id, idempotency_key, error_message}'
-curl -X POST -d '{"id":1,"force":true}' http://localhost:8765/api/figma/retry-pending
+# outbox の個別 id を確認して再送
+curl http://localhost:8765/api/figma/outbox | jq '.items[] | {id, idempotency_key, last_error}'
+curl -X POST -d '{"id":1}' http://localhost:8765/api/figma/retry-pending
+
+# errors を確認（v0.4.0 では再送 API なし、参照のみ）
+curl http://localhost:8765/api/figma/errors | jq '.items[] | {id, idempotency_key, error_message, failed_at}'
 ```
 
 ## 6. 冪等性
