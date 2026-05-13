@@ -10,9 +10,11 @@
 
 profile 機能（v0.3.0）で複数の Notion ワークスペースを案件単位で使い分ける運用において、`hokusai notion-setup` が profile config の env 変数名を尊重しない問題がある。
 
-### 1.1 現状の動作（コード根拠つき）
+### 1.1 現状の動作（v0.4.0 時点、コード根拠つき）
 
-| 箇所 | 現状 |
+以下は本 PR で修正対象となる **v0.4.0 時点** の挙動。本 PR 適用後はこれらが変更される点に注意（修正後の状態は §3 / §6 参照）。
+
+| 箇所（v0.4.0） | 現状 |
 |---|---|
 | `cli_main.py:245-249` | `--api-token-env` の default が `HOKUSAI_NOTION_API_TOKEN` でハードコード |
 | `cli_main.py:339` | `notion-setup` は config を読まないパスを通る |

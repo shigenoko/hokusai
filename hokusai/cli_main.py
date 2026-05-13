@@ -341,8 +341,18 @@ def main():
 
     # notion-setup コマンドは config を必須としないが、--profile 指定時は
     # profile config の env 名（notion_dashboard.api_token_env 等）を採用するため、
-    # best-effort で config を読む。失敗時は既定 env 名にフォールバックして続行。
+    # best-effort で config を読む。
+    #
+    # エラー方針:
+    #   - profile 解決自体の失敗（ProfileError 系: 指定 profile が見つからない、
+    #     registry がない等）→ 既定 env 名で続行すると意図しない Notion
+    #     ワークスペースに対してセットアップを走らせるリスクがあるため、明示
+    #     エラーで終了する。
+    #   - YAML 解析失敗・I/O エラーなど「profile は解決できたが config が壊れて
+    #     いる」系 → best-effort で既定 env 名にフォールバックして続行する。
     if args.command == "notion-setup":
+        from .config.profiles import ProfileError
+
         notion_setup_profile = getattr(args, "profile", None)
         notion_setup_config = None
         if notion_setup_profile:
@@ -351,7 +361,15 @@ def main():
                 notion_setup_config = create_config_from_env_and_file(
                     notion_setup_config_arg, profile_name=notion_setup_profile
                 )
+            except ProfileError as e:
+                # ユーザーが明示指定した profile が解決できない → 中断
+                print(
+                    f"✗ profile '{notion_setup_profile}' を解決できませんでした: "
+                    f"{type(e).__name__}: {e}"
+                )
+                sys.exit(1)
             except Exception as e:
+                # profile は解決できたが config が壊れている / I/O エラー等
                 print(
                     f"⚠️ profile '{notion_setup_profile}' の config 読み込みに失敗: "
                     f"{type(e).__name__}: {e}"
@@ -531,12 +549,36 @@ def _handle_notion_setup(args, config=None) -> int:
     from .integrations.notion_dashboard import (
         NotionSetupError,
         detect_shell_rc,
+        is_valid_env_var_name,
         persist_env_vars,
         setup_notion_workspace,
     )
 
+    # config 由来の env 名は採用前にシェル変数名として妥当か検証する。
+    # 不正値（空白 / 改行 / `;` 等）が混入すると rc 破損 / コマンド注入のリスクが
+    # あるため、無効なら警告して既定値にフォールバックする。
+    def _pick_env_name(
+        cfg_value: object, default: str, role: str
+    ) -> str:
+        if cfg_value is None:
+            return default
+        if not is_valid_env_var_name(cfg_value):
+            print(
+                f"⚠️ profile config の {role}={cfg_value!r} は不正な env 変数名です。"
+                f"既定値 {default!r} を使用します（[A-Za-z_][A-Za-z0-9_]* に合致する必要）"
+            )
+            return default
+        return cfg_value
+
     # env 名解決: CLI 明示 > profile config > 既定値
     api_token_env = args.api_token_env  # None の可能性あり（v0.4.1〜 default が None）
+    if api_token_env is not None and not is_valid_env_var_name(api_token_env):
+        # CLI 明示でも不正値は中断する（誤って source した時に致命的なため）
+        print(
+            f"✗ --api-token-env={api_token_env!r} は不正な env 変数名です "
+            f"（[A-Za-z_][A-Za-z0-9_]* に合致する必要があります）"
+        )
+        return 1
     workflows_env = "HOKUSAI_NOTION_WORKFLOWS_DB_ID"
     pull_requests_env = "HOKUSAI_NOTION_PR_DB_ID"
 
@@ -544,14 +586,22 @@ def _handle_notion_setup(args, config=None) -> int:
     if config is not None:
         nd_cfg = getattr(config, "notion_dashboard", None)
         if nd_cfg is not None:
-            if api_token_env is None and getattr(nd_cfg, "api_token_env", None):
-                api_token_env = nd_cfg.api_token_env
-            cfg_wf_env = getattr(nd_cfg, "workflows_db_id_env", None)
-            if cfg_wf_env:
-                workflows_env = cfg_wf_env
-            cfg_pr_env = getattr(nd_cfg, "pull_requests_db_id_env", None)
-            if cfg_pr_env:
-                pull_requests_env = cfg_pr_env
+            if api_token_env is None:
+                api_token_env = _pick_env_name(
+                    getattr(nd_cfg, "api_token_env", None),
+                    "HOKUSAI_NOTION_API_TOKEN",
+                    "notion_dashboard.api_token_env",
+                )
+            workflows_env = _pick_env_name(
+                getattr(nd_cfg, "workflows_db_id_env", None),
+                workflows_env,
+                "notion_dashboard.workflows_db_id_env",
+            )
+            pull_requests_env = _pick_env_name(
+                getattr(nd_cfg, "pull_requests_db_id_env", None),
+                pull_requests_env,
+                "notion_dashboard.pull_requests_db_id_env",
+            )
 
     if api_token_env is None:
         api_token_env = "HOKUSAI_NOTION_API_TOKEN"

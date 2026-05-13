@@ -23,6 +23,7 @@ Notion 上に HOKUSAI 用の DB / ページを一括作成する。
 from __future__ import annotations
 
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -276,6 +277,37 @@ def _build_profile_markers(profile_name: str) -> tuple[str, str]:
     )
 
 
+# シェル変数名として妥当な形式（POSIX shell の identifier）
+# 想定外の文字（空白、改行、`;` 等）を含む値を rc に書くと注入リスクがあるため、
+# `persist_env_vars` / `_handle_notion_setup` の入口でチェックする。
+_ENV_VAR_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def is_valid_env_var_name(name: Any) -> bool:
+    """env 変数名がシェル identifier として妥当な形式かを返す（読みやすい述語）。
+
+    `[A-Za-z_][A-Za-z0-9_]*` に一致する非空文字列のみ True。
+    """
+    return isinstance(name, str) and bool(_ENV_VAR_NAME_PATTERN.match(name))
+
+
+def _validate_env_var_name(name: str, *, role: str) -> None:
+    """env 変数名がシェル identifier として妥当か検証する。
+
+    Args:
+        name: 検証対象の env 変数名
+        role: エラーメッセージに含める用途名（"workflows_db_id_env" 等）
+
+    Raises:
+        ValueError: name が空、または `[A-Za-z_][A-Za-z0-9_]*` の形式に合わない
+    """
+    if not is_valid_env_var_name(name):
+        raise ValueError(
+            f"invalid env variable name for {role}: {name!r} "
+            f"(must match [A-Za-z_][A-Za-z0-9_]*)"
+        )
+
+
 def detect_shell_rc() -> Path:
     """SHELL 環境変数から rc ファイルパスを推測する。
 
@@ -325,6 +357,10 @@ def persist_env_vars(
         }
     """
     rc_path = Path(rc_path).expanduser()
+
+    # シェル変数名の最終ガード（コマンド注入 / rc 破損の防止）
+    _validate_env_var_name(workflows_env_name, role="workflows_env_name")
+    _validate_env_var_name(pull_requests_env_name, role="pull_requests_env_name")
 
     # profile 名指定時は profile 別マーカー、未指定時は従来マーカー
     if profile_name is not None:

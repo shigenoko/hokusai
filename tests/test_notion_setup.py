@@ -844,6 +844,121 @@ def test_cli_handler_falls_back_to_default_when_profile_config_missing_field(
     assert 'export HOKUSAI_NOTION_PR_DB_ID="pr"' in out
 
 
+def test_persist_env_vars_rejects_invalid_env_name(tmp_path, sample_ids):
+    """シェル変数名として不正な workflows_env_name を渡すと ValueError"""
+    from hokusai.integrations.notion_dashboard.setup import persist_env_vars
+
+    rc = tmp_path / "test.zshrc"
+
+    # 空白を含む不正値
+    with pytest.raises(ValueError, match="invalid env variable name"):
+        persist_env_vars(
+            rc, sample_ids,
+            workflows_env_name="BAD NAME",
+        )
+    # 改行を含む不正値（コマンド注入リスク）
+    with pytest.raises(ValueError, match="invalid env variable name"):
+        persist_env_vars(
+            rc, sample_ids,
+            pull_requests_env_name="OK_NAME\nexport EVIL=1",
+        )
+    # 数字始まり
+    with pytest.raises(ValueError, match="invalid env variable name"):
+        persist_env_vars(
+            rc, sample_ids,
+            workflows_env_name="1BAD",
+        )
+    # 空文字
+    with pytest.raises(ValueError, match="invalid env variable name"):
+        persist_env_vars(
+            rc, sample_ids,
+            workflows_env_name="",
+        )
+
+
+def test_is_valid_env_var_name():
+    """is_valid_env_var_name の真偽パターン"""
+    from hokusai.integrations.notion_dashboard import is_valid_env_var_name
+
+    # OK
+    assert is_valid_env_var_name("HOKUSAI_NOTION_API_TOKEN")
+    assert is_valid_env_var_name("_PRIVATE")
+    assert is_valid_env_var_name("a")
+    assert is_valid_env_var_name("VAR123")
+
+    # NG
+    assert not is_valid_env_var_name("")
+    assert not is_valid_env_var_name("1VAR")
+    assert not is_valid_env_var_name("BAD NAME")
+    assert not is_valid_env_var_name("BAD;NAME")
+    assert not is_valid_env_var_name("BAD\nNAME")
+    assert not is_valid_env_var_name(None)
+    assert not is_valid_env_var_name(123)
+
+
+def test_cli_handler_rejects_invalid_explicit_api_token_env(capsys):
+    """--api-token-env に不正値が来たら 1 を返して中断する"""
+    from hokusai import cli_main
+
+    class _Args:
+        api_token_env = "BAD NAME"
+        parent_page_id = "p"
+        profile = None
+
+    rc = cli_main._handle_notion_setup(_Args(), config=None)
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "不正な env 変数名" in out
+
+
+def test_cli_handler_falls_back_when_config_env_name_invalid(
+    capsys, monkeypatch, tmp_path
+):
+    """profile config の env 名が不正なら警告 + 既定値にフォールバック"""
+    from hokusai import cli_main
+
+    monkeypatch.setenv("HOKUSAI_NOTION_API_TOKEN", "secret-default")
+
+    def _fake_setup(api_token, parent_page_id):
+        return {"workflows_db_id": "wf", "pull_requests_db_id": "pr"}
+
+    monkeypatch.setattr(
+        "hokusai.integrations.notion_dashboard.setup_notion_workspace",
+        _fake_setup,
+    )
+
+    # 不正な env 名（コマンド注入を試みた形）
+    config = _make_notion_dashboard_config(
+        api_token_env="BAD NAME",  # 空白
+        workflows_db_id_env="WF\nexport EVIL=1",  # 改行
+        pull_requests_db_id_env="1BAD",  # 数字始まり
+    )
+
+    class _Args:
+        api_token_env = None
+        parent_page_id = "p"
+        profile = "bad"
+        persist = False
+        shell_rc = None
+        no_backup = False
+
+    return_code = cli_main._handle_notion_setup(_Args(), config=config)
+    out = capsys.readouterr().out
+    assert return_code == 0
+    # 不正な env 名は警告として出力（3 件すべて）
+    assert out.count("不正な env 変数名") == 3
+    # 既定値にフォールバック（export 行が正規の env 名で出る）
+    assert 'export HOKUSAI_NOTION_WORKFLOWS_DB_ID="wf"' in out
+    assert 'export HOKUSAI_NOTION_PR_DB_ID="pr"' in out
+    # 不正値で実際の export 行（"<NAME>="<VALUE>"" フォーマット）が作られていない。
+    # 警告メッセージ内に repr 表現として `'WF\nexport EVIL=1'` が現れるのは可
+    # （改行はリテラル `\n` 2 文字としてエスケープされて表示される）
+    assert 'export "1BAD"' not in out and "export 1BAD=" not in out
+    # 注入された "export EVIL=1" が独立した行として出ない
+    export_lines = [l for l in out.splitlines() if l.lstrip().startswith("export ")]
+    assert all("EVIL" not in line for line in export_lines)
+
+
 def test_cli_handler_persist_uses_profile_marker_and_custom_env_names(
     capsys, monkeypatch, tmp_path
 ):
