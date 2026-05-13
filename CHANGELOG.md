@@ -17,6 +17,39 @@ HOKUSAI のすべての特筆すべき変更をこのファイルに記録する
 
 ---
 
+## [0.4.1] - 2026-05-14
+
+`hokusai notion-setup` の **profile-aware 化**（[#17](https://github.com/shigenoko/hokusai/issues/17) 対応）。
+
+複数の Notion ワークスペースを profile 単位で使い分けるユースケースで、
+profile config の env 変数名を自動採用する。
+
+### Changed
+
+- `hokusai notion-setup` で `--profile <name>` が指定されたとき、profile config の
+  `notion_dashboard.api_token_env` / `workflows_db_id_env` / `pull_requests_db_id_env`
+  を自動採用するようになった。
+- `--api-token-env` の既定値を `None` に変更。明示指定 / profile config / 既定値
+  （`HOKUSAI_NOTION_API_TOKEN`）の優先順位で env 名を解決する。
+- `--persist` で rc に書き込む env 名も profile config に追従するようになった。
+
+### Added
+
+- profile 別マーカー（`# === HOKUSAI Notion Dashboard ... profile=<name> ===`）。
+  同じ rc ファイルに複数 profile の env ブロックを並列保存できる。
+- `persist_env_vars()` に `workflows_env_name` / `pull_requests_env_name` /
+  `profile_name` 引数を追加（後方互換あり）。
+
+### 後方互換
+
+- `--profile` を指定しない実行は従来通り `HOKUSAI_NOTION_API_TOKEN` /
+  `HOKUSAI_NOTION_WORKFLOWS_DB_ID` / `HOKUSAI_NOTION_PR_DB_ID` を使う。
+- 既存の rc マーカー（profile 名なし）はそのまま尊重され、上書きされない。
+
+詳細は `docs/hokusai-issue-17-notion-setup-profile-aware-implementation-plan.md` に対応。
+
+---
+
 ## [0.4.0] - 2026-05-13
 
 Figma / Miro **書き戻し機能（Phase E）** を追加。Phase 8a（PR 作成）完了時に、

@@ -253,6 +253,13 @@ hokusai notion-setup --parent-page-id <notion-page-id> --persist
 
 After setup, the generated database IDs can be referenced through environment variables such as `HOKUSAI_NOTION_WORKFLOWS_DB_ID` and `HOKUSAI_NOTION_PR_DB_ID`.
 
+For profile-based operation with multiple Notion workspaces, the env variable names can be customized per profile in the profile config (`notion_dashboard.api_token_env` / `workflows_db_id_env` / `pull_requests_db_id_env`). When `--profile <name>` is supplied to `notion-setup`, HOKUSAI automatically reads those env names from the profile config and writes the resolved names to the rc file (with a profile-tagged marker that allows multiple profiles to coexist in the same rc file):
+
+```bash
+# profile config defines HOKUSAI_NOTION_API_TOKEN_4HOKUSAI etc.
+hokusai --profile hokusai notion-setup --parent-page-id <notion-page-id> --persist
+```
+
 ### Figma / Miro integration (optional)
 
 Figma and Miro integrations can read design context into the workflow. Writeback for comments/cards is available behind explicit config flags.

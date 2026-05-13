@@ -244,8 +244,13 @@ def main():
     )
     notion_setup_parser.add_argument(
         "--api-token-env",
-        default="HOKUSAI_NOTION_API_TOKEN",
-        help="API token を保持する環境変数名（デフォルト: HOKUSAI_NOTION_API_TOKEN）",
+        default=None,
+        help=(
+            "API token を保持する環境変数名。"
+            "省略時は --profile 指定があれば profile config の "
+            "notion_dashboard.api_token_env を採用、"
+            "それも無ければ既定の HOKUSAI_NOTION_API_TOKEN を使う。"
+        ),
     )
     notion_setup_parser.add_argument(
         "--persist",
@@ -334,10 +339,25 @@ def main():
     if args.step:
         print_step_mode()
 
-    # notion-setup コマンドは config を必要とせず、Notion API token のみで動く
-    # （セットアップ時点では config の DB ID 環境変数はまだ存在しない想定）
+    # notion-setup コマンドは config を必須としないが、--profile 指定時は
+    # profile config の env 名（notion_dashboard.api_token_env 等）を採用するため、
+    # best-effort で config を読む。失敗時は既定 env 名にフォールバックして続行。
     if args.command == "notion-setup":
-        sys.exit(_handle_notion_setup(args))
+        notion_setup_profile = getattr(args, "profile", None)
+        notion_setup_config = None
+        if notion_setup_profile:
+            try:
+                notion_setup_config_arg = getattr(args, "config", None)
+                notion_setup_config = create_config_from_env_and_file(
+                    notion_setup_config_arg, profile_name=notion_setup_profile
+                )
+            except Exception as e:
+                print(
+                    f"⚠️ profile '{notion_setup_profile}' の config 読み込みに失敗: "
+                    f"{type(e).__name__}: {e}"
+                )
+                print("  既定の env 変数名で続行します")
+        sys.exit(_handle_notion_setup(args, notion_setup_config))
 
     # profile コマンドは registry のみ参照し、WorkflowConfig は不要
     if args.command == "profile":
@@ -484,12 +504,24 @@ def main():
         sys.exit(1)
 
 
-def _handle_notion_setup(args) -> int:
+def _handle_notion_setup(args, config=None) -> int:
     """Notion 上に HOKUSAI 用 DB / ページを一括作成する初期セットアップ。
 
     親ページに HOKUSAI integration が接続済みであることが前提。
     成功時は環境変数の export コマンド例を出力する。
     --persist 指定時はシェル rc ファイルへ自動追記する。
+
+    env 名解決の優先順位（v0.4.1〜）:
+      1. `--api-token-env` 等で CLI 明示指定された値
+      2. config（profile 解決済み）の notion_dashboard.{api_token_env,
+         workflows_db_id_env, pull_requests_db_id_env}
+      3. 既定値（HOKUSAI_NOTION_API_TOKEN 等）
+
+    Args:
+        args: argparse の Namespace（api_token_env / parent_page_id 等）
+        config: 任意。--profile 指定時のみ呼び出し側で best-effort に
+            create_config_from_env_and_file() の結果を渡す。None の場合は
+            既定 env 名（HOKUSAI_NOTION_API_TOKEN 等）にフォールバックする。
 
     Returns:
         終了コード（0=成功、1=失敗）
@@ -503,10 +535,31 @@ def _handle_notion_setup(args) -> int:
         setup_notion_workspace,
     )
 
-    api_token = os.environ.get(args.api_token_env, "").strip()
+    # env 名解決: CLI 明示 > profile config > 既定値
+    api_token_env = args.api_token_env  # None の可能性あり（v0.4.1〜 default が None）
+    workflows_env = "HOKUSAI_NOTION_WORKFLOWS_DB_ID"
+    pull_requests_env = "HOKUSAI_NOTION_PR_DB_ID"
+
+    profile_name = getattr(args, "profile", None)
+    if config is not None:
+        nd_cfg = getattr(config, "notion_dashboard", None)
+        if nd_cfg is not None:
+            if api_token_env is None and getattr(nd_cfg, "api_token_env", None):
+                api_token_env = nd_cfg.api_token_env
+            cfg_wf_env = getattr(nd_cfg, "workflows_db_id_env", None)
+            if cfg_wf_env:
+                workflows_env = cfg_wf_env
+            cfg_pr_env = getattr(nd_cfg, "pull_requests_db_id_env", None)
+            if cfg_pr_env:
+                pull_requests_env = cfg_pr_env
+
+    if api_token_env is None:
+        api_token_env = "HOKUSAI_NOTION_API_TOKEN"
+
+    api_token = os.environ.get(api_token_env, "").strip()
     if not api_token:
-        print(f"環境変数 {args.api_token_env} が設定されていません")
-        print(f'  例: export {args.api_token_env}="secret_xxxxxxxxxx"')
+        print(f"環境変数 {api_token_env} が設定されていません")
+        print(f'  例: export {api_token_env}="secret_xxxxxxxxxx"')
         print(
             "  Internal Integration Token は https://www.notion.so/my-integrations から発行できます"
         )
@@ -515,6 +568,9 @@ def _handle_notion_setup(args) -> int:
     print(
         f"親ページ {args.parent_page_id} の配下に HOKUSAI 用リソースを作成します..."
     )
+    if profile_name:
+        print(f"  Profile: {profile_name}")
+    print(f"  API token env: {api_token_env}")
     print()
 
     try:
@@ -539,8 +595,8 @@ def _handle_notion_setup(args) -> int:
     print()
     print("以下を環境変数に設定してください（~/.zshrc などに追記推奨）:")
     print()
-    print(f'  export HOKUSAI_NOTION_WORKFLOWS_DB_ID="{result["workflows_db_id"]}"')
-    print(f'  export HOKUSAI_NOTION_PR_DB_ID="{result["pull_requests_db_id"]}"')
+    print(f'  export {workflows_env}="{result["workflows_db_id"]}"')
+    print(f'  export {pull_requests_env}="{result["pull_requests_db_id"]}"')
 
     # --persist 指定時は rc ファイルへ書き込む
     if getattr(args, "persist", False):
@@ -553,6 +609,9 @@ def _handle_notion_setup(args) -> int:
             persist_result = persist_env_vars(
                 rc_path,
                 result,
+                workflows_env_name=workflows_env,
+                pull_requests_env_name=pull_requests_env,
+                profile_name=profile_name,
                 backup=not getattr(args, "no_backup", False),
             )
             print()
