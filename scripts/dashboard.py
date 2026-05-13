@@ -7236,6 +7236,9 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             except (TypeError, ValueError):
                 limit = 100
             profile = query.get("profile", [None])[0]
+            # スキーマ初期化を保証する（OutboxStore は直接接続するため、
+            # DB ファイル未作成だと空 sqlite が作られ "no such table" になる）
+            _get_store()
             store = OutboxStore(DB_PATH, target=target)
             if kind == "outbox":
                 entries = store.list_outbox(limit=limit, profile_name=profile)
@@ -7304,6 +7307,8 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 load_writeback_config,
             )
             target = self._get_writeback_target(source)
+            # スキーマ初期化保証（OutboxStore 直接接続のため）
+            _get_store()
             store = OutboxStore(DB_PATH, target=target)
 
             # 無効 JSON で body={} にフォールバックすると、空 body と同じ意味で
@@ -7440,6 +7445,8 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 )
                 return
 
+            # スキーマ初期化保証
+            _get_store()
             store = OutboxStore(DB_PATH, target=target)
             ok = store.move_to_errors(outbox_id, error="manually moved by operator")
             if not ok:
