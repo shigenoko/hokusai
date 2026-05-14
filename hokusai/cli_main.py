@@ -261,10 +261,12 @@ def main():
         "--scaffold",
         action="store_true",
         help=(
-            "ドキュメントツリーを自動作成する（v0.4.3〜）。"
-            "親ページ配下に 📚 HOKUSAI Documentation / 💬 Discussions / "
-            "📖 Operation Guides / 📋 Requirements の 4 ページを作成。"
-            "既存に同名ページがあれば skip（idempotent）。"
+            "ドキュメントツリーを自動作成する（v0.4.3〜、v0.4.4 で title 形式更新）。"
+            "親ページ配下に HOKUSAI Documentation（icon 📚）配下に "
+            "Discussions（💬）/ Operation Guides（📖）/ Requirements（📋）の "
+            "計 4 ページを作成。配置先パスごとに既存検出（idempotent）、"
+            "v0.4.3 の絵文字 prefix 付き旧タイトルも legacy alias として検出して "
+            "重複作成を回避する。"
         ),
     )
     notion_setup_parser.add_argument(

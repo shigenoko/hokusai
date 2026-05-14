@@ -1132,8 +1132,10 @@ def test_scaffold_includes_icon_and_placeholder():
 def test_scaffold_payload_title_has_no_emoji_prefix():
     """Issue #27: 新仕様で create_page payload のタイトルから絵文字 prefix が消える。
 
-    icon は別途 properties.icon に設定され、Notion UI で title と icon が
-    二重表示されない（v0.4.4 〜）。
+    icon は Notion Create Page API のトップレベル `icon` フィールド
+    （`{"type": "emoji", "emoji": "..."}`）に設定される。`properties` 配下では
+    なくページ自体のメタデータ。Notion UI で title と icon が二重表示されない
+    （v0.4.4 〜）。
     """
     client = _ScaffoldRecordingClient()
     scaffold_notion_workspace("token", "parent", api_client=client)
