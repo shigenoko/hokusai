@@ -82,6 +82,11 @@ SERVICE_METADATA: dict[str, dict[str, Any]] = {
         "category": CategoryLLMAgent,
         "required_for": ["cross_review"],
     },
+    "gemini": {
+        "label": "Google Gemini",
+        "category": CategoryLLMAgent,
+        "required_for": ["cross_review"],
+    },
     "gh": {
         "label": "GitHub CLI",
         "category": CategoryGitHosting,
@@ -299,6 +304,69 @@ def _check_codex(mode: str) -> dict[str, Any]:
         detail=f"codex --version → {version_line}",
         required_for=required_for,
         message_key="connection.codex.connected",
+        mode=mode,
+    )
+
+
+def _check_gemini(mode: str) -> dict[str, Any]:
+    service_id = "gemini"
+    label = "Google Gemini"
+    required_for = ["cross_review"]
+    if not shutil.which("gemini"):
+        return _build_result(
+            service_id=service_id,
+            label=label,
+            category=CategoryLLMAgent,
+            status=STATUS_NOT_INSTALLED,
+            summary="Gemini CLI が見つかりません",
+            detail="`gemini` コマンドが PATH にありません",
+            required_for=required_for,
+            message_key="connection.gemini.not_installed",
+            next_action={
+                "type": "docs",
+                "label": "Gemini CLI のセットアップ手順",
+                "command": None,
+                "docs_url": "https://github.com/google-gemini/gemini-cli",
+            },
+            docs_url="https://github.com/google-gemini/gemini-cli",
+            mode=mode,
+        )
+    res = _run_cli(["gemini", "--version"], timeout=3.0)
+    if res is None:
+        return _build_result(
+            service_id=service_id,
+            label=label,
+            category=CategoryLLMAgent,
+            status=STATUS_TIMEOUT,
+            summary="Gemini のバージョン確認がタイムアウトしました",
+            detail="`gemini --version` が 3 秒以内に応答しませんでした",
+            required_for=required_for,
+            message_key="connection.gemini.timeout",
+            mode=mode,
+        )
+    code, stdout, stderr = res
+    if code != 0:
+        return _build_result(
+            service_id=service_id,
+            label=label,
+            category=CategoryLLMAgent,
+            status=STATUS_UNKNOWN,
+            summary="Gemini の状態確認に失敗しました",
+            detail=stderr or stdout or f"exit={code}",
+            required_for=required_for,
+            message_key="connection.gemini.unknown",
+            mode=mode,
+        )
+    version_line = (stdout or stderr).splitlines()[0] if (stdout or stderr) else ""
+    return _build_result(
+        service_id=service_id,
+        label=label,
+        category=CategoryLLMAgent,
+        status=STATUS_CONNECTED,
+        summary="Gemini CLI が利用可能です",
+        detail=f"gemini --version → {version_line}",
+        required_for=required_for,
+        message_key="connection.gemini.connected",
         mode=mode,
     )
 
@@ -738,6 +806,7 @@ def _check_miro(mode: str) -> dict[str, Any]:
 SERVICE_REGISTRY: dict[str, Callable[[str], dict[str, Any]]] = {
     "claude": _check_claude,
     "codex": _check_codex,
+    "gemini": _check_gemini,
     "gh": _check_gh,
     "glab": _check_glab,
     "notion_mcp": _check_notion_mcp,

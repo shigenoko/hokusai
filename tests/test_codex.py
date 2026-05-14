@@ -265,7 +265,8 @@ class TestExecuteCrossReview:
             result = execute_cross_review(minimal_state, "some doc", phase=2)
 
         assert result["waiting_for_human"] is True
-        assert "Codex CLI" in result["human_input_request"]
+        # v0.4.6〜: メッセージは provider 一般化（小文字）+ provider 切替の案内を含む
+        assert "codex CLI が見つかりません" in result["human_input_request"]
 
     @patch("hokusai.utils.cross_review._save_review_to_notion")
     @patch("hokusai.utils.cross_review.CodexClient")
@@ -794,3 +795,89 @@ class TestCrossReviewConfigAndLogging:
         ]
         assert len(failed_log) == 1
         assert "model=o4-mini" in failed_log[0].get("error", "")
+
+
+# ---------------------------------------------------------------------------
+# provider 切替（Issue #31 / v0.4.6: codex / gemini）
+# ---------------------------------------------------------------------------
+
+
+class TestProviderDispatch:
+    """`cross_review.provider` で CodexClient / GeminiClient を切替えるテスト。"""
+
+    def test_default_provider_is_codex(self):
+        """既定 provider は 'codex'（後方互換）。"""
+        config = CrossReviewConfig(enabled=True)
+        assert config.provider == "codex"
+
+    @patch("hokusai.utils.cross_review._save_review_to_notion")
+    @patch("hokusai.utils.cross_review.GeminiClient")
+    @patch("hokusai.utils.cross_review.CodexClient")
+    def test_dispatches_codex_when_provider_codex(
+        self, mock_codex_cls, mock_gemini_cls, mock_notion,
+        minimal_state, approve_review_result,
+    ):
+        """provider='codex' で CodexClient が使われる（GeminiClient は呼ばれない）。"""
+        from hokusai.utils.cross_review import execute_cross_review
+
+        mock_client = Mock()
+        mock_client.review_document.return_value = approve_review_result
+        mock_codex_cls.return_value = mock_client
+
+        config = WorkflowConfig(
+            cross_review=CrossReviewConfig(
+                enabled=True, provider="codex", model="codex-mini-latest",
+                phases=[2],
+            ),
+        )
+        with patch("hokusai.utils.cross_review.get_config", return_value=config):
+            execute_cross_review(minimal_state, "test document", phase=2)
+
+        assert mock_codex_cls.called
+        assert not mock_gemini_cls.called
+
+    @patch("hokusai.utils.cross_review._save_review_to_notion")
+    @patch("hokusai.utils.cross_review.GeminiClient")
+    @patch("hokusai.utils.cross_review.CodexClient")
+    def test_dispatches_gemini_when_provider_gemini(
+        self, mock_codex_cls, mock_gemini_cls, mock_notion,
+        minimal_state, approve_review_result,
+    ):
+        """provider='gemini' で GeminiClient が使われる（CodexClient は呼ばれない）。"""
+        from hokusai.utils.cross_review import execute_cross_review
+
+        mock_client = Mock()
+        mock_client.review_document.return_value = approve_review_result
+        mock_gemini_cls.return_value = mock_client
+
+        config = WorkflowConfig(
+            cross_review=CrossReviewConfig(
+                enabled=True, provider="gemini", model="gemini-2.5-pro",
+                phases=[2],
+            ),
+        )
+        with patch("hokusai.utils.cross_review.get_config", return_value=config):
+            execute_cross_review(minimal_state, "test document", phase=2)
+
+        assert mock_gemini_cls.called
+        assert not mock_codex_cls.called
+
+    def test_unknown_provider_blocks_workflow(self, minimal_state):
+        """未知の provider は致命扱い（waiting_for_human=True）。"""
+        from hokusai.utils.cross_review import execute_cross_review
+
+        config = WorkflowConfig(
+            cross_review=CrossReviewConfig(
+                enabled=True, provider="invalid-provider", phases=[2],
+            ),
+        )
+        with patch("hokusai.utils.cross_review.get_config", return_value=config):
+            result = execute_cross_review(minimal_state, "test", phase=2)
+
+        assert result["waiting_for_human"] is True
+        failed_log = [
+            log for log in result["audit_log"]
+            if log.get("action") == "cross_review_failed"
+        ]
+        assert len(failed_log) == 1
+        assert "invalid-provider" in failed_log[0].get("error", "")

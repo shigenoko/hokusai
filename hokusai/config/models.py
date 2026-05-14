@@ -46,9 +46,14 @@ class GitHostingConfig:
 
 @dataclass
 class CrossReviewConfig:
-    """クロスLLMレビュー設定"""
+    """クロスLLMレビュー設定
+
+    v0.4.6 以降: `provider` で複数 LLM を選択可能（"codex" / "gemini"）。
+    既定は後方互換のため "codex"。
+    """
 
     enabled: bool = False
+    provider: str = "codex"  # "codex" | "gemini"（v0.4.6〜）
     model: str = "codex-mini-latest"
     phases: list[int] = field(default_factory=lambda: [2, 4])
     timeout: int = 300

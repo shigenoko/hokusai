@@ -35,6 +35,15 @@ SUPPORTED_SERVICES: dict[str, dict[str, Any]] = {
         "auth_command": ["glab", "auth", "login"],
         "install_url": "https://gitlab.com/gitlab-org/cli",
     },
+    # v0.4.6（Issue #31）: cross-review LLM として Gemini CLI 対応
+    "gemini": {
+        "label": "Google Gemini",
+        "cli": "gemini",
+        "status_command": ["gemini", "--version"],
+        # gemini CLI は対話起動時に OAuth フローに遷移する設計
+        "auth_command": ["gemini"],
+        "install_url": "https://github.com/google-gemini/gemini-cli",
+    },
 }
 
 
