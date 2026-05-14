@@ -137,28 +137,21 @@ class GeminiClient:
                 f"{schema_content}\n"
             )
 
-        cmd: list[str] = [
-            self.gemini_path,
-            "-m", self.model,
-            "-p", full_prompt,
-        ]
+        # 安全性メモ:
+        # - shell=False（list 形式の cmd で既定）でフラグ / コマンド注入を防止
+        # - self.gemini_path は _find_gemini_command() で検証済みのパス
+        # - self.model は __init__ で _MODEL_NAME_PATTERN による whitelist 検証済み
+        # - プロンプト（full_prompt）は argv ではなく stdin で渡す。これにより
+        #   コマンド引数長制限の回避だけでなく、SonarCloud の taint 解析が懸念する
+        #   user-controlled argv 経路を物理的に分離する（pythonsecurity:S6350）
+        cmd: list[str] = [self.gemini_path, "-m", self.model]
 
         logger.debug(
             "Gemini 実行: model=%s timeout=%ds", self.model, actual_timeout,
         )
 
-        # 安全性メモ:
-        # - shell=False（list 形式の cmd で既定）でフラグ / コマンド注入を防止
-        # - self.gemini_path は _find_gemini_command() で検証済みのパス
-        # - self.model は __init__ で _MODEL_NAME_PATTERN による whitelist 検証済み
-        # - full_prompt は argv の値として渡るのみで shell 解釈されない
         try:
-            result = subprocess.run(  # noqa: S603
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=actual_timeout,
-            )
+            result = self._run_with_stdin_prompt(cmd, full_prompt, actual_timeout)
         except subprocess.TimeoutExpired as e:
             raise TimeoutError(
                 f"Gemini レビューがタイムアウトしました（{actual_timeout} 秒）"
@@ -208,20 +201,12 @@ class GeminiClient:
                 content = Path(f).read_text(encoding="utf-8")
                 full_prompt += f"\n\n--- file: {f} ---\n{content}\n"
 
-        cmd = [
-            self.gemini_path,
-            "-m", self.model,
-            "-p", full_prompt,
-        ]
+        # 安全性メモ: review_document() と同じく argv には whitelist 済みの値
+        # のみ載せ、user-controlled なプロンプトは stdin で渡す。
+        cmd = [self.gemini_path, "-m", self.model]
 
-        # 安全性メモ: review_document() と同じく shell=False + 引数 whitelist 済み
         try:
-            result = subprocess.run(  # noqa: S603
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=actual_timeout,
-            )
+            result = self._run_with_stdin_prompt(cmd, full_prompt, actual_timeout)
         except subprocess.TimeoutExpired as e:
             raise TimeoutError(
                 f"Gemini 実行がタイムアウトしました（{actual_timeout} 秒）"
@@ -234,6 +219,32 @@ class GeminiClient:
             )
 
         return result.stdout
+
+    def _run_with_stdin_prompt(
+        self,
+        cmd: list[str],
+        prompt: str,
+        timeout: int,
+    ) -> subprocess.CompletedProcess[str]:
+        """argv に whitelist 済み値のみを載せ、prompt は stdin で gemini CLI に渡す。
+
+        gemini CLI は `-p <prompt>` の代わりに stdin からプロンプトを読み取れる
+        （対話モード / `--prompt -` フラグの代替）。本実装は user-controlled な
+        プロンプト内容を argv から完全に切り離し、command 引数経路の taint 流入
+        （SonarCloud pythonsecurity:S6350 が指摘するリスク）を解消する。
+        """
+        # cmd の値はすべてバリデーション済み:
+        # - cmd[0]: _find_gemini_command で検証されたパス
+        # - cmd[1:]: "-m" + _MODEL_NAME_PATTERN で whitelist された model 名
+        # shell=False で実行されるため shell 注入のリスクなし。
+        return subprocess.run(  # noqa: S603
+            cmd,
+            input=prompt,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
 
     # ------------------------------------------------------------------
     # 出力パース

@@ -221,26 +221,60 @@ def test_generate_returns_plain_text(gemini_client):
 
 
 def test_generate_with_files_includes_file_content_in_prompt(gemini_client, tmp_path):
-    """generate() に files を渡すと、各ファイルの内容がプロンプトに連結される。"""
+    """generate() に files を渡すと、各ファイルの内容がプロンプトに連結される。
+
+    v0.4.6 以降: プロンプトは argv の `-p` ではなく stdin で渡される
+    （SonarCloud pythonsecurity:S6350 対策）。
+    """
     file_a = tmp_path / "a.txt"
     file_a.write_text("ファイル A の中身", encoding="utf-8")
     file_b = tmp_path / "b.py"
     file_b.write_text("def hello(): pass", encoding="utf-8")
 
-    captured_cmd: list[list[str]] = []
+    captured_kwargs: list[dict] = []
 
     def fake_run(cmd, **kwargs):
-        captured_cmd.append(cmd)
+        captured_kwargs.append({"cmd": cmd, **kwargs})
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
     with patch("hokusai.integrations.gemini.subprocess.run", side_effect=fake_run):
         gemini_client.generate("要約して", files=[file_a, file_b])
 
-    # subprocess 呼び出し時の -p プロンプトにファイル内容が連結されている
-    assert len(captured_cmd) == 1
-    prompt_arg = captured_cmd[0][captured_cmd[0].index("-p") + 1]
-    assert "ファイル A の中身" in prompt_arg
-    assert "def hello(): pass" in prompt_arg
+    assert len(captured_kwargs) == 1
+    # argv にはモデル名のみ、user-controlled なプロンプトは載らない
+    cmd = captured_kwargs[0]["cmd"]
+    assert "-p" not in cmd
+    assert "-m" in cmd
+    # プロンプトは stdin (input=) で渡される
+    stdin_prompt = captured_kwargs[0]["input"]
+    assert "ファイル A の中身" in stdin_prompt
+    assert "def hello(): pass" in stdin_prompt
+
+
+def test_review_document_passes_prompt_via_stdin(gemini_client):
+    """review_document() でもプロンプトは argv ではなく stdin で渡される
+    （SonarCloud pythonsecurity:S6350 対策の回帰防止）。
+    """
+    captured_kwargs: list[dict] = []
+
+    def fake_run(cmd, **kwargs):
+        captured_kwargs.append({"cmd": cmd, **kwargs})
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=0, stdout='{"summary": "ok"}', stderr=""
+        )
+
+    with patch("hokusai.integrations.gemini.subprocess.run", side_effect=fake_run):
+        gemini_client.review_document(document="doc 内容", review_prompt="rev prompt")
+
+    assert len(captured_kwargs) == 1
+    cmd = captured_kwargs[0]["cmd"]
+    # argv には gemini path + "-m" + model 名のみ。"-p" は含まれない
+    assert "-p" not in cmd
+    assert cmd[-2] == "-m"
+    # プロンプト + ドキュメントが stdin で渡される
+    stdin_prompt = captured_kwargs[0]["input"]
+    assert "rev prompt" in stdin_prompt
+    assert "doc 内容" in stdin_prompt
 
 
 def test_generate_timeout_raises(gemini_client):
