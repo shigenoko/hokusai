@@ -263,16 +263,18 @@ def setup_notion_workspace(
 
     # 3. scaffold（オプトイン）: 標準ドキュメントツリーを作成
     # DB 作成と異なり、scaffold 失敗は致命扱いしない（DB は既に作成済みのため）。
-    # 失敗時は警告ログ + 結果 dict に error を含めて返す。
+    # scaffold_notion_workspace は入力検証以外は raise せず、partial state を
+    # 返り値に含めるため、ここでは error 用の fallback dict 構築は不要。
     if scaffold:
         try:
-            scaffold_result = scaffold_notion_workspace(
+            result["scaffold"] = scaffold_notion_workspace(
                 api_token, parent_page_id, api_client=api
             )
-            result["scaffold"] = scaffold_result
         except Exception as e:
+            # 想定外の例外（入力検証以外）に対する最終 fallback。
+            # 部分状態を保てないので空でも error を残す。
             logger.warning(
-                "ドキュメントツリーの scaffold に失敗（DB 作成は成功済み）: %s: %s",
+                "scaffold が想定外の例外で失敗: %s: %s",
                 type(e).__name__, str(e),
             )
             result["scaffold"] = {
@@ -487,6 +489,12 @@ def scaffold_notion_workspace(
 
     既存に同名ページがある場合は skip（破壊しない）。
 
+    本関数は入力検証エラー（NotionSetupError）以外は raise しない。実行時の
+    API エラー（ハブ作成失敗 / 子要素取得失敗 / サブページ作成失敗）はすべて
+    返り値 dict に partial state として記録する。途中で失敗しても、すでに
+    作成済み / skip 済みのページ情報は失われない（呼び出し側が復旧手順を
+    判断できるようにするため）。
+
     Args:
         api_token: Notion Integration Token
         parent_page_id: 親ページの ID
@@ -497,7 +505,13 @@ def scaffold_notion_workspace(
             "created": [{"title": str, "id": str}, ...],
             "skipped": [{"title": str, "id": str}, ...],
             "failed":  [{"title": str, "error": str}, ...],  # 個別サブページの失敗
+            # ハブ作成失敗 / 子要素取得失敗（idempotent チェック不能）等の
+            # 致命的失敗時のみ追加される:
+            "error": "ExceptionType: message",
         }
+
+    Raises:
+        NotionSetupError: 入力（api_token / parent_page_id）が空のときのみ。
     """
     if not api_token:
         raise NotionSetupError("api_token が空です")
@@ -510,12 +524,29 @@ def scaffold_notion_workspace(
     skipped: list[dict[str, str]] = []
     failed: list[dict[str, str]] = []
 
-    hub_id = _resolve_hub_page(api, parent_page_id, created, skipped)
+    try:
+        hub_id = _resolve_hub_page(api, parent_page_id, created, skipped)
+    except Exception as e:
+        err_detail = f"{type(e).__name__}: {e}"
+        logger.warning("ハブページの解決に失敗: %s", err_detail)
+        return {
+            "created": created, "skipped": skipped, "failed": failed,
+            "error": err_detail,
+        }
+
     for sub_title, sub_icon, sub_placeholder in _DOCUMENTATION_CHILDREN:
-        _create_or_skip_subpage(
-            api, hub_id, sub_title, sub_icon, sub_placeholder,
-            created, skipped, failed,
-        )
+        try:
+            _create_or_skip_subpage(
+                api, hub_id, sub_title, sub_icon, sub_placeholder,
+                created, skipped, failed,
+            )
+        except Exception as e:
+            # サブ毎の lookup / create エラーで全体を止めない。
+            err_detail = f"{type(e).__name__}: {e}"
+            logger.warning(
+                "サブページの処理に失敗（continue）: %s: %s", sub_title, err_detail,
+            )
+            failed.append({"title": sub_title, "error": err_detail})
 
     return {"created": created, "skipped": skipped, "failed": failed}
 

@@ -105,7 +105,11 @@ class NotionAPIClient:
         """
         path = f"/blocks/{block_id}/children"
         if start_cursor:
-            path = f"{path}?start_cursor={start_cursor}"
+            # cursor は opaque な token のため、`&` `=` `#` 等の予約文字を含む
+            # 可能性がある。string 連結で URL に埋め込むと truncation / 不正
+            # URL になり pagination が壊れるため、必ず URL encode する。
+            encoded_cursor = urllib.parse.quote(start_cursor, safe="")
+            path = f"{path}?start_cursor={encoded_cursor}"
         return self._request("GET", path)
 
     def append_block_children(self, block_id: str, children: list[dict]) -> dict:

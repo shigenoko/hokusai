@@ -141,10 +141,17 @@ def scaffold_notion_workspace(
 ) -> dict[str, Any]:
     """親ページ配下に標準ドキュメントツリーを作成（idempotent）。
 
+    実装は入力検証以外で raise しない。実行時 API エラーは結果 dict 内に
+    partial state として記録する（呼び出し側が復旧手順を判断できるように）。
+
     Returns:
         {
             "created": [{"title": str, "id": str}, ...],
             "skipped": [{"title": str, "id": str}, ...],
+            "failed":  [{"title": str, "error": str}, ...],   # 個別サブページの失敗
+            # ハブ作成失敗 / 子要素取得失敗（idempotent チェック不能）等の
+            # 致命的失敗時のみ含まれる:
+            "error":   "ExceptionType: message",
         }
     """
 ```

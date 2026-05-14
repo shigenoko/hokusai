@@ -1224,12 +1224,12 @@ def test_scaffold_partial_failure_does_not_raise():
     assert result["failed"][0].get("error")
 
 
-def test_scaffold_lookup_failure_raises_to_avoid_duplicates():
-    """list_block_children が失敗したら NotionSetupError を投げる。
+def test_scaffold_lookup_failure_avoids_duplicates_via_error_dict():
+    """list_block_children が失敗したら create_page を呼ばず error 付き dict を返す。
 
     fail-open で None を返すと、Notion API の一過性失敗時に重複ページを作って
-    しまう。idempotent チェックが完了できない場合は呼び出し側に伝える。
-    （Copilot レビュー #1 対応）
+    しまう。idempotent チェックが完了できない場合は致命扱いとして error フィールド
+    に記録し、create_page は呼ばない（Copilot レビュー #1 + #4 対応 / partial state 保持）。
     """
 
     class _ListFailClient:
@@ -1239,8 +1239,12 @@ def test_scaffold_lookup_failure_raises_to_avoid_duplicates():
         def create_page(self, payload):  # pragma: no cover
             raise AssertionError("should not be called when lookup fails")
 
-    with pytest.raises(NotionSetupError, match="親ページの子要素取得に失敗"):
-        scaffold_notion_workspace("token", "parent", api_client=_ListFailClient())
+    result = scaffold_notion_workspace("token", "parent", api_client=_ListFailClient())
+    assert "error" in result
+    assert "親ページの子要素取得に失敗" in result["error"]
+    assert result["created"] == []
+    assert result["skipped"] == []
+    assert result["failed"] == []
 
 
 def test_scaffold_walks_pagination_to_find_existing_page():
@@ -1302,13 +1306,54 @@ def test_scaffold_walks_pagination_to_find_existing_page():
     assert hub_creates == []
 
 
-def test_scaffold_hub_creation_failure_raises():
-    """ハブページ作成が失敗した場合は NotionSetupError"""
+def test_scaffold_hub_creation_failure_returns_error_dict():
+    """ハブページ作成失敗時は raise せず error フィールド付き dict を返す（partial state 保持）。
+
+    Copilot レビュー 4 回目対応: 旧実装は呼び出し側の try/except で partial
+    state を空 dict で上書きしていたため、ハブが既に skip 検出されていたケース
+    でも CLI 出力から情報が消えていた。新実装は scaffold_notion_workspace 内で
+    例外を捕捉して結果 dict にそのまま記録する。
+    """
     client = _ScaffoldRecordingClient(
         fail_on_titles={"📚 HOKUSAI Documentation"}
     )
-    with pytest.raises(NotionSetupError, match="ハブページ"):
-        scaffold_notion_workspace("token", "parent", api_client=client)
+    result = scaffold_notion_workspace("token", "parent", api_client=client)
+    assert "error" in result
+    assert "ハブページ" in result["error"]
+    assert result["created"] == []
+    assert result["skipped"] == []
+    assert result["failed"] == []
+
+
+def test_scaffold_subpage_lookup_failure_preserves_hub_creation():
+    """サブページ idempotent チェック失敗時もハブ作成済み partial state を維持。
+
+    Copilot レビュー 4 回目（setup.py:282）対応の回帰防止。
+    """
+
+    class _LookupFailsAfterHub:
+        def __init__(self):
+            self.children_calls = 0
+
+        def list_block_children(self, block_id, *, start_cursor=None):
+            self.children_calls += 1
+            if self.children_calls == 1:
+                return {"results": [], "has_more": False, "next_cursor": None}
+            raise RuntimeError("notion API 5xx during subpage lookup")
+
+        def create_page(self, payload):
+            title = payload["properties"]["title"][0]["text"]["content"]
+            return {"id": f"new-{title}"}
+
+    client = _LookupFailsAfterHub()
+    result = scaffold_notion_workspace("token", "parent", api_client=client)
+    created_titles = [c["title"] for c in result["created"]]
+    assert "📚 HOKUSAI Documentation" in created_titles
+    failed_titles = [f["title"] for f in result["failed"]]
+    assert "💬 Discussions" in failed_titles
+    assert "📖 Operation Guides" in failed_titles
+    assert "📋 Requirements" in failed_titles
+    assert "error" not in result
 
 
 def test_scaffold_rejects_empty_token():
@@ -1472,3 +1517,88 @@ def test_cli_handler_no_scaffold_flag_keeps_default(capsys, monkeypatch):
     assert rc == 0
     assert received.get("scaffold") is False
     assert "📚 ドキュメントツリー" not in out
+
+
+def test_cli_handler_scaffold_error_branch_shows_error_first(capsys, monkeypatch):
+    """scaffold が致命エラーで返した場合、CLI 出力は error を最初に表示し、
+    「変更なし」は表示しない（Copilot レビュー 4 回目 / cli_main.py:745 対応）。
+    """
+    from hokusai import cli_main
+
+    monkeypatch.setenv("HOKUSAI_NOTION_API_TOKEN", "secret")
+
+    def _fake_setup(api_token, parent_page_id, **kwargs):
+        return {
+            "workflows_db_id": "wf", "pull_requests_db_id": "pr",
+            "scaffold": {
+                "created": [], "skipped": [], "failed": [],
+                "error": "RuntimeError: notion 5xx",
+            },
+        }
+
+    monkeypatch.setattr(
+        "hokusai.integrations.notion_dashboard.setup_notion_workspace",
+        _fake_setup,
+    )
+
+    class _Args:
+        api_token_env = "HOKUSAI_NOTION_API_TOKEN"
+        parent_page_id = "parent"
+        scaffold = True
+        persist = False
+        shell_rc = None
+        no_backup = False
+
+    rc = cli_main._handle_notion_setup(_Args())
+    out = capsys.readouterr().out
+    assert rc == 0  # DB は成功なので exit 0
+    assert "⚠️ scaffold 中にエラー" in out
+    assert "RuntimeError: notion 5xx" in out
+    assert "（変更なし）" not in out
+    # error は created / skipped より前に出ているはず
+    error_idx = out.find("⚠️ scaffold 中にエラー")
+    tree_section_idx = out.find("📚 ドキュメントツリー")
+    assert 0 <= tree_section_idx < error_idx  # ヘッダ → error の順
+
+
+def test_cli_handler_scaffold_failed_subpages_show_in_output(capsys, monkeypatch):
+    """個別サブページの failed 配列が CLI 出力で ✗ 失敗行として表示される
+    （Copilot レビュー 4 回目 / cli_main.py:745 対応）。
+    """
+    from hokusai import cli_main
+
+    monkeypatch.setenv("HOKUSAI_NOTION_API_TOKEN", "secret")
+
+    def _fake_setup(api_token, parent_page_id, **kwargs):
+        return {
+            "workflows_db_id": "wf", "pull_requests_db_id": "pr",
+            "scaffold": {
+                "created": [{"title": "📚 HOKUSAI Documentation", "id": "h1"}],
+                "skipped": [],
+                "failed": [
+                    {"title": "💬 Discussions", "error": "RuntimeError: boom"},
+                ],
+            },
+        }
+
+    monkeypatch.setattr(
+        "hokusai.integrations.notion_dashboard.setup_notion_workspace",
+        _fake_setup,
+    )
+
+    class _Args:
+        api_token_env = "HOKUSAI_NOTION_API_TOKEN"
+        parent_page_id = "parent"
+        scaffold = True
+        persist = False
+        shell_rc = None
+        no_backup = False
+
+    rc = cli_main._handle_notion_setup(_Args())
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "✓ 作成: 📚 HOKUSAI Documentation" in out
+    assert "✗ 失敗: 💬 Discussions" in out
+    assert "RuntimeError: boom" in out
+    # failed があるので「変更なし」は出ない
+    assert "（変更なし）" not in out

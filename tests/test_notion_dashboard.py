@@ -261,6 +261,28 @@ def test_notion_api_client_list_block_children_omits_cursor_when_none(monkeypatc
     assert "?" not in captured["url"]
 
 
+def test_notion_api_client_list_block_children_url_encodes_cursor(monkeypatch):
+    """start_cursor が予約文字を含むとき URL encode する（pagination 安全性）。
+
+    Notion API は cursor を opaque token として返すため、`&` `=` `#` 空白等が
+    含まれる可能性がある。string 連結で URL に埋め込むと truncation や不正な
+    URL になり、pagination が壊れて scaffold idempotency が崩れる。
+    Copilot レビュー 4 回目（client.py:108）対応。
+    """
+    captured = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["url"] = req.full_url
+        return _FakeResponse({"results": []})
+
+    monkeypatch.setattr(client_module.urllib.request, "urlopen", fake_urlopen)
+    api = NotionAPIClient(api_token="secret", requests_per_second=100)
+    api.list_block_children("page-1", start_cursor="ab&cd=ef#gh ij")
+    assert captured["url"].endswith(
+        "/blocks/page-1/children?start_cursor=ab%26cd%3Def%23gh%20ij"
+    )
+
+
 def test_notion_api_client_4xx_error_raises_immediately(monkeypatch):
     def fail(req, timeout=None):
         raise _make_http_error(401, "unauthorized")
