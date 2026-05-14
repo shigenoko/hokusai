@@ -160,7 +160,7 @@ HOKUSAI is an **operational framework** for integrating AI into real-world workf
 The following components are present in the codebase but are not enabled by default. Behavior may change without notice.
 
 - **Multiple repositories** (mono-repo style) — single-repository setup is the default.
-- **Cross-LLM review** — requires multi-LLM setup.
+- **Cross-LLM review** — opt-in via `cross_review.enabled`. Choose the reviewer LLM with `cross_review.provider` (`codex` for OpenAI Codex CLI, or `gemini` for Google Gemini CLI; v0.4.6+).
 - **Figma / Miro writeback** — disabled by default; enable per config and profile.
 - **Jira / Linear task backends and Bitbucket hosting** — interfaces exist but are unfinished.
 - **GitLab hosting** — client support exists, but the Phase 8 unified review loop is still GitHub-first.

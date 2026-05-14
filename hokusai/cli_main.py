@@ -212,8 +212,8 @@ def main():
     connect_parser.add_argument(
         "service",
         nargs="?",
-        choices=["github", "gitlab"],
-        help="接続するサービス",
+        choices=["github", "gitlab", "gemini"],
+        help="接続するサービス（gemini は v0.4.6〜、cross-review 用途）",
     )
     connect_parser.add_argument(
         "--status",

@@ -1,7 +1,10 @@
 """
 クロスLLMレビュー実行ユーティリティ
 
-Phase 2/3/4 で共通利用する Codex クロスレビュー実行ロジック。
+Phase 2/3/4 で共通利用するクロスレビュー実行ロジック。
+v0.4.6 以降: `cross_review.provider` で Codex / Gemini を選択可能。
+provider 別の client 生成は `_create_review_client()` に集約し、それ以降の
+処理は client 非依存（duck typing）。
 """
 
 from __future__ import annotations
@@ -12,8 +15,42 @@ from typing import TYPE_CHECKING
 from ..config import get_config
 from ..constants import CROSS_REVIEW_PROMPTS, PHASE_NAMES
 from ..integrations.codex import CodexClient
+from ..integrations.gemini import GeminiClient
 from ..logging_config import get_logger
 from ..state import add_audit_log
+
+# CodexClient / GeminiClient はインターフェース互換だが共通基底はなく
+# duck typing に依存する。dispatch する provider は CrossReviewConfig.provider で指定。
+ReviewClient = CodexClient | GeminiClient
+
+
+def _create_review_client(config) -> ReviewClient:
+    """`config.cross_review.provider` に応じたレビュー client を生成する。
+
+    Args:
+        config: HOKUSAI 全体 config
+
+    Returns:
+        CodexClient / GeminiClient のいずれか
+
+    Raises:
+        ValueError: provider が未知の値の場合
+        FileNotFoundError: 対応する CLI コマンドが見つからない場合
+    """
+    provider = config.cross_review.provider
+    if provider == "codex":
+        return CodexClient(
+            model=config.cross_review.model,
+            timeout=config.cross_review.timeout,
+        )
+    if provider == "gemini":
+        return GeminiClient(
+            model=config.cross_review.model,
+            timeout=config.cross_review.timeout,
+        )
+    raise ValueError(
+        f"Unknown cross_review.provider: {provider!r}（'codex' か 'gemini' を指定）"
+    )
 
 if TYPE_CHECKING:
     from ..state import WorkflowState
@@ -29,7 +66,7 @@ def execute_cross_review(
     document: str,
     phase: int,
 ) -> WorkflowState:
-    """Codex クロスレビューを実行し、結果を state に反映
+    """クロスレビュー（Codex / Gemini）を実行し、結果を state に反映
 
     Args:
         state: ワークフロー状態
@@ -63,37 +100,50 @@ def execute_cross_review(
         logger.warning(f"Phase {phase} 用のレビュープロンプトが未定義です")
         return state
 
-    # CodexClient を初期化
+    # provider に応じたレビュー client を初期化
     try:
-        client = CodexClient(
-            model=config.cross_review.model,
-            timeout=config.cross_review.timeout,
-        )
+        client = _create_review_client(config)
     except FileNotFoundError:
-        msg = "Codex CLIが見つかりません"
+        provider = config.cross_review.provider
+        msg = f"{provider} CLI が見つかりません"
+        not_found_reason = f"{provider}_not_found"
         _set_review_status(state, phase, "failed")
         if config.cross_review.on_failure == "block":
-            logger.error(f"Phase {phase}: {msg}（blockモード: ワークフロー停止）")
+            logger.error(f"Phase {phase}: {msg}（block モード: ワークフロー停止）")
             state = add_audit_log(
                 state, phase, "cross_review_failed", "error", error=msg,
             )
             state["waiting_for_human"] = True
-            state["human_input_request"] = "Codex CLIが見つかりません。インストールするか、cross_review設定を無効化してください。"
+            state["human_input_request"] = (
+                f"{provider} CLI が見つかりません。インストールするか、"
+                "cross_review.provider を切替、または cross_review 設定を"
+                "無効化してください。"
+            )
             return state
         if config.cross_review.on_failure == "skip":
-            logger.warning(f"Phase {phase}: {msg}（skipモード: スキップ）")
+            logger.warning(f"Phase {phase}: {msg}（skip モード: スキップ）")
             state = add_audit_log(
                 state, phase, "cross_review_skipped", "warning",
-                details={"reason": "codex_not_found"},
+                details={"reason": not_found_reason},
             )
             return state
         else:
             logger.warning(f"Phase {phase}: {msg}（続行します）")
             state = add_audit_log(
                 state, phase, "cross_review_skipped", "warning",
-                details={"reason": "codex_not_found"},
+                details={"reason": not_found_reason},
             )
             return state
+    except ValueError as e:
+        # 未知の provider は致命扱い（config ミス）
+        logger.error(f"Phase {phase}: {e}")
+        _set_review_status(state, phase, "failed")
+        state = add_audit_log(
+            state, phase, "cross_review_failed", "error", error=str(e),
+        )
+        state["waiting_for_human"] = True
+        state["human_input_request"] = str(e)
+        return state
 
     # レビュー実行
     schema_path = str(_SCHEMA_PATH) if _SCHEMA_PATH.exists() else None
@@ -111,14 +161,15 @@ def execute_cross_review(
             break
         except (TimeoutError, RuntimeError) as e:
             last_error = e
+            provider = config.cross_review.provider
             if attempt < max_attempts:
                 logger.warning(
-                    f"Phase {phase}: Codexレビュー失敗（{attempt}/{max_attempts}）"
+                    f"Phase {phase}: {provider} レビュー失敗（{attempt}/{max_attempts}）"
                     f" - 再試行します: {e}"
                 )
             else:
                 logger.warning(
-                    f"Phase {phase}: Codexレビュー失敗（{attempt}/{max_attempts}）"
+                    f"Phase {phase}: {provider} レビュー失敗（{attempt}/{max_attempts}）"
                     f" - 再試行上限に到達: {e}"
                 )
 
@@ -138,7 +189,8 @@ def execute_cross_review(
             )
             state["waiting_for_human"] = True
             state["human_input_request"] = (
-                f"Codexレビューに失敗しました (model={config.cross_review.model}): {last_error}"
+                f"{config.cross_review.provider} レビューに失敗しました "
+                f"(model={config.cross_review.model}): {last_error}"
             )
             return state
         if config.cross_review.on_failure == "skip":
@@ -190,8 +242,8 @@ def execute_cross_review(
         )
         state["waiting_for_human"] = True
         state["human_input_request"] = (
-            f"Codexクロスレビューでcritical指摘が{len(critical_findings)}件あります。"
-            "確認してください。"
+            f"{config.cross_review.provider} クロスレビューで critical 指摘が"
+            f"{len(critical_findings)} 件あります。確認してください。"
         )
 
     # Notion に callout 保存（子ページがあれば子ページに、なければタスクページに）

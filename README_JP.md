@@ -160,7 +160,7 @@ HOKUSAI は、AI を実世界のワークフローに統合する **運用フレ
 以下のコンポーネントはコードベースに含まれるがデフォルトでは有効化されない。挙動は予告なく変更される可能性がある。
 
 - **複数リポジトリ対応**（モノレポ風） — デフォルトは単一リポジトリ
-- **クロス LLM レビュー** — 複数 LLM のセットアップが必要
+- **クロス LLM レビュー** — `cross_review.enabled` で opt-in。`cross_review.provider` で reviewer LLM を選択（`codex`: OpenAI Codex CLI、`gemini`: Google Gemini CLI、v0.4.6〜）
 - **Figma / Miro 書き戻し** — デフォルトでは無効。config / profile 単位で明示的に有効化する
 - **Jira / Linear タスクバックエンド、Bitbucket hosting** — インターフェースは存在するが未完成
 - **GitLab hosting** — クライアント実装はあるが、Phase 8 の統合レビューループは GitHub 優先

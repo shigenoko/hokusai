@@ -17,6 +17,57 @@ HOKUSAI のすべての特筆すべき変更をこのファイルに記録する
 
 ---
 
+## [0.4.6] - 2026-05-14
+
+クロスレビュー LLM として **Google Gemini CLI** に対応
+（[#31](https://github.com/shigenoko/hokusai/issues/31) 対応）。
+
+### Added
+
+- `hokusai/integrations/gemini.py`: `GeminiClient`
+  - `gemini` CLI を subprocess 経由で実行
+  - `review_document()`: CodexClient と同インターフェースの cross-review API
+  - `generate(prompt, files=None)`: 汎用テキスト生成 API（B 案で再利用予定）
+  - `_find_gemini_command()`: PATH / `GEMINI_PATH` / 一般的 install パスから検出
+- `tests/test_gemini_client.py`: 13 件（コマンド検出 / review_document / generate / singleton）
+- `tests/test_codex.py::TestProviderDispatch`: provider 切替テスト 3 件
+- `hokusai connect gemini`: 接続状態確認 + 認証導線（`gemini` 起動で OAuth 開始）
+- `connection_status` に Gemini 検出を追加（`hokusai connect --status` で表示）
+
+### Changed
+
+- `CrossReviewConfig.provider: str = "codex"` フィールド追加（"codex" / "gemini"）
+  - 既定 "codex" で **後方互換性 100%**（既存 config はそのまま動作）
+- `hokusai/utils/cross_review.py`: provider 別 client を `_create_review_client()` で
+  dispatch する設計に変更。これ以降の処理は client 非依存（duck typing）
+- 不明な provider 指定は config loader 側で既定 "codex" に fallback、cross_review 実行時は
+  `waiting_for_human` で停止して config 修正を促す（致命扱い）
+- エラーメッセージ / ログを provider 一般化（Codex 固定文言から `{provider}` ベースに）
+
+### 設定例
+
+```yaml
+cross_review:
+  enabled: true
+  provider: gemini              # 新規追加（v0.4.6〜）
+  model: gemini-2.5-pro
+  phases: [2, 4]
+  on_failure: warn
+```
+
+### 後方互換
+
+- `provider` 未指定の既存 config は "codex" 扱いで従来挙動を維持
+- `CrossReviewConfig` のフィールド順序を変更していないため、位置引数による初期化も互換
+- 主コーディングエージェント（Phase 2-7）は引き続き Claude Code 固定。B 案（v0.5.x 予定）で抽象化
+
+### バージョン
+
+- `pyproject.toml`: 0.4.5 → 0.4.6
+- `hokusai/__init__.py`: 0.4.5 → 0.4.6
+
+---
+
 ## [0.4.5] - 2026-05-14
 
 `hokusai notion-setup` のリソース名から `HOKUSAI` prefix を削除し、
