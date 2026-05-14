@@ -362,14 +362,17 @@ def _build_documentation_page_payload(
     """child_page の作成 payload を組み立てる。
 
     icon に絵文字を、children に placeholder paragraph を含める。
+
+    Notion Create Page API の仕様（page_id parent）:
+    - properties は "title" キーのみ許容され、値は rich-text array を **直接**
+      渡す（DB 行用の {"title": {"title": [...]}} 形式は使えない）。
+    - DB 行用形式を渡すと Notion 側で 400 エラーになる。
     """
     return {
         "parent": {"type": "page_id", "page_id": parent_id},
         "icon": {"type": "emoji", "emoji": icon_emoji},
         "properties": {
-            "title": {
-                "title": [{"type": "text", "text": {"content": title}}]
-            }
+            "title": [{"type": "text", "text": {"content": title}}]
         },
         "children": [
             {

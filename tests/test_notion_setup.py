@@ -1090,7 +1090,7 @@ class _ScaffoldRecordingClient:
 
     def create_page(self, payload: dict) -> dict:
         self.created_pages.append(payload)
-        title = payload["properties"]["title"]["title"][0]["text"]["content"]
+        title = payload["properties"]["title"][0]["text"]["content"]
         if title in self._fail_on_titles:
             raise RuntimeError(f"create_page failure for {title}")
         self._next_id += 1
@@ -1127,6 +1127,31 @@ def test_scaffold_includes_icon_and_placeholder():
         children = payload["children"]
         assert len(children) >= 1
         assert children[0]["type"] == "paragraph"
+
+
+def test_scaffold_payload_uses_page_parent_title_shape():
+    """create_page payload は page_id parent 仕様（properties.title が rich-text array 直接）。
+
+    Notion Create Page API では page_id parent の場合
+        properties.title = [rich_text, ...]
+    でなければならない。DB 行用の properties.title = {"title": [...]} 形式を
+    送ると実 API が 400 を返す。
+    """
+    client = _ScaffoldRecordingClient()
+    scaffold_notion_workspace("token", "parent", api_client=client)
+
+    assert client.created_pages, "ページが作成されているはず"
+    for payload in client.created_pages:
+        # parent は page_id 形式
+        assert payload["parent"]["type"] == "page_id"
+        # properties.title は rich-text array でなければならない（dict 不可）
+        title_value = payload["properties"]["title"]
+        assert isinstance(title_value, list), (
+            "page_id parent では properties.title は rich-text array 必須"
+        )
+        assert title_value
+        assert title_value[0]["type"] == "text"
+        assert "content" in title_value[0]["text"]
 
 
 def test_scaffold_skips_existing_hub_page():
@@ -1238,7 +1263,7 @@ def test_scaffold_walks_pagination_to_find_existing_page():
 
         def create_page(self, payload):
             self.created_pages.append(payload)
-            title = payload["properties"]["title"]["title"][0]["text"]["content"]
+            title = payload["properties"]["title"][0]["text"]["content"]
             return {"id": f"new-{title}"}
 
     client = _PaginatedClient()
@@ -1251,7 +1276,7 @@ def test_scaffold_walks_pagination_to_find_existing_page():
     # ハブが skip されたので create_page でハブを作っていない
     hub_creates = [
         p for p in client.created_pages
-        if p["properties"]["title"]["title"][0]["text"]["content"]
+        if p["properties"]["title"][0]["text"]["content"]
         == "📚 HOKUSAI Documentation"
     ]
     assert hub_creates == []
@@ -1296,7 +1321,7 @@ class _DBPlusScaffoldClient:
 
     def create_page(self, payload):
         self.create_page_calls.append(payload)
-        title = payload["properties"]["title"]["title"][0]["text"]["content"]
+        title = payload["properties"]["title"][0]["text"]["content"]
         return {"id": f"page-{title}"}
 
     def list_block_children(self, block_id, *, start_cursor=None):

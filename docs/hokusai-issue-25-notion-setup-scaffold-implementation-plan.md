@@ -73,13 +73,29 @@ CLI フラグ:
 
 ```python
 def _find_existing_child_page(api_client, parent_page_id: str, title: str) -> str | None:
-    """親ページの子から同名 page block を検索。あれば block id を返す。"""
-    blocks = api_client.list_block_children(parent_page_id)
-    for block in blocks.get("results", []):
-        if block.get("type") == "child_page":
-            if block.get("child_page", {}).get("title") == title:
+    """親ページの子から同名 page block を検索（pagination 全走査、idempotency 失敗時 raise）。
+
+    Notion API は 1 レスポンス最大 100 件のため has_more を見て全ページ走査する。
+    途中で API エラーが発生したら NotionSetupError を投げる（fail-open で重複ページを
+    作るのを避ける）。
+    """
+    cursor = None
+    while True:
+        try:
+            blocks = api_client.list_block_children(parent_page_id, start_cursor=cursor)
+        except Exception as e:
+            raise NotionSetupError(
+                f"親ページの子要素取得に失敗（idempotent チェック不能）: {e}"
+            ) from e
+        for block in blocks.get("results", []):
+            if block.get("type") == "child_page" \
+               and block.get("child_page", {}).get("title") == title:
                 return block["id"]
-    return None
+        if not blocks.get("has_more"):
+            return None
+        cursor = blocks.get("next_cursor")
+        if not cursor:
+            return None
 ```
 
 「同名のページが既に存在しています、skip しました」というメッセージを出力。
@@ -97,13 +113,13 @@ def create_page(self, payload: dict) -> dict:
 これは既に存在（[client.py:79](hokusai/integrations/notion_dashboard/client.py:79)）。child_page を作成するには:
 
 ```python
+# Notion Create Page API: page_id parent では properties.title は
+# rich-text array 直接（DB 行用の {"title": {"title": [...]}} 形式は使えない）
 payload = {
     "parent": {"page_id": parent_id},
     "icon": {"type": "emoji", "emoji": "📚"},
     "properties": {
-        "title": {
-            "title": [{"type": "text", "text": {"content": "HOKUSAI Documentation"}}]
-        }
+        "title": [{"type": "text", "text": {"content": "HOKUSAI Documentation"}}]
     },
     "children": [
         # placeholder paragraph

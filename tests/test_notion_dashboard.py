@@ -226,6 +226,41 @@ def test_notion_api_client_list_block_children_uses_correct_path(monkeypatch):
     assert captured["url"].endswith("/blocks/page-1/children")
 
 
+def test_notion_api_client_list_block_children_forwards_start_cursor(monkeypatch):
+    """start_cursor 指定時に URL クエリパラメータとして送出される（PR #26 / v0.4.3）。
+
+    scaffold の idempotency 検出が Notion API の pagination に依存しているため、
+    client 側がカーソルを実際に転送していることをユニットテストで担保する。
+    """
+    captured = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["method"] = req.get_method()
+        captured["url"] = req.full_url
+        return _FakeResponse({"results": [], "has_more": False, "next_cursor": None})
+
+    monkeypatch.setattr(client_module.urllib.request, "urlopen", fake_urlopen)
+    api = NotionAPIClient(api_token="secret", requests_per_second=100)
+    api.list_block_children("page-1", start_cursor="cursor-abc123")
+    assert captured["method"] == "GET"
+    assert captured["url"].endswith("/blocks/page-1/children?start_cursor=cursor-abc123")
+
+
+def test_notion_api_client_list_block_children_omits_cursor_when_none(monkeypatch):
+    """start_cursor=None なら query パラメータを付けない（後方互換）。"""
+    captured = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["url"] = req.full_url
+        return _FakeResponse({"results": []})
+
+    monkeypatch.setattr(client_module.urllib.request, "urlopen", fake_urlopen)
+    api = NotionAPIClient(api_token="secret", requests_per_second=100)
+    api.list_block_children("page-1", start_cursor=None)
+    assert captured["url"].endswith("/blocks/page-1/children")
+    assert "?" not in captured["url"]
+
+
 def test_notion_api_client_4xx_error_raises_immediately(monkeypatch):
     def fail(req, timeout=None):
         raise _make_http_error(401, "unauthorized")
