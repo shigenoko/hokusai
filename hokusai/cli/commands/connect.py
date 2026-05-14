@@ -19,6 +19,7 @@ import sys
 from typing import Any
 
 from ...integrations import connection_status as cs
+from ...integrations.gemini import GEMINI_CLI_DOCS_URL
 
 SUPPORTED_SERVICES: dict[str, dict[str, Any]] = {
     "github": {
@@ -46,7 +47,7 @@ SUPPORTED_SERVICES: dict[str, dict[str, Any]] = {
         "cli": "gemini",
         "status_command": None,
         "auth_command": ["gemini"],
-        "install_url": "https://github.com/google-gemini/gemini-cli",
+        "install_url": GEMINI_CLI_DOCS_URL,
     },
 }
 

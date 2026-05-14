@@ -23,6 +23,15 @@ from ..logging_config import get_logger
 
 logger = get_logger("gemini")
 
+# Gemini CLI のドキュメント URL（複数モジュールで参照される）
+GEMINI_CLI_DOCS_URL = "https://github.com/google-gemini/gemini-cli"
+
+# モデル名のバリデーション用パターン:
+# Notion / OpenAI / Google のモデル名は英数字 / ハイフン / ドット / アンダースコア
+# / コロン / スラッシュで構成される。subprocess に渡す前に検証して、フラグ注入
+# （例: "-r maliciousflag"）を防ぐ。
+_MODEL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9._:/-]+$")
+
 
 class GeminiClient:
     """Google Gemini CLI を操作するクライアント"""
@@ -33,7 +42,16 @@ class GeminiClient:
         Args:
             model: 使用する Gemini モデル名（例: "gemini-2.5-pro" / "gemini-1.5-flash"）
             timeout: デフォルトのタイムアウト秒数
+
+        Raises:
+            ValueError: model 名に不正な文字（フラグ注入の可能性）が含まれる場合
+            FileNotFoundError: gemini コマンドが見つからない場合
         """
+        if not _MODEL_NAME_PATTERN.match(model):
+            raise ValueError(
+                f"Gemini model 名に不正な文字が含まれています: {model!r}。"
+                "英数字 / ハイフン / ドット / アンダースコア / コロン / スラッシュのみ許容。"
+            )
         self.model = model
         self.timeout = timeout
         self.gemini_path = self._find_gemini_command()
@@ -68,8 +86,7 @@ class GeminiClient:
 
         raise FileNotFoundError(
             "gemini コマンドが見つかりません。Gemini CLI がインストールされて "
-            "PATH に通っていることを確認してください "
-            "（https://github.com/google-gemini/gemini-cli）。"
+            f"PATH に通っていることを確認してください（{GEMINI_CLI_DOCS_URL}）。"
         )
 
     # ------------------------------------------------------------------
@@ -130,8 +147,13 @@ class GeminiClient:
             "Gemini 実行: model=%s timeout=%ds", self.model, actual_timeout,
         )
 
+        # 安全性メモ:
+        # - shell=False（list 形式の cmd で既定）でフラグ / コマンド注入を防止
+        # - self.gemini_path は _find_gemini_command() で検証済みのパス
+        # - self.model は __init__ で _MODEL_NAME_PATTERN による whitelist 検証済み
+        # - full_prompt は argv の値として渡るのみで shell 解釈されない
         try:
-            result = subprocess.run(
+            result = subprocess.run(  # noqa: S603
                 cmd,
                 capture_output=True,
                 text=True,
@@ -192,8 +214,9 @@ class GeminiClient:
             "-p", full_prompt,
         ]
 
+        # 安全性メモ: review_document() と同じく shell=False + 引数 whitelist 済み
         try:
-            result = subprocess.run(
+            result = subprocess.run(  # noqa: S603
                 cmd,
                 capture_output=True,
                 text=True,

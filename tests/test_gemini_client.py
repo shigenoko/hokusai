@@ -51,6 +51,44 @@ def test_gemini_client_raises_when_command_missing(monkeypatch):
             GeminiClient()
 
 
+@pytest.mark.parametrize(
+    "bad_model",
+    [
+        "model with space",
+        "model;rm -rf /",
+        "-r maliciousflag",
+        "model$(injection)",
+        "model\nnewline",
+        "",
+    ],
+)
+def test_gemini_client_rejects_unsafe_model_name(monkeypatch, bad_model):
+    """フラグ注入や shell metacharacter を含むモデル名は ValueError で拒否する。
+
+    SonarCloud pythonsecurity:S6350 対応: subprocess.run に渡す引数が
+    whitelist 検証されることを保証する。
+    """
+    monkeypatch.setenv("GEMINI_PATH", "/fake/gemini")
+    with pytest.raises(ValueError, match="不正な文字"):
+        GeminiClient(model=bad_model)
+
+
+@pytest.mark.parametrize(
+    "good_model",
+    [
+        "gemini-2.5-pro",
+        "gemini-1.5-flash",
+        "models/gemini-pro",
+        "preview:gemini-2.0",
+    ],
+)
+def test_gemini_client_accepts_typical_model_names(monkeypatch, good_model):
+    """一般的な Gemini モデル名（英数字 / `-` / `.` / `_` / `:` / `/`）は許容する。"""
+    monkeypatch.setenv("GEMINI_PATH", "/fake/gemini")
+    client = GeminiClient(model=good_model)
+    assert client.model == good_model
+
+
 # ---------------------------------------------------------------------------
 # review_document（CodexClient と同インターフェース）
 # ---------------------------------------------------------------------------

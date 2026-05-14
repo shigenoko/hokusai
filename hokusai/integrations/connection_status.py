@@ -23,6 +23,9 @@ from typing import Any, Callable
 
 from ..logging_config import get_logger
 
+# Gemini CLI のドキュメント URL（SonarCloud S1192 対応で gemini モジュールに集約）
+from .gemini import GEMINI_CLI_DOCS_URL as _GEMINI_DOCS_URL
+
 logger = get_logger("connection_status")
 
 
@@ -363,9 +366,9 @@ def _check_gemini(mode: str) -> dict[str, Any]:
                 "type": "docs",
                 "label": "Gemini CLI のセットアップ手順",
                 "command": None,
-                "docs_url": "https://github.com/google-gemini/gemini-cli",
+                "docs_url": _GEMINI_DOCS_URL,
             },
-            docs_url="https://github.com/google-gemini/gemini-cli",
+            docs_url=_GEMINI_DOCS_URL,
             mode=mode,
         )
     res = _run_cli([gemini_path, "--version"], timeout=3.0)
@@ -414,9 +417,9 @@ def _check_gemini(mode: str) -> dict[str, Any]:
             "type": "command",
             "label": "Gemini にログインする",
             "command": "hokusai connect gemini",
-            "docs_url": "https://github.com/google-gemini/gemini-cli",
+            "docs_url": _GEMINI_DOCS_URL,
         },
-        docs_url="https://github.com/google-gemini/gemini-cli",
+        docs_url=_GEMINI_DOCS_URL,
         mode=mode,
     )
 
