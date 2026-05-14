@@ -4,6 +4,7 @@ Configuration Loaders
 File loading and parsing functions for workflow configuration.
 """
 
+import logging
 from pathlib import Path
 
 import yaml
@@ -27,6 +28,8 @@ from .models import (
     WebDashboardAuthConfig,
     WebDashboardConfig,
 )
+
+_logger = logging.getLogger("hokusai.config.loaders")
 
 
 def load_config_from_file(config_path: Path) -> dict:
@@ -156,9 +159,16 @@ def _parse_cross_review_config(config_dict: dict) -> CrossReviewConfig:
     if not isinstance(max_correction_rounds, int) or max_correction_rounds < 1:
         max_correction_rounds = 2
 
-    # provider バリデーション（v0.4.6〜）: 未知値は warning + 既定 codex に fallback
-    provider = cr_config.get("provider", "codex")
-    if provider not in {"codex", "gemini"}:
+    # provider バリデーション（v0.4.6〜）: 未知値は warning ログ出力 + 既定 codex に fallback
+    raw_provider = cr_config.get("provider", "codex")
+    if raw_provider in {"codex", "gemini"}:
+        provider = raw_provider
+    else:
+        _logger.warning(
+            "cross_review.provider=%r は未対応です（'codex' か 'gemini' を指定）。"
+            "既定 'codex' にフォールバックします。タイポの可能性を確認してください。",
+            raw_provider,
+        )
         provider = "codex"
 
     return CrossReviewConfig(

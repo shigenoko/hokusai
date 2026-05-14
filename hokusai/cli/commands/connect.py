@@ -36,11 +36,15 @@ SUPPORTED_SERVICES: dict[str, dict[str, Any]] = {
         "install_url": "https://gitlab.com/gitlab-org/cli",
     },
     # v0.4.6（Issue #31）: cross-review LLM として Gemini CLI 対応
+    # status_command を None にすることで auth 状態の自動判定をスキップし、
+    # 常に auth_command（gemini 対話起動 → OAuth）に誘導する。
+    # gemini CLI には gh/glab のような auth status サブコマンドが無く、
+    # --version は install 確認しかできないため、誤って「認証済み」と判定する
+    # のを避ける（Copilot レビュー 1 回目 #1 対応）。
     "gemini": {
         "label": "Google Gemini",
         "cli": "gemini",
-        "status_command": ["gemini", "--version"],
-        # gemini CLI は対話起動時に OAuth フローに遷移する設計
+        "status_command": None,
         "auth_command": ["gemini"],
         "install_url": "https://github.com/google-gemini/gemini-cli",
     },
@@ -101,34 +105,42 @@ def connect_service(
         print(f"  インストール: {spec['install_url']}")
         return 1
 
-    print(f"→ {label} の認証状態を確認しています…")
-    try:
-        status_result = subprocess.run(
-            spec["status_command"], capture_output=True, text=True, timeout=5.0
-        )
-    except subprocess.TimeoutExpired:
+    # status_command が None のサービス（例: Gemini）は auth 自動判定不可。
+    # 常に auth_command への誘導に進む（誤って「認証済み」と判定するのを避ける）。
+    if spec["status_command"] is None:
         print(
-            f"✗ `{' '.join(spec['status_command'])}` が 5 秒以内に応答しませんでした。"
+            f"→ {label} は auth 状態を自動判定できません。"
+            "認証フロー（または再認証）に進みます。"
         )
-        return 1
-
-    output = (status_result.stderr or status_result.stdout or "").strip()
-    already_authenticated = status_result.returncode == 0
-
-    if already_authenticated and not force:
-        print(f"✓ {label} は既に認証済みです。")
-        if output:
-            for line in output.splitlines():
-                print(f"  {line}")
-        return 0
-
-    if already_authenticated:
-        print(f"✓ {label} は認証済みですが、--force が指定されたため再認証します。")
     else:
-        print(f"⚠ {label} は未認証です。")
-        if output:
-            for line in output.splitlines()[:10]:
-                print(f"  {line}")
+        print(f"→ {label} の認証状態を確認しています…")
+        try:
+            status_result = subprocess.run(
+                spec["status_command"], capture_output=True, text=True, timeout=5.0
+            )
+        except subprocess.TimeoutExpired:
+            print(
+                f"✗ `{' '.join(spec['status_command'])}` が 5 秒以内に応答しませんでした。"
+            )
+            return 1
+
+        output = (status_result.stderr or status_result.stdout or "").strip()
+        already_authenticated = status_result.returncode == 0
+
+        if already_authenticated and not force:
+            print(f"✓ {label} は既に認証済みです。")
+            if output:
+                for line in output.splitlines():
+                    print(f"  {line}")
+            return 0
+
+        if already_authenticated:
+            print(f"✓ {label} は認証済みですが、--force が指定されたため再認証します。")
+        else:
+            print(f"⚠ {label} は未認証です。")
+            if output:
+                for line in output.splitlines()[:10]:
+                    print(f"  {line}")
 
     auth_cmd_str = " ".join(spec["auth_command"])
     interactive = not no_interactive and is_interactive_session()

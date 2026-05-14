@@ -129,6 +129,44 @@ def test_review_document_falls_back_to_text_when_unparseable(gemini_client):
     assert result["findings"] == []
 
 
+def test_review_document_handles_prose_prefix_with_nested_json(gemini_client):
+    """前置き prose + ネストした JSON object を含む出力を正しくパースする。
+
+    Copilot レビュー 1 回目 #6 対応: 旧実装は rfind('{') を使っていたため、
+    ネストした `findings[].suggestion` の中の `{` を起点にしてしまい partial
+    fragment を json.loads に渡して失敗していた。新実装は最初の top-level
+    `{` から対応する `}` までを brace balance で抽出する。
+    """
+    sample = {
+        "findings": [
+            {
+                "category": "completeness",
+                "severity": "major",
+                "title": "テスト不足",
+                "description": "test case が足りません",
+                "suggestion": "{ 例として add_test() を追加 } のような実装",
+            }
+        ],
+        "overall_assessment": "request_changes",
+        "summary": "概ね良好",
+    }
+    prose_then_json = (
+        "レビュー結果は以下のとおりです。注意点が見つかりました。\n\n"
+        f"{json.dumps(sample, ensure_ascii=False)}\n\n"
+        "以上です。"
+    )
+    mock_result = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout=prose_then_json, stderr=""
+    )
+    with patch("hokusai.integrations.gemini.subprocess.run", return_value=mock_result):
+        result = gemini_client.review_document(document="d", review_prompt="p")
+    # parse_error にならず、正しい dict が返る
+    assert result.get("parse_error") is not True
+    assert result["overall_assessment"] == "request_changes"
+    assert len(result["findings"]) == 1
+    assert result["findings"][0]["title"] == "テスト不足"
+
+
 # ---------------------------------------------------------------------------
 # 汎用 generate（B 案で再利用される汎用 API）
 # ---------------------------------------------------------------------------

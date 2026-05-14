@@ -100,18 +100,14 @@ class GeminiClient:
         """
         actual_timeout = timeout or self.timeout
 
+        # プロンプトを組み立てる: 共通の review_prompt + ドキュメント、
+        # schema_path 指定時はスキーマ要求を末尾に追記。
         full_prompt = (
             f"{review_prompt}\n\n"
             "重要: すべての回答（title, description, suggestion, summary）は"
             "日本語で記述してください。\n\n"
             f"---\n\n{document}"
         )
-
-        cmd: list[str] = [
-            self.gemini_path,
-            "-m", self.model,
-            "-p", full_prompt,
-        ]
         if schema_path:
             # gemini CLI は構造化出力スキーマを直接サポートしていないため、
             # プロンプトにスキーマを埋め込む形で誘導する（出力パース側で吸収）。
@@ -123,11 +119,12 @@ class GeminiClient:
                 "を返してください:\n\n"
                 f"{schema_content}\n"
             )
-            cmd = [
-                self.gemini_path,
-                "-m", self.model,
-                "-p", full_prompt,
-            ]
+
+        cmd: list[str] = [
+            self.gemini_path,
+            "-m", self.model,
+            "-p", full_prompt,
+        ]
 
         logger.debug(
             "Gemini 実行: model=%s timeout=%ds", self.model, actual_timeout,
@@ -225,7 +222,9 @@ class GeminiClient:
         順序:
         1. 全体を json.loads
         2. markdown コードフェンス（```json ... ```）から抽出
-        3. 最後の `{ ... }` ブロックを抽出
+        3. ブレース balance を見て **最初の `{` から対応する `}` まで** を抽出
+           （Gemini は前置きの prose のあとに JSON オブジェクトを返すパターンが多く、
+           ネストした `{` が含まれるため rfind では partial fragment になる）
         4. どれも失敗したらフォールバック dict（parse_error=True）を返す
         """
         try:
@@ -240,11 +239,10 @@ class GeminiClient:
             except json.JSONDecodeError:
                 pass
 
-        brace_start = output.rfind("{")
-        brace_end = output.rfind("}")
-        if brace_start != -1 and brace_end > brace_start:
+        extracted = self._extract_first_top_level_object(output)
+        if extracted is not None:
             try:
-                return json.loads(output[brace_start:brace_end + 1])
+                return json.loads(extracted)
             except json.JSONDecodeError:
                 pass
 
@@ -257,6 +255,30 @@ class GeminiClient:
             "summary": output[:500],
             "parse_error": True,
         }
+
+    @staticmethod
+    def _extract_first_top_level_object(text: str) -> str | None:
+        """`text` 中で最初に現れる top-level `{ ... }` を抽出する。
+
+        ネストした `{ }` を考慮して brace balance を取り、最初の `{` から
+        対応する `}` までを返す。文字列リテラル内の `{`/`}` は escape を考慮
+        せず単純走査（JSON parser に委ねるため厳密さは json.loads 側で担保）。
+
+        対応する `}` が見つからない（unbalanced）場合は None。
+        """
+        start = text.find("{")
+        if start == -1:
+            return None
+        depth = 0
+        for i in range(start, len(text)):
+            ch = text[i]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start:i + 1]
+        return None
 
 
 # ----------------------------------------------------------------------

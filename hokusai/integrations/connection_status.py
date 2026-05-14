@@ -308,18 +308,55 @@ def _check_codex(mode: str) -> dict[str, Any]:
     )
 
 
+def _resolve_gemini_executable() -> str | None:
+    """`GeminiClient._find_gemini_command` と同等のロジックで gemini を解決する。
+
+    優先順位: GEMINI_PATH 環境変数 → PATH → 一般 install パス。
+    見つからなければ None。
+    """
+    import os
+    from pathlib import Path
+
+    env_path = os.environ.get("GEMINI_PATH")
+    if env_path:
+        return env_path
+    which_path = shutil.which("gemini")
+    if which_path:
+        return which_path
+    for path in (
+        Path.home() / ".npm-global/bin/gemini",
+        Path("/usr/local/bin/gemini"),
+        Path("/opt/homebrew/bin/gemini"),
+    ):
+        if path.exists():
+            return str(path)
+    return None
+
+
 def _check_gemini(mode: str) -> dict[str, Any]:
+    """Gemini CLI の install 状態を確認する。
+
+    `gemini --version` には auth 状態を表すサブコマンドが無いため、本関数は
+    **install 確認のみ**を行い、auth 状態は断定しない。install されていれば
+    status="installed"（STATUS_NOT_AUTHENTICATED を流用）で「auth 状態は別途
+    `hokusai connect gemini` で確認・実施」と案内する。
+    `GEMINI_PATH` 環境変数も尊重する（GeminiClient._find_gemini_command と整合）。
+    """
     service_id = "gemini"
     label = "Google Gemini"
     required_for = ["cross_review"]
-    if not shutil.which("gemini"):
+    gemini_path = _resolve_gemini_executable()
+    if gemini_path is None:
         return _build_result(
             service_id=service_id,
             label=label,
             category=CategoryLLMAgent,
             status=STATUS_NOT_INSTALLED,
             summary="Gemini CLI が見つかりません",
-            detail="`gemini` コマンドが PATH にありません",
+            detail=(
+                "`gemini` コマンドが PATH に無く、`GEMINI_PATH` 環境変数も "
+                "未設定で、一般 install パスにも存在しません"
+            ),
             required_for=required_for,
             message_key="connection.gemini.not_installed",
             next_action={
@@ -331,7 +368,7 @@ def _check_gemini(mode: str) -> dict[str, Any]:
             docs_url="https://github.com/google-gemini/gemini-cli",
             mode=mode,
         )
-    res = _run_cli(["gemini", "--version"], timeout=3.0)
+    res = _run_cli([gemini_path, "--version"], timeout=3.0)
     if res is None:
         return _build_result(
             service_id=service_id,
@@ -358,15 +395,28 @@ def _check_gemini(mode: str) -> dict[str, Any]:
             mode=mode,
         )
     version_line = (stdout or stderr).splitlines()[0] if (stdout or stderr) else ""
+    # gemini CLI は auth 状態を返す軽量サブコマンドを持たないため、ここでは
+    # install 確認のみ行い、auth は STATUS_NOT_AUTHENTICATED の semantics で
+    # 「未確認」として扱う。`hokusai connect gemini` で OAuth フローに誘導される。
     return _build_result(
         service_id=service_id,
         label=label,
         category=CategoryLLMAgent,
-        status=STATUS_CONNECTED,
-        summary="Gemini CLI が利用可能です",
-        detail=f"gemini --version → {version_line}",
+        status=STATUS_NOT_AUTHENTICATED,
+        summary="Gemini CLI は install 済み（auth 状態は未確認）",
+        detail=(
+            f"gemini --version → {version_line}。"
+            "auth 状態を確認・実施するには `hokusai connect gemini` を実行してください。"
+        ),
         required_for=required_for,
-        message_key="connection.gemini.connected",
+        message_key="connection.gemini.installed_auth_unknown",
+        next_action={
+            "type": "command",
+            "label": "Gemini にログインする",
+            "command": "hokusai connect gemini",
+            "docs_url": "https://github.com/google-gemini/gemini-cli",
+        },
+        docs_url="https://github.com/google-gemini/gemini-cli",
         mode=mode,
     )
 
