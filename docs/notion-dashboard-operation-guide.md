@@ -88,7 +88,10 @@ hokusai notion-setup \
 
 設計原則:
 - **オプトイン**: `--scaffold` 未指定なら従来通り DB だけ作成
-- **scaffold ページのみ idempotent**: `--scaffold` で作る `📚 HOKUSAI Documentation` 配下の 4 ページは、既存に同名ページがあれば skip（再実行で重複しない）
+- **scaffold ページのみ idempotent（配置先パスごと）**:
+  - ハブ `📚 HOKUSAI Documentation` は **親ページ直下** で既存検出 → 有れば skip
+  - サブ 3 ページ（`💬 Discussions` / `📖 Operation Guides` / `📋 Requirements`）は **ハブ配下** で既存検出 → 有れば skip
+  - 親ページ直下にサブと同名ページがあっても skip 対象にならない（パス違いのため）
 - **partial success**: 個別サブページ作成失敗で全体が止まらない（ハブ作成失敗のみ致命）
 
 > 旧版に存在した「HOKUSAI Service Status ページ」は、複数ユーザー環境で各自のローカル状態を上書きしてしまう問題（last-writer-wins）があるため廃止。サービス接続状態は HOKUSAI Operations Console（`scripts/dashboard.py`）でのみ参照する。

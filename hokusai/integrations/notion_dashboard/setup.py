@@ -12,8 +12,12 @@ Notion 上に HOKUSAI 用の DB / ページを一括作成する。
 - API token が integration から発行済みで、対象ワークスペースに権限があること
 
 設計判断:
-- 冪等性は明示的に持たせない: 再実行すると新しい DB / ページが作られる。失敗時は
-  Notion 側で archived/削除してから再実行することを想定。
+- 冪等性は **DB 作成と scaffold ページで分ける**:
+    - DB 作成（Workflows / Pull Requests）: 冪等ではない。再実行すると新しい DB が
+      作られる。失敗時は Notion 側で archived/削除してから再実行することを想定。
+    - `--scaffold` で作る `📚 HOKUSAI Documentation` ハブと配下 3 サブページ:
+      idempotent。配置先パスごとに既存検出（pagination 全走査）し、同名ページが
+      あれば skip する。Issue #25 / v0.4.3。
 - スキーマ定義はこのファイルにハードコード: 設定で外部化はしない。スキーマ変更は
   実装側のリリースに合わせて行うのが安全。
 - relation は single_property: dual_property を使うと synced backref 名が固定で

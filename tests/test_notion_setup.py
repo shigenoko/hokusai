@@ -1173,18 +1173,38 @@ def test_scaffold_skips_existing_hub_page():
         assert payload["parent"]["page_id"] == "existing-📚 HOKUSAI Documentation"
 
 
-def test_scaffold_skips_existing_subpages():
-    """サブページが既に一部存在する場合、それらは skip して残りを作成"""
-    # ハブは新規作成、Discussions は既に存在
+def test_scaffold_rerun_is_idempotent_and_skips_all_four_pages():
+    """同じクライアントで再実行すると 4 ページ全てが skip される（end-to-end idempotency）。
+
+    1 回目: ハブ + 3 サブの計 4 ページを新規作成
+    2 回目: 全 4 ページが既存検出されて skip
+    """
     client = _ScaffoldRecordingClient()
-    # 1 回目で 4 ページすべて作る
     scaffold_notion_workspace("token", "parent", api_client=client)
-    # 2 回目（idempotent 確認）
     result = scaffold_notion_workspace("token", "parent", api_client=client)
 
-    # 2 回目はすべて skip
     assert result["created"] == []
     assert len(result["skipped"]) == 4
+
+
+def test_scaffold_skips_only_existing_subpage():
+    """ハブとサブ 1 つだけが既存、残りのサブは新規作成（部分既存ケース）。"""
+    client = _ScaffoldRecordingClient(
+        existing_pages=[
+            ("parent", "📚 HOKUSAI Documentation"),
+            ("existing-📚 HOKUSAI Documentation", "💬 Discussions"),
+        ]
+    )
+    result = scaffold_notion_workspace("token", "parent", api_client=client)
+
+    skipped_titles = [s["title"] for s in result["skipped"]]
+    created_titles = [c["title"] for c in result["created"]]
+    # ハブと Discussions は skip
+    assert "📚 HOKUSAI Documentation" in skipped_titles
+    assert "💬 Discussions" in skipped_titles
+    # 残りの 2 サブは新規作成
+    assert "📖 Operation Guides" in created_titles
+    assert "📋 Requirements" in created_titles
 
 
 def test_scaffold_partial_failure_does_not_raise():
