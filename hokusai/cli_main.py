@@ -258,6 +258,16 @@ def main():
         help="作成された DB / ページ ID をシェル rc ファイル（~/.zshrc 等）に自動追記する",
     )
     notion_setup_parser.add_argument(
+        "--scaffold",
+        action="store_true",
+        help=(
+            "ドキュメントツリーを自動作成する（v0.4.3〜）。"
+            "親ページ配下に 📚 HOKUSAI Documentation / 💬 Discussions / "
+            "📖 Operation Guides / 📋 Requirements の 4 ページを作成。"
+            "既存に同名ページがあれば skip（idempotent）。"
+        ),
+    )
+    notion_setup_parser.add_argument(
         "--shell-rc",
         default=None,
         help="--persist で書き込む rc ファイルのパス（省略時は SHELL から自動検出）",
@@ -689,8 +699,11 @@ def _handle_notion_setup(args, config=None) -> int:
     print(f"  API token env: {api_token_env}")
     print()
 
+    scaffold_flag = getattr(args, "scaffold", False)
     try:
-        result = setup_notion_workspace(api_token, args.parent_page_id)
+        result = setup_notion_workspace(
+            api_token, args.parent_page_id, scaffold=scaffold_flag
+        )
     except NotionSetupError as e:
         print(f"✗ セットアップ失敗: {e}")
         print()
@@ -708,6 +721,32 @@ def _handle_notion_setup(args, config=None) -> int:
     print("作成されたリソース:")
     print(f"  Workflows DB:          {result['workflows_db_id']}")
     print(f"  Pull Requests DB:      {result['pull_requests_db_id']}")
+
+    # scaffold 結果（--scaffold 指定時のみ含まれる）
+    scaffold_result = result.get("scaffold")
+    if scaffold_result is not None:
+        created = scaffold_result.get("created", [])
+        skipped = scaffold_result.get("skipped", [])
+        failed = scaffold_result.get("failed", [])
+        error = scaffold_result.get("error")
+        print()
+        print("📚 ドキュメントツリー:")
+        # 致命エラー（ハブ作成失敗等）は最初に出して成功と誤読されないようにする。
+        if error:
+            print(f"  ⚠️ scaffold 中にエラー: {error}")
+        if created:
+            for item in created:
+                print(f"  ✓ 作成: {item['title']}")
+        if skipped:
+            for item in skipped:
+                print(f"  - skip（既存）: {item['title']}")
+        if failed:
+            for item in failed:
+                print(f"  ✗ 失敗: {item['title']}: {item.get('error', '')}")
+        # 「変更なし」は error / failed が無い場合のみ表示する
+        if not created and not skipped and not failed and not error:
+            print("  （変更なし）")
+
     print()
     print("以下を環境変数に設定してください（~/.zshrc などに追記推奨）:")
     print()

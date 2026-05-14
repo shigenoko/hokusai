@@ -93,12 +93,24 @@ class NotionAPIClient:
         """Notion ページのプロパティ等を取得する（GET /v1/pages/{page_id}）。"""
         return self._request("GET", f"/pages/{page_id}")
 
-    def list_block_children(self, block_id: str) -> dict:
+    def list_block_children(
+        self, block_id: str, *, start_cursor: str | None = None
+    ) -> dict:
         """指定ブロック直下の子ブロック一覧を取得する（GET /v1/blocks/{id}/children）。
 
         ページ ID も block_id として使える（Notion API の慣習）。
+        Notion API は 1 レスポンスあたり最大 100 件を返し `has_more` /
+        `next_cursor` でページネーションする。呼び出し側で全件走査が必要な場合は
+        `start_cursor` を渡して反復取得すること。
         """
-        return self._request("GET", f"/blocks/{block_id}/children")
+        path = f"/blocks/{block_id}/children"
+        if start_cursor:
+            # cursor は opaque な token のため、`&` `=` `#` 等の予約文字を含む
+            # 可能性がある。string 連結で URL に埋め込むと truncation / 不正
+            # URL になり pagination が壊れるため、必ず URL encode する。
+            encoded_cursor = urllib.parse.quote(start_cursor, safe="")
+            path = f"{path}?start_cursor={encoded_cursor}"
+        return self._request("GET", path)
 
     def append_block_children(self, block_id: str, children: list[dict]) -> dict:
         return self._request(

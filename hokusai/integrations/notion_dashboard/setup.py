@@ -12,8 +12,12 @@ Notion 上に HOKUSAI 用の DB / ページを一括作成する。
 - API token が integration から発行済みで、対象ワークスペースに権限があること
 
 設計判断:
-- 冪等性は明示的に持たせない: 再実行すると新しい DB / ページが作られる。失敗時は
-  Notion 側で archived/削除してから再実行することを想定。
+- 冪等性は **DB 作成と scaffold ページで分ける**:
+    - DB 作成（Workflows / Pull Requests）: 冪等ではない。再実行すると新しい DB が
+      作られる。失敗時は Notion 側で archived/削除してから再実行することを想定。
+    - `--scaffold` で作る `📚 HOKUSAI Documentation` ハブと配下 3 サブページ:
+      idempotent。配置先パスごとに既存検出（pagination 全走査）し、同名ページが
+      あれば skip する。Issue #25 / v0.4.3。
 - スキーマ定義はこのファイルにハードコード: 設定で外部化はしない。スキーマ変更は
   実装側のリリースに合わせて行うのが安全。
 - relation は single_property: dual_property を使うと synced backref 名が固定で
@@ -168,23 +172,36 @@ def setup_notion_workspace(
     api_token: str,
     parent_page_id: str,
     *,
+    scaffold: bool = False,
     api_client: NotionAPIClient | None = None,
-) -> dict[str, str]:
+) -> dict[str, Any]:
     """Notion ワークスペースに HOKUSAI 用 DB / ページを一括作成する。
 
     Args:
         api_token: HOKUSAI 専用 Notion Integration の Internal Integration Token
         parent_page_id: 親ページの ID（事前に integration を接続しておくこと）
+        scaffold: True のとき、DB 作成に加えて標準ドキュメントツリー
+            （📚 HOKUSAI Documentation 配下に 💬 Discussions /
+            📖 Operation Guides / 📋 Requirements）も作成する。
+            既存に同名ページがある場合は skip（idempotent）。
         api_client: テスト用に NotionAPIClient を差し替える場合に指定
 
     Returns:
         {
             "workflows_db_id": "...",
             "pull_requests_db_id": "...",
+            "scaffold": {                # scaffold=True のときのみ
+                "created": [{"title": str, "id": str}, ...],
+                "skipped": [{"title": str, "id": str}, ...],
+                "failed":  [{"title": str, "error": str}, ...],
+                # 致命的失敗（ハブ作成失敗など）の場合のみ:
+                "error": "ExceptionType: message",
+            },
         }
 
     Raises:
-        NotionSetupError: いずれかのリソース作成に失敗した場合
+        NotionSetupError: いずれかの DB リソース作成に失敗した場合。
+            scaffold 失敗は致命的扱いせず、結果 dict にエラーを含めて返す。
     """
     if not api_token:
         raise NotionSetupError("api_token が空です")
@@ -239,10 +256,299 @@ def setup_notion_workspace(
             "Pull Requests DB の作成レスポンスに id が含まれません"
         )
 
-    return {
+    result: dict[str, Any] = {
         "workflows_db_id": workflows_db_id,
         "pull_requests_db_id": pull_requests_db_id,
     }
+
+    # 3. scaffold（オプトイン）: 標準ドキュメントツリーを作成
+    # DB 作成と異なり、scaffold 失敗は致命扱いしない（DB は既に作成済みのため）。
+    # scaffold_notion_workspace は入力検証以外は raise せず、partial state を
+    # 返り値に含めるため、ここでは error 用の fallback dict 構築は不要。
+    if scaffold:
+        try:
+            result["scaffold"] = scaffold_notion_workspace(
+                api_token, parent_page_id, api_client=api
+            )
+        except Exception as e:
+            # 想定外の例外（入力検証以外）に対する最終 fallback。
+            # 部分状態を保てないので空でも error を残す。
+            logger.warning(
+                "scaffold が想定外の例外で失敗: %s: %s",
+                type(e).__name__, str(e),
+            )
+            result["scaffold"] = {
+                "created": [],
+                "skipped": [],
+                "failed": [],
+                "error": f"{type(e).__name__}: {e}",
+            }
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Issue #25: 標準ドキュメントツリーの scaffold（オプトイン）
+# ---------------------------------------------------------------------------
+
+# 標準ツリー定義: top-level page ごとに icon と placeholder を持つ。
+# 順序を保ちたいので list of tuple で定義。
+_DOCUMENTATION_HUB_TITLE = "📚 HOKUSAI Documentation"
+_DOCUMENTATION_HUB_ICON = "📚"
+_DOCUMENTATION_HUB_PLACEHOLDER = (
+    "HOKUSAI の Notion governance layer 上で人間が管理するドキュメントのハブ。"
+    "HOKUSAI が自動同期する DB（Workflows / Pull Requests）とは別領域で、"
+    "議論・運用・要件などをツリーで整理する。"
+)
+
+# サブページの定義: (title, icon, placeholder)
+_DOCUMENTATION_CHILDREN: list[tuple[str, str, str]] = [
+    (
+        "💬 Discussions",
+        "💬",
+        "コード変更を伴う前段の議論・設計判断を残す場所。"
+        "決定後は関連 GitHub Issue を本文に追加して双方向リンクを張る。"
+        "「Decided」ステータスのドキュメントは Project Memory の候補にもなる。",
+    ),
+    (
+        "📖 Operation Guides",
+        "📖",
+        "日常運用の手順書（profile 切り替え、token 更新、復旧手順、"
+        "Operations Console の使い方など）。"
+        "リポジトリ内 docs/*-operation-guide.md と整合させる。",
+    ),
+    (
+        "📋 Requirements",
+        "📋",
+        "要件定義書の Notion 版または GitHub へのリンク集。"
+        "コード変更を伴わない設計レベルの要件をここに集約する。"
+        "リポジトリ内 docs/hokusai-*-requirements.md と対応する。",
+    ),
+]
+
+
+def _find_existing_child_page(
+    api_client: NotionAPIClient, parent_page_id: str, title: str
+) -> str | None:
+    """親ページの子ブロック一覧から、同名の child_page の id を探す。
+
+    見つからなければ None を返す。child_page の title 完全一致で判定する。
+
+    Notion API は 1 レスポンス最大 100 件のため、`has_more` を見て全ページを
+    走査する。途中で API エラーが発生した場合は idempotent チェックを完了
+    できないため `NotionSetupError` を送出する（fail-open で重複ページを作って
+    しまうのを避ける）。
+    """
+    cursor: str | None = None
+    while True:
+        try:
+            blocks = api_client.list_block_children(
+                parent_page_id, start_cursor=cursor
+            )
+        except Exception as e:
+            raise NotionSetupError(
+                "親ページの子要素取得に失敗（idempotent チェック不能）: "
+                f"{type(e).__name__}: {e}"
+            ) from e
+        for block in blocks.get("results", []):
+            if block.get("type") != "child_page":
+                continue
+            if block.get("child_page", {}).get("title") == title:
+                return block.get("id")
+        if not blocks.get("has_more"):
+            return None
+        cursor = blocks.get("next_cursor")
+        if not cursor:
+            return None
+
+
+def _build_documentation_page_payload(
+    parent_id: str, title: str, icon_emoji: str, placeholder: str
+) -> dict[str, Any]:
+    """child_page の作成 payload を組み立てる。
+
+    icon に絵文字を、children に placeholder paragraph を含める。
+
+    Notion Create Page API の仕様（page_id parent）:
+    - properties は "title" キーのみ許容され、値は rich-text array を **直接**
+      渡す（DB 行用の {"title": {"title": [...]}} 形式は使えない）。
+    - DB 行用形式を渡すと Notion 側で 400 エラーになる。
+    """
+    return {
+        "parent": {"type": "page_id", "page_id": parent_id},
+        "icon": {"type": "emoji", "emoji": icon_emoji},
+        "properties": {
+            "title": [{"type": "text", "text": {"content": title}}]
+        },
+        "children": [
+            {
+                "type": "paragraph",
+                "paragraph": {
+                    "rich_text": [
+                        {"type": "text", "text": {"content": placeholder}}
+                    ]
+                },
+            }
+        ],
+    }
+
+
+def _resolve_hub_page(
+    api: NotionAPIClient,
+    parent_page_id: str,
+    created: list[dict[str, str]],
+    skipped: list[dict[str, str]],
+) -> str:
+    """ハブページ（📚 HOKUSAI Documentation）を取得 or 作成し id を返す。
+
+    既存なら `skipped` に append、新規作成なら `created` に append する。
+    ハブ作成失敗は scaffold 全体の致命扱いとして NotionSetupError を投げる。
+    """
+    existing_hub_id = _find_existing_child_page(
+        api, parent_page_id, _DOCUMENTATION_HUB_TITLE
+    )
+    if existing_hub_id:
+        skipped.append({"title": _DOCUMENTATION_HUB_TITLE, "id": existing_hub_id})
+        logger.info(
+            "ハブページは既に存在: %s (id=%s)",
+            _DOCUMENTATION_HUB_TITLE, existing_hub_id,
+        )
+        return existing_hub_id
+    try:
+        hub_response = api.create_page(
+            _build_documentation_page_payload(
+                parent_page_id,
+                _DOCUMENTATION_HUB_TITLE,
+                _DOCUMENTATION_HUB_ICON,
+                _DOCUMENTATION_HUB_PLACEHOLDER,
+            )
+        )
+    except Exception as e:
+        raise NotionSetupError(
+            f"ハブページの作成に失敗: {type(e).__name__}: {e}"
+        ) from e
+    hub_id = hub_response.get("id", "")
+    if not hub_id:
+        raise NotionSetupError("ハブページ作成レスポンスに id が含まれません")
+    created.append({"title": _DOCUMENTATION_HUB_TITLE, "id": hub_id})
+    logger.info("ハブページを作成: %s (id=%s)", _DOCUMENTATION_HUB_TITLE, hub_id)
+    return hub_id
+
+
+def _create_or_skip_subpage(
+    api: NotionAPIClient,
+    hub_id: str,
+    sub_title: str,
+    sub_icon: str,
+    sub_placeholder: str,
+    created: list[dict[str, str]],
+    skipped: list[dict[str, str]],
+    failed: list[dict[str, str]],
+) -> None:
+    """単一サブページを idempotent に作成し、結果を created/skipped/failed に振り分ける。"""
+    existing_sub_id = _find_existing_child_page(api, hub_id, sub_title)
+    if existing_sub_id:
+        skipped.append({"title": sub_title, "id": existing_sub_id})
+        logger.info("サブページは既に存在: %s (id=%s)", sub_title, existing_sub_id)
+        return
+    try:
+        sub_response = api.create_page(
+            _build_documentation_page_payload(
+                hub_id, sub_title, sub_icon, sub_placeholder
+            )
+        )
+    except Exception as e:
+        err_detail = f"{type(e).__name__}: {e}"
+        logger.warning("サブページの作成に失敗（skip）: %s: %s", sub_title, err_detail)
+        failed.append({"title": sub_title, "error": err_detail})
+        return
+    sub_id = sub_response.get("id", "")
+    if not sub_id:
+        err_detail = "create_page レスポンスに id が含まれません"
+        logger.warning("%s: %s", err_detail, sub_title)
+        failed.append({"title": sub_title, "error": err_detail})
+        return
+    created.append({"title": sub_title, "id": sub_id})
+    logger.info("サブページを作成: %s (id=%s)", sub_title, sub_id)
+
+
+def scaffold_notion_workspace(
+    api_token: str,
+    parent_page_id: str,
+    *,
+    api_client: NotionAPIClient | None = None,
+) -> dict[str, Any]:
+    """親ページ配下に標準ドキュメントツリーを作成する（idempotent）。
+
+    ツリー構造:
+        <parent>
+        └── 📚 HOKUSAI Documentation
+            ├── 💬 Discussions
+            ├── 📖 Operation Guides
+            └── 📋 Requirements
+
+    既存に同名ページがある場合は skip（破壊しない）。
+
+    本関数は入力検証エラー（NotionSetupError）以外は raise しない。実行時の
+    API エラー（ハブ作成失敗 / 子要素取得失敗 / サブページ作成失敗）はすべて
+    返り値 dict に partial state として記録する。途中で失敗しても、すでに
+    作成済み / skip 済みのページ情報は失われない（呼び出し側が復旧手順を
+    判断できるようにするため）。
+
+    Args:
+        api_token: Notion Integration Token
+        parent_page_id: 親ページの ID
+        api_client: テスト差し替え用
+
+    Returns:
+        {
+            "created": [{"title": str, "id": str}, ...],
+            "skipped": [{"title": str, "id": str}, ...],
+            "failed":  [{"title": str, "error": str}, ...],  # 個別サブページの失敗
+            # ハブ作成失敗 / 子要素取得失敗（idempotent チェック不能）等の
+            # 致命的失敗時のみ追加される:
+            "error": "ExceptionType: message",
+        }
+
+    Raises:
+        NotionSetupError: 入力（api_token / parent_page_id）が空のときのみ。
+    """
+    if not api_token:
+        raise NotionSetupError("api_token が空です")
+    if not parent_page_id:
+        raise NotionSetupError("parent_page_id が空です")
+
+    api = api_client or NotionAPIClient(api_token=api_token)
+
+    created: list[dict[str, str]] = []
+    skipped: list[dict[str, str]] = []
+    failed: list[dict[str, str]] = []
+
+    try:
+        hub_id = _resolve_hub_page(api, parent_page_id, created, skipped)
+    except Exception as e:
+        err_detail = f"{type(e).__name__}: {e}"
+        logger.warning("ハブページの解決に失敗: %s", err_detail)
+        return {
+            "created": created, "skipped": skipped, "failed": failed,
+            "error": err_detail,
+        }
+
+    for sub_title, sub_icon, sub_placeholder in _DOCUMENTATION_CHILDREN:
+        try:
+            _create_or_skip_subpage(
+                api, hub_id, sub_title, sub_icon, sub_placeholder,
+                created, skipped, failed,
+            )
+        except Exception as e:
+            # サブ毎の lookup / create エラーで全体を止めない。
+            err_detail = f"{type(e).__name__}: {e}"
+            logger.warning(
+                "サブページの処理に失敗（continue）: %s: %s", sub_title, err_detail,
+            )
+            failed.append({"title": sub_title, "error": err_detail})
+
+    return {"created": created, "skipped": skipped, "failed": failed}
 
 
 # ---------------------------------------------------------------------------

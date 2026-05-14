@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "hokusai-flow"
-version = "0.4.0"
+version = "0.4.3"
 description = "LangGraph-based AI development workflow automation with Claude Code integration"
 license = { text = "Apache-2.0" }
 readme = "README.md"

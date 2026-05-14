@@ -17,6 +17,7 @@ from hokusai.integrations.notion_dashboard.setup import (
     NotionSetupError,
     PULL_REQUESTS_DB_TITLE,
     WORKFLOWS_DB_TITLE,
+    scaffold_notion_workspace,
     setup_notion_workspace,
 )
 
@@ -270,7 +271,7 @@ def test_cli_handler_prints_export_lines_on_success(capsys, monkeypatch):
 
     monkeypatch.setenv("HOKUSAI_NOTION_API_TOKEN", "secret")
 
-    def _fake_setup(api_token, parent_page_id):
+    def _fake_setup(api_token, parent_page_id, **kwargs):
         return {
             "workflows_db_id": "wf123",
             "pull_requests_db_id": "pr456",
@@ -302,7 +303,7 @@ def test_cli_handler_returns_one_on_setup_error(capsys, monkeypatch):
 
     monkeypatch.setenv("HOKUSAI_NOTION_API_TOKEN", "secret")
 
-    def _fake_setup(api_token, parent_page_id):
+    def _fake_setup(api_token, parent_page_id, **kwargs):
         raise NotionSetupError("integration not connected")
 
     monkeypatch.setattr(
@@ -491,7 +492,7 @@ def test_cli_handler_persist_writes_to_rc(capsys, monkeypatch, tmp_path):
 
     monkeypatch.setenv("HOKUSAI_NOTION_API_TOKEN", "secret")
 
-    def _fake_setup(api_token, parent_page_id):
+    def _fake_setup(api_token, parent_page_id, **kwargs):
         return {
             "workflows_db_id": "wfNEW",
             "pull_requests_db_id": "prNEW",
@@ -528,7 +529,7 @@ def test_cli_handler_persist_disabled_shows_hint(capsys, monkeypatch):
 
     monkeypatch.setenv("HOKUSAI_NOTION_API_TOKEN", "secret")
 
-    def _fake_setup(api_token, parent_page_id):
+    def _fake_setup(api_token, parent_page_id, **kwargs):
         return {
             "workflows_db_id": "x",
             "pull_requests_db_id": "y",
@@ -734,7 +735,7 @@ def test_cli_handler_uses_profile_config_api_token_env(
     monkeypatch.delenv("HOKUSAI_NOTION_API_TOKEN", raising=False)
     monkeypatch.setenv("HOKUSAI_NOTION_API_TOKEN_FOO", "secret-foo")
 
-    def _fake_setup(api_token, parent_page_id):
+    def _fake_setup(api_token, parent_page_id, **kwargs):
         return {"workflows_db_id": "wf", "pull_requests_db_id": "pr"}
 
     monkeypatch.setattr(
@@ -776,7 +777,7 @@ def test_cli_handler_explicit_api_token_env_wins_over_profile_config(
 
     monkeypatch.setenv("HOKUSAI_NOTION_API_TOKEN_EXPLICIT", "secret-explicit")
 
-    def _fake_setup(api_token, parent_page_id):
+    def _fake_setup(api_token, parent_page_id, **kwargs):
         return {"workflows_db_id": "wf", "pull_requests_db_id": "pr"}
 
     monkeypatch.setattr(
@@ -812,7 +813,7 @@ def test_cli_handler_falls_back_to_default_when_profile_config_missing_field(
 
     monkeypatch.setenv("HOKUSAI_NOTION_API_TOKEN", "secret-default")
 
-    def _fake_setup(api_token, parent_page_id):
+    def _fake_setup(api_token, parent_page_id, **kwargs):
         return {"workflows_db_id": "wf", "pull_requests_db_id": "pr"}
 
     monkeypatch.setattr(
@@ -960,7 +961,7 @@ def test_cli_handler_falls_back_when_config_env_name_invalid(
 
     monkeypatch.setenv("HOKUSAI_NOTION_API_TOKEN", "secret-default")
 
-    def _fake_setup(api_token, parent_page_id):
+    def _fake_setup(api_token, parent_page_id, **kwargs):
         return {"workflows_db_id": "wf", "pull_requests_db_id": "pr"}
 
     monkeypatch.setattr(
@@ -1008,7 +1009,7 @@ def test_cli_handler_persist_uses_profile_marker_and_custom_env_names(
 
     monkeypatch.setenv("HOKUSAI_NOTION_API_TOKEN_4HOKUSAI", "secret-4hokusai")
 
-    def _fake_setup(api_token, parent_page_id):
+    def _fake_setup(api_token, parent_page_id, **kwargs):
         return {"workflows_db_id": "wf-4hokusai", "pull_requests_db_id": "pr-4hokusai"}
 
     monkeypatch.setattr(
@@ -1043,3 +1044,561 @@ def test_cli_handler_persist_uses_profile_marker_and_custom_env_names(
     # 既定 env 名は書かれない
     assert 'export HOKUSAI_NOTION_WORKFLOWS_DB_ID="' not in content
     assert 'export HOKUSAI_NOTION_PR_DB_ID="' not in content
+
+
+# ---------------------------------------------------------------------------
+# scaffold_notion_workspace (Issue #25 / v0.4.3)
+# ---------------------------------------------------------------------------
+
+
+class _ScaffoldRecordingClient:
+    """scaffold ロジック検証用の最小モック。
+
+    list_block_children: 親ページの既存子要素を返す
+    create_page: page を「作成」し、id を返却
+    """
+
+    def __init__(
+        self,
+        *,
+        existing_pages: list[tuple[str, str]] | None = None,
+        fail_on_titles: set[str] | None = None,
+    ):
+        """existing_pages: [(parent_id, title), ...] の既存ページ集合"""
+        self.created_pages: list[dict] = []
+        self.list_children_calls: list[str] = []
+        # parent_id -> [(title, id), ...]
+        self._existing: dict[str, list[tuple[str, str]]] = {}
+        for parent_id, title in (existing_pages or []):
+            self._existing.setdefault(parent_id, []).append((title, f"existing-{title}"))
+        self._fail_on_titles = fail_on_titles or set()
+        self._next_id = 0
+
+    def list_block_children(
+        self, block_id: str, *, start_cursor: str | None = None
+    ) -> dict:
+        # 単純化のため pagination は使わず 1 ページで返す
+        self.list_children_calls.append(block_id)
+        results = []
+        for title, pid in self._existing.get(block_id, []):
+            results.append({
+                "type": "child_page",
+                "id": pid,
+                "child_page": {"title": title},
+            })
+        return {"results": results, "has_more": False, "next_cursor": None}
+
+    def create_page(self, payload: dict) -> dict:
+        self.created_pages.append(payload)
+        title = payload["properties"]["title"][0]["text"]["content"]
+        if title in self._fail_on_titles:
+            raise RuntimeError(f"create_page failure for {title}")
+        self._next_id += 1
+        new_id = f"page-{self._next_id}"
+        # 作成後は既存リストにも追加（同セッションで再作成しないため）
+        parent_id = payload["parent"]["page_id"]
+        self._existing.setdefault(parent_id, []).append((title, new_id))
+        return {"id": new_id}
+
+
+def test_scaffold_creates_full_tree_when_empty():
+    """空の親ページに対して、4 ページ（ハブ + サブ 3）すべてを作成する"""
+    client = _ScaffoldRecordingClient()
+    result = scaffold_notion_workspace("token", "parent-page-id", api_client=client)
+
+    created_titles = [c["title"] for c in result["created"]]
+    assert "📚 HOKUSAI Documentation" in created_titles
+    assert "💬 Discussions" in created_titles
+    assert "📖 Operation Guides" in created_titles
+    assert "📋 Requirements" in created_titles
+    assert len(result["created"]) == 4
+    assert result["skipped"] == []
+
+
+def test_scaffold_includes_icon_and_placeholder():
+    """各作成ページに icon emoji と placeholder paragraph が含まれる"""
+    client = _ScaffoldRecordingClient()
+    scaffold_notion_workspace("token", "parent", api_client=client)
+
+    # 全ページに icon があり、children に少なくとも 1 個の paragraph がある
+    for payload in client.created_pages:
+        assert payload["icon"]["type"] == "emoji"
+        assert payload["icon"]["emoji"] in ("📚", "💬", "📖", "📋")
+        children = payload["children"]
+        assert len(children) >= 1
+        assert children[0]["type"] == "paragraph"
+
+
+def test_scaffold_payload_uses_page_parent_title_shape():
+    """create_page payload は page_id parent 仕様（properties.title が rich-text array 直接）。
+
+    Notion Create Page API では page_id parent の場合
+        properties.title = [rich_text, ...]
+    でなければならない。DB 行用の properties.title = {"title": [...]} 形式を
+    送ると実 API が 400 を返す。
+    """
+    client = _ScaffoldRecordingClient()
+    scaffold_notion_workspace("token", "parent", api_client=client)
+
+    assert client.created_pages, "ページが作成されているはず"
+    for payload in client.created_pages:
+        # parent は page_id 形式
+        assert payload["parent"]["type"] == "page_id"
+        # properties.title は rich-text array でなければならない（dict 不可）
+        title_value = payload["properties"]["title"]
+        assert isinstance(title_value, list), (
+            "page_id parent では properties.title は rich-text array 必須"
+        )
+        assert title_value
+        assert title_value[0]["type"] == "text"
+        assert "content" in title_value[0]["text"]
+
+
+def test_scaffold_skips_existing_hub_page():
+    """ハブページが既に存在する場合は skip し、配下の作成は既存ハブ id で行う"""
+    client = _ScaffoldRecordingClient(
+        existing_pages=[("parent-id", "📚 HOKUSAI Documentation")]
+    )
+    result = scaffold_notion_workspace("token", "parent-id", api_client=client)
+
+    skipped_titles = [s["title"] for s in result["skipped"]]
+    assert "📚 HOKUSAI Documentation" in skipped_titles
+    # サブ 3 ページは既存ハブの下に作成される
+    created_titles = [c["title"] for c in result["created"]]
+    assert "💬 Discussions" in created_titles
+    assert "📖 Operation Guides" in created_titles
+    assert "📋 Requirements" in created_titles
+    # 既存ハブの id でサブを作る
+    for payload in client.created_pages:
+        assert payload["parent"]["page_id"] == "existing-📚 HOKUSAI Documentation"
+
+
+def test_scaffold_rerun_is_idempotent_and_skips_all_four_pages():
+    """同じクライアントで再実行すると 4 ページ全てが skip される（end-to-end idempotency）。
+
+    1 回目: ハブ + 3 サブの計 4 ページを新規作成
+    2 回目: 全 4 ページが既存検出されて skip
+    """
+    client = _ScaffoldRecordingClient()
+    scaffold_notion_workspace("token", "parent", api_client=client)
+    result = scaffold_notion_workspace("token", "parent", api_client=client)
+
+    assert result["created"] == []
+    assert len(result["skipped"]) == 4
+
+
+def test_scaffold_skips_only_existing_subpage():
+    """ハブとサブ 1 つだけが既存、残りのサブは新規作成（部分既存ケース）。"""
+    client = _ScaffoldRecordingClient(
+        existing_pages=[
+            ("parent", "📚 HOKUSAI Documentation"),
+            ("existing-📚 HOKUSAI Documentation", "💬 Discussions"),
+        ]
+    )
+    result = scaffold_notion_workspace("token", "parent", api_client=client)
+
+    skipped_titles = [s["title"] for s in result["skipped"]]
+    created_titles = [c["title"] for c in result["created"]]
+    # ハブと Discussions は skip
+    assert "📚 HOKUSAI Documentation" in skipped_titles
+    assert "💬 Discussions" in skipped_titles
+    # 残りの 2 サブは新規作成
+    assert "📖 Operation Guides" in created_titles
+    assert "📋 Requirements" in created_titles
+
+
+def test_scaffold_partial_failure_does_not_raise():
+    """サブページ作成のいずれかが失敗しても残りは作成（partial success）"""
+    client = _ScaffoldRecordingClient(fail_on_titles={"📖 Operation Guides"})
+    result = scaffold_notion_workspace("token", "parent", api_client=client)
+
+    created_titles = [c["title"] for c in result["created"]]
+    # 失敗したサブを除く 3 つは作成される
+    assert "📚 HOKUSAI Documentation" in created_titles
+    assert "💬 Discussions" in created_titles
+    assert "📋 Requirements" in created_titles
+    assert "📖 Operation Guides" not in created_titles
+    # 失敗したサブは "failed" に記録される（Copilot レビュー #2 対応）
+    failed_titles = [f["title"] for f in result.get("failed", [])]
+    assert "📖 Operation Guides" in failed_titles
+    assert result["failed"][0].get("error")
+
+
+def test_scaffold_lookup_failure_avoids_duplicates_via_error_dict():
+    """list_block_children が失敗したら create_page を呼ばず error 付き dict を返す。
+
+    fail-open で None を返すと、Notion API の一過性失敗時に重複ページを作って
+    しまう。idempotent チェックが完了できない場合は致命扱いとして error フィールド
+    に記録し、create_page は呼ばない（Copilot レビュー #1 + #4 対応 / partial state 保持）。
+    """
+
+    class _ListFailClient:
+        def list_block_children(self, block_id, *, start_cursor=None):
+            raise RuntimeError("network down")
+
+        def create_page(self, payload):  # pragma: no cover
+            raise AssertionError("should not be called when lookup fails")
+
+    result = scaffold_notion_workspace("token", "parent", api_client=_ListFailClient())
+    assert "error" in result
+    assert "親ページの子要素取得に失敗" in result["error"]
+    assert result["created"] == []
+    assert result["skipped"] == []
+    assert result["failed"] == []
+
+
+def test_scaffold_walks_pagination_to_find_existing_page():
+    """子要素が複数ページに分割されていても、後方ページの既存ページを発見できる。
+
+    （Copilot レビュー #1 / setup.py:340 pagination 不足の対応）
+    """
+
+    class _PaginatedClient:
+        def __init__(self):
+            self.calls: list[str | None] = []
+            self.created_pages: list[dict] = []
+
+        def list_block_children(self, block_id, *, start_cursor=None):
+            self.calls.append(start_cursor)
+            if start_cursor is None:
+                return {
+                    "results": [
+                        {
+                            "type": "child_page",
+                            "id": "noise-1",
+                            "child_page": {"title": "other page"},
+                        }
+                    ],
+                    "has_more": True,
+                    "next_cursor": "cursor-1",
+                }
+            assert start_cursor == "cursor-1"
+            return {
+                "results": [
+                    {
+                        "type": "child_page",
+                        "id": "hub-on-page-2",
+                        "child_page": {"title": "📚 HOKUSAI Documentation"},
+                    }
+                ],
+                "has_more": False,
+                "next_cursor": None,
+            }
+
+        def create_page(self, payload):
+            self.created_pages.append(payload)
+            title = payload["properties"]["title"][0]["text"]["content"]
+            return {"id": f"new-{title}"}
+
+    client = _PaginatedClient()
+    result = scaffold_notion_workspace("token", "parent", api_client=client)
+    # ハブはページ 2 で見つかったので skip 扱い、新規作成されない
+    skipped_titles = [s["title"] for s in result["skipped"]]
+    assert "📚 HOKUSAI Documentation" in skipped_titles
+    # ハブ検出時に pagination が走ったことを確認（最初の 2 件が None → cursor-1）
+    assert client.calls[:2] == [None, "cursor-1"]
+    # ハブが skip されたので create_page でハブを作っていない
+    hub_creates = [
+        p for p in client.created_pages
+        if p["properties"]["title"][0]["text"]["content"]
+        == "📚 HOKUSAI Documentation"
+    ]
+    assert hub_creates == []
+
+
+def test_scaffold_hub_creation_failure_returns_error_dict():
+    """ハブページ作成失敗時は raise せず error フィールド付き dict を返す（partial state 保持）。
+
+    Copilot レビュー 4 回目対応: 旧実装は呼び出し側の try/except で partial
+    state を空 dict で上書きしていたため、ハブが既に skip 検出されていたケース
+    でも CLI 出力から情報が消えていた。新実装は scaffold_notion_workspace 内で
+    例外を捕捉して結果 dict にそのまま記録する。
+    """
+    client = _ScaffoldRecordingClient(
+        fail_on_titles={"📚 HOKUSAI Documentation"}
+    )
+    result = scaffold_notion_workspace("token", "parent", api_client=client)
+    assert "error" in result
+    assert "ハブページ" in result["error"]
+    assert result["created"] == []
+    assert result["skipped"] == []
+    assert result["failed"] == []
+
+
+def test_scaffold_subpage_lookup_failure_preserves_hub_creation():
+    """サブページ idempotent チェック失敗時もハブ作成済み partial state を維持。
+
+    Copilot レビュー 4 回目（setup.py:282）対応の回帰防止。
+    """
+
+    class _LookupFailsAfterHub:
+        def __init__(self):
+            self.children_calls = 0
+
+        def list_block_children(self, block_id, *, start_cursor=None):
+            self.children_calls += 1
+            if self.children_calls == 1:
+                return {"results": [], "has_more": False, "next_cursor": None}
+            raise RuntimeError("notion API 5xx during subpage lookup")
+
+        def create_page(self, payload):
+            title = payload["properties"]["title"][0]["text"]["content"]
+            return {"id": f"new-{title}"}
+
+    client = _LookupFailsAfterHub()
+    result = scaffold_notion_workspace("token", "parent", api_client=client)
+    created_titles = [c["title"] for c in result["created"]]
+    assert "📚 HOKUSAI Documentation" in created_titles
+    failed_titles = [f["title"] for f in result["failed"]]
+    assert "💬 Discussions" in failed_titles
+    assert "📖 Operation Guides" in failed_titles
+    assert "📋 Requirements" in failed_titles
+    assert "error" not in result
+
+
+def test_scaffold_rejects_empty_token():
+    with pytest.raises(NotionSetupError):
+        scaffold_notion_workspace("", "parent")
+
+
+def test_scaffold_rejects_empty_parent():
+    with pytest.raises(NotionSetupError):
+        scaffold_notion_workspace("token", "")
+
+
+# ---------------------------------------------------------------------------
+# setup_notion_workspace(scaffold=...) との統合
+# ---------------------------------------------------------------------------
+
+
+class _DBPlusScaffoldClient:
+    """DB 作成と scaffold 両方をモックするクライアント"""
+
+    def __init__(self):
+        self.create_database_calls = 0
+        self.create_page_calls: list[dict] = []
+        self.list_children_calls = 0
+
+    def create_database(self, payload):
+        self.create_database_calls += 1
+        title = payload["title"][0]["text"]["content"]
+        return {"id": f"db-{title}"}
+
+    def create_page(self, payload):
+        self.create_page_calls.append(payload)
+        title = payload["properties"]["title"][0]["text"]["content"]
+        return {"id": f"page-{title}"}
+
+    def list_block_children(self, block_id, *, start_cursor=None):
+        self.list_children_calls += 1
+        return {"results": [], "has_more": False, "next_cursor": None}
+
+
+def test_setup_workspace_without_scaffold_does_not_create_pages():
+    """scaffold=False（既定）なら DB のみ作成、ページは作らない"""
+    client = _DBPlusScaffoldClient()
+    result = setup_notion_workspace("token", "parent", api_client=client)
+    assert client.create_database_calls == 2  # Workflows + PR
+    assert client.create_page_calls == []
+    assert "scaffold" not in result
+
+
+def test_setup_workspace_with_scaffold_creates_both():
+    """scaffold=True なら DB + ドキュメントツリーを作成"""
+    client = _DBPlusScaffoldClient()
+    result = setup_notion_workspace(
+        "token", "parent", scaffold=True, api_client=client
+    )
+    assert client.create_database_calls == 2
+    assert len(client.create_page_calls) == 4  # ハブ + サブ 3
+    assert "scaffold" in result
+    assert len(result["scaffold"]["created"]) == 4
+
+
+def test_setup_workspace_scaffold_failure_does_not_fail_db_creation():
+    """scaffold が完全失敗しても DB は成功扱い（partial success）"""
+
+    class _DBOkScaffoldFail:
+        def __init__(self):
+            self.db_calls = 0
+
+        def create_database(self, payload):
+            self.db_calls += 1
+            return {"id": f"db-{self.db_calls}"}
+
+        def list_block_children(self, block_id, *, start_cursor=None):
+            return {"results": [], "has_more": False, "next_cursor": None}
+
+        def create_page(self, payload):
+            # scaffold のハブ作成で必ず失敗
+            raise RuntimeError("scaffold network down")
+
+    client = _DBOkScaffoldFail()
+    result = setup_notion_workspace(
+        "token", "parent", scaffold=True, api_client=client
+    )
+    # DB は作成される
+    assert result["workflows_db_id"] == "db-1"
+    assert result["pull_requests_db_id"] == "db-2"
+    # scaffold は error を含む
+    assert "scaffold" in result
+    assert result["scaffold"].get("error") is not None
+
+
+# ---------------------------------------------------------------------------
+# CLI ハンドラ: --scaffold フラグ
+# ---------------------------------------------------------------------------
+
+
+def test_cli_handler_scaffold_flag_routes_to_setup(capsys, monkeypatch):
+    """--scaffold 指定時に setup_notion_workspace に scaffold=True が渡る"""
+    from hokusai import cli_main
+
+    monkeypatch.setenv("HOKUSAI_NOTION_API_TOKEN", "secret")
+
+    received: dict = {}
+
+    def _fake_setup(api_token, parent_page_id, **kwargs):
+        received.update(kwargs)
+        return {
+            "workflows_db_id": "wf",
+            "pull_requests_db_id": "pr",
+            "scaffold": {"created": [{"title": "📚 HOKUSAI Documentation", "id": "h1"}], "skipped": []},
+        }
+
+    monkeypatch.setattr(
+        "hokusai.integrations.notion_dashboard.setup_notion_workspace",
+        _fake_setup,
+    )
+
+    class _Args:
+        api_token_env = "HOKUSAI_NOTION_API_TOKEN"
+        parent_page_id = "parent"
+        scaffold = True
+        persist = False
+        shell_rc = None
+        no_backup = False
+
+    rc = cli_main._handle_notion_setup(_Args())
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert received.get("scaffold") is True
+    assert "📚 ドキュメントツリー" in out
+    assert "📚 HOKUSAI Documentation" in out
+
+
+def test_cli_handler_no_scaffold_flag_keeps_default(capsys, monkeypatch):
+    """--scaffold 未指定なら scaffold=False で呼ばれ、ツリー表示も出ない"""
+    from hokusai import cli_main
+
+    monkeypatch.setenv("HOKUSAI_NOTION_API_TOKEN", "secret")
+
+    received: dict = {}
+
+    def _fake_setup(api_token, parent_page_id, **kwargs):
+        received.update(kwargs)
+        return {"workflows_db_id": "wf", "pull_requests_db_id": "pr"}
+
+    monkeypatch.setattr(
+        "hokusai.integrations.notion_dashboard.setup_notion_workspace",
+        _fake_setup,
+    )
+
+    class _Args:
+        api_token_env = "HOKUSAI_NOTION_API_TOKEN"
+        parent_page_id = "parent"
+        scaffold = False
+        persist = False
+        shell_rc = None
+        no_backup = False
+
+    rc = cli_main._handle_notion_setup(_Args())
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert received.get("scaffold") is False
+    assert "📚 ドキュメントツリー" not in out
+
+
+def test_cli_handler_scaffold_error_branch_shows_error_first(capsys, monkeypatch):
+    """scaffold が致命エラーで返した場合、CLI 出力は error を最初に表示し、
+    「変更なし」は表示しない（Copilot レビュー 4 回目 / cli_main.py:745 対応）。
+    """
+    from hokusai import cli_main
+
+    monkeypatch.setenv("HOKUSAI_NOTION_API_TOKEN", "secret")
+
+    def _fake_setup(api_token, parent_page_id, **kwargs):
+        return {
+            "workflows_db_id": "wf", "pull_requests_db_id": "pr",
+            "scaffold": {
+                "created": [], "skipped": [], "failed": [],
+                "error": "RuntimeError: notion 5xx",
+            },
+        }
+
+    monkeypatch.setattr(
+        "hokusai.integrations.notion_dashboard.setup_notion_workspace",
+        _fake_setup,
+    )
+
+    class _Args:
+        api_token_env = "HOKUSAI_NOTION_API_TOKEN"
+        parent_page_id = "parent"
+        scaffold = True
+        persist = False
+        shell_rc = None
+        no_backup = False
+
+    rc = cli_main._handle_notion_setup(_Args())
+    out = capsys.readouterr().out
+    assert rc == 0  # DB は成功なので exit 0
+    assert "⚠️ scaffold 中にエラー" in out
+    assert "RuntimeError: notion 5xx" in out
+    assert "（変更なし）" not in out
+    # error は created / skipped より前に出ているはず
+    error_idx = out.find("⚠️ scaffold 中にエラー")
+    tree_section_idx = out.find("📚 ドキュメントツリー")
+    assert 0 <= tree_section_idx < error_idx  # ヘッダ → error の順
+
+
+def test_cli_handler_scaffold_failed_subpages_show_in_output(capsys, monkeypatch):
+    """個別サブページの failed 配列が CLI 出力で ✗ 失敗行として表示される
+    （Copilot レビュー 4 回目 / cli_main.py:745 対応）。
+    """
+    from hokusai import cli_main
+
+    monkeypatch.setenv("HOKUSAI_NOTION_API_TOKEN", "secret")
+
+    def _fake_setup(api_token, parent_page_id, **kwargs):
+        return {
+            "workflows_db_id": "wf", "pull_requests_db_id": "pr",
+            "scaffold": {
+                "created": [{"title": "📚 HOKUSAI Documentation", "id": "h1"}],
+                "skipped": [],
+                "failed": [
+                    {"title": "💬 Discussions", "error": "RuntimeError: boom"},
+                ],
+            },
+        }
+
+    monkeypatch.setattr(
+        "hokusai.integrations.notion_dashboard.setup_notion_workspace",
+        _fake_setup,
+    )
+
+    class _Args:
+        api_token_env = "HOKUSAI_NOTION_API_TOKEN"
+        parent_page_id = "parent"
+        scaffold = True
+        persist = False
+        shell_rc = None
+        no_backup = False
+
+    rc = cli_main._handle_notion_setup(_Args())
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "✓ 作成: 📚 HOKUSAI Documentation" in out
+    assert "✗ 失敗: 💬 Discussions" in out
+    assert "RuntimeError: boom" in out
+    # failed があるので「変更なし」は出ない
+    assert "（変更なし）" not in out
