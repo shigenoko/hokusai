@@ -293,52 +293,72 @@ def setup_notion_workspace(
 
 # 標準ツリー定義: top-level page ごとに icon と placeholder を持つ。
 # 順序を保ちたいので list of tuple で定義。
-_DOCUMENTATION_HUB_TITLE = "📚 HOKUSAI Documentation"
+# v0.4.4（Issue #27）以降: title 文字列は素のテキスト、絵文字は icon 側のみで
+# 表現する（Notion UI で title と icon に絵文字が二重表示されるのを回避）。
+_DOCUMENTATION_HUB_TITLE = "HOKUSAI Documentation"
 _DOCUMENTATION_HUB_ICON = "📚"
 _DOCUMENTATION_HUB_PLACEHOLDER = (
     "HOKUSAI の Notion governance layer 上で人間が管理するドキュメントのハブ。"
     "HOKUSAI が自動同期する DB（Workflows / Pull Requests）とは別領域で、"
     "議論・運用・要件などをツリーで整理する。"
 )
+# v0.4.3 以前の旧タイトル（絵文字 prefix 付き）。idempotent 検出時に
+# 後方互換で skip 対象にする（重複ページ作成を回避）。
+_DOCUMENTATION_HUB_LEGACY_TITLES: tuple[str, ...] = (
+    "📚 HOKUSAI Documentation",
+)
 
-# サブページの定義: (title, icon, placeholder)
-_DOCUMENTATION_CHILDREN: list[tuple[str, str, str]] = [
+# サブページの定義: (title, icon, placeholder, legacy_aliases)
+# legacy_aliases は v0.4.3 以前のタイトル（絵文字 prefix 付き）で、
+# 後方互換のため既存検出対象に含める。
+_DOCUMENTATION_CHILDREN: list[tuple[str, str, str, tuple[str, ...]]] = [
     (
-        "💬 Discussions",
+        "Discussions",
         "💬",
         "コード変更を伴う前段の議論・設計判断を残す場所。"
         "決定後は関連 GitHub Issue を本文に追加して双方向リンクを張る。"
         "「Decided」ステータスのドキュメントは Project Memory の候補にもなる。",
+        ("💬 Discussions",),
     ),
     (
-        "📖 Operation Guides",
+        "Operation Guides",
         "📖",
         "日常運用の手順書（profile 切り替え、token 更新、復旧手順、"
         "Operations Console の使い方など）。"
         "リポジトリ内 docs/*-operation-guide.md と整合させる。",
+        ("📖 Operation Guides",),
     ),
     (
-        "📋 Requirements",
+        "Requirements",
         "📋",
         "要件定義書の Notion 版または GitHub へのリンク集。"
         "コード変更を伴わない設計レベルの要件をここに集約する。"
         "リポジトリ内 docs/hokusai-*-requirements.md と対応する。",
+        ("📋 Requirements",),
     ),
 ]
 
 
 def _find_existing_child_page(
-    api_client: NotionAPIClient, parent_page_id: str, title: str
+    api_client: NotionAPIClient,
+    parent_page_id: str,
+    title: str,
+    *,
+    legacy_aliases: tuple[str, ...] = (),
 ) -> str | None:
-    """親ページの子ブロック一覧から、同名の child_page の id を探す。
+    """親ページの子ブロック一覧から、同名 / 旧タイトルの child_page の id を探す。
 
-    見つからなければ None を返す。child_page の title 完全一致で判定する。
+    見つからなければ None を返す。`title` または `legacy_aliases` のいずれかと
+    完全一致する child_page を既存扱いにする。`legacy_aliases` は過去バージョン
+    で使われていたタイトル（絵文字 prefix 付き等）を渡すことで、後方互換で
+    重複ページ作成を回避する。
 
     Notion API は 1 レスポンス最大 100 件のため、`has_more` を見て全ページを
     走査する。途中で API エラーが発生した場合は idempotent チェックを完了
     できないため `NotionSetupError` を送出する（fail-open で重複ページを作って
     しまうのを避ける）。
     """
+    candidates = {title, *legacy_aliases}
     cursor: str | None = None
     while True:
         try:
@@ -353,7 +373,7 @@ def _find_existing_child_page(
         for block in blocks.get("results", []):
             if block.get("type") != "child_page":
                 continue
-            if block.get("child_page", {}).get("title") == title:
+            if block.get("child_page", {}).get("title") in candidates:
                 return block.get("id")
         if not blocks.get("has_more"):
             return None
@@ -399,13 +419,16 @@ def _resolve_hub_page(
     created: list[dict[str, str]],
     skipped: list[dict[str, str]],
 ) -> str:
-    """ハブページ（📚 HOKUSAI Documentation）を取得 or 作成し id を返す。
+    """ハブページ（HOKUSAI Documentation、icon 📚）を取得 or 作成し id を返す。
 
     既存なら `skipped` に append、新規作成なら `created` に append する。
     ハブ作成失敗は scaffold 全体の致命扱いとして NotionSetupError を投げる。
+    旧バージョン（v0.4.3）で作成された絵文字 prefix 付きタイトルのページも
+    後方互換で skip 検出する。
     """
     existing_hub_id = _find_existing_child_page(
-        api, parent_page_id, _DOCUMENTATION_HUB_TITLE
+        api, parent_page_id, _DOCUMENTATION_HUB_TITLE,
+        legacy_aliases=_DOCUMENTATION_HUB_LEGACY_TITLES,
     )
     if existing_hub_id:
         skipped.append({"title": _DOCUMENTATION_HUB_TITLE, "id": existing_hub_id})
@@ -444,9 +467,17 @@ def _create_or_skip_subpage(
     created: list[dict[str, str]],
     skipped: list[dict[str, str]],
     failed: list[dict[str, str]],
+    *,
+    legacy_aliases: tuple[str, ...] = (),
 ) -> None:
-    """単一サブページを idempotent に作成し、結果を created/skipped/failed に振り分ける。"""
-    existing_sub_id = _find_existing_child_page(api, hub_id, sub_title)
+    """単一サブページを idempotent に作成し、結果を created/skipped/failed に振り分ける。
+
+    legacy_aliases は v0.4.3 以前で作成された絵文字 prefix 付きタイトルを
+    後方互換で既存検出するために渡す。
+    """
+    existing_sub_id = _find_existing_child_page(
+        api, hub_id, sub_title, legacy_aliases=legacy_aliases,
+    )
     if existing_sub_id:
         skipped.append({"title": sub_title, "id": existing_sub_id})
         logger.info("サブページは既に存在: %s (id=%s)", sub_title, existing_sub_id)
@@ -534,11 +565,12 @@ def scaffold_notion_workspace(
             "error": err_detail,
         }
 
-    for sub_title, sub_icon, sub_placeholder in _DOCUMENTATION_CHILDREN:
+    for sub_title, sub_icon, sub_placeholder, sub_legacy in _DOCUMENTATION_CHILDREN:
         try:
             _create_or_skip_subpage(
                 api, hub_id, sub_title, sub_icon, sub_placeholder,
                 created, skipped, failed,
+                legacy_aliases=sub_legacy,
             )
         except Exception as e:
             # サブ毎の lookup / create エラーで全体を止めない。

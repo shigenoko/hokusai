@@ -260,9 +260,9 @@ hokusai notion-setup --parent-page-id <notion-page-id> --persist
 hokusai --profile hokusai notion-setup --parent-page-id <notion-page-id> --persist
 ```
 
-#### ドキュメントツリーの scaffold（v0.4.3〜）
+#### ドキュメントツリーの scaffold（v0.4.3〜、v0.4.4 でタイトル形式更新）
 
-新規 profile / 新規 workspace 立ち上げ時、HOKUSAI governance layer の標準ドキュメントツリー（`📚 HOKUSAI Documentation` / `💬 Discussions` / `📖 Operation Guides` / `📋 Requirements`）を DB 作成と同時に scaffold するには `--scaffold` を付ける:
+新規 profile / 新規 workspace 立ち上げ時、HOKUSAI governance layer の標準ドキュメントツリーを DB 作成と同時に scaffold するには `--scaffold` を付ける。ツリーはハブ `HOKUSAI Documentation`（icon 📚）配下に `Discussions`（icon 💬）/ `Operation Guides`（icon 📖）/ `Requirements`（icon 📋）の 3 サブページ:
 
 ```bash
 hokusai --profile hokusai notion-setup \
@@ -271,7 +271,9 @@ hokusai --profile hokusai notion-setup \
   --persist
 ```
 
-オプトインのフラグ。scaffold ページ部分は **配置先パスごと** に idempotent: ハブ `📚 HOKUSAI Documentation` は親ページ直下で既存検出され、サブ 3 ページ（`💬 Discussions` / `📖 Operation Guides` / `📋 Requirements`）はハブ配下で既存検出される。配置パスが異なる同名ページ（例: 親ページ直下に `💬 Discussions` が存在）は既存扱いされず新規作成される。ただし DB 作成ステップは **冪等ではなく**、`notion-setup` を再実行すると新しい `HOKUSAI Workflows DB` / `HOKUSAI Pull Requests DB` が毎回作成される。DB を作り直す意図がない限り再実行は避け、必要なら Notion 側で旧 DB を archive してから再実行すること。
+オプトインのフラグ。scaffold ページ部分は **配置先パスごと** に idempotent: ハブ `HOKUSAI Documentation` は親ページ直下で既存検出され、サブ 3 ページはハブ配下で既存検出される。配置パスが異なる同名ページ（例: 親ページ直下に `Discussions` が存在）は既存扱いされず新規作成される。ただし DB 作成ステップは **冪等ではなく**、`notion-setup` を再実行すると新しい `HOKUSAI Workflows DB` / `HOKUSAI Pull Requests DB` が毎回作成される。DB を作り直す意図がない限り再実行は避け、必要なら Notion 側で旧 DB を archive してから再実行すること。
+
+> **v0.4.4 / Issue #27**: v0.4.3 では title に絵文字 prefix（例: `📚 HOKUSAI Documentation`）が含まれており、Notion UI で page icon と二重表示されていた。v0.4.4 で title から絵文字 prefix を外し、絵文字は icon でのみ表現するように変更。v0.4.3 で作成された絵文字 prefix 付きタイトルのページは後方互換 alias で検出され、再実行で重複作成しない。UI 二重表示を解消したい場合は Notion 側で手動リネーム（title から絵文字を削る）を推奨。
 
 ### Figma / Miro 連携（任意）
 

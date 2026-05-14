@@ -72,15 +72,21 @@ hokusai notion-setup \
 <親ページ>
 ├── HOKUSAI Workflows (DB)
 ├── HOKUSAI Pull Requests (DB)
-└── 📚 HOKUSAI Documentation
-    ├── 💬 Discussions          ← 議論・設計判断
-    ├── 📖 Operation Guides     ← 運用手順
-    └── 📋 Requirements         ← 要件定義書 / GitHub リンク集
+└── 📚 HOKUSAI Documentation        ← Notion icon は 📚、title は素のテキスト
+    ├── 💬 Discussions               ← 議論・設計判断（icon 💬）
+    ├── 📖 Operation Guides          ← 運用手順（icon 📖）
+    └── 📋 Requirements              ← 要件定義書 / GitHub リンク集（icon 📋）
 ```
+
+> v0.4.4（Issue #27）以降: title 文字列は素のテキスト（`HOKUSAI Documentation` /
+> `Discussions` / `Operation Guides` / `Requirements`）で、絵文字は Notion page icon
+> でのみ表現。v0.4.3 で作成された絵文字 prefix 付きタイトルのページは後方互換で
+> skip 検出される（重複作成しない）。UI 二重表示を解消したい場合は Notion 側で
+> 手動リネーム（title から絵文字を削る）を推奨。
 
 各ページの役割:
 
-| ページ | 用途 | リポジトリ内の対応 |
+| ページ（icon / title） | 用途 | リポジトリ内の対応 |
 |---|---|---|
 | 💬 Discussions | コード変更前の議論・設計判断（決定後は関連 GitHub Issue を本文にリンク）| なし（議論記録は Notion） |
 | 📖 Operation Guides | 日常運用手順（profile 切替、token 更新、復旧手順）| `docs/*-operation-guide.md` |
@@ -89,9 +95,10 @@ hokusai notion-setup \
 設計原則:
 - **オプトイン**: `--scaffold` 未指定なら従来通り DB だけ作成
 - **scaffold ページのみ idempotent（配置先パスごと）**:
-  - ハブ `📚 HOKUSAI Documentation` は **親ページ直下** で既存検出 → 有れば skip
-  - サブ 3 ページ（`💬 Discussions` / `📖 Operation Guides` / `📋 Requirements`）は **ハブ配下** で既存検出 → 有れば skip
+  - ハブ `HOKUSAI Documentation` は **親ページ直下** で既存検出 → 有れば skip
+  - サブ 3 ページは **ハブ配下** で既存検出 → 有れば skip
   - 親ページ直下にサブと同名ページがあっても skip 対象にならない（パス違いのため）
+  - 旧タイトル（絵文字 prefix 付き）も legacy alias として検出対象
 - **partial success**: 個別サブページ作成失敗で全体が止まらない（ハブ作成失敗のみ致命）
 
 > 旧版に存在した「HOKUSAI Service Status ページ」は、複数ユーザー環境で各自のローカル状態を上書きしてしまう問題（last-writer-wins）があるため廃止。サービス接続状態は HOKUSAI Operations Console（`scripts/dashboard.py`）でのみ参照する。

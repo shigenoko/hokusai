@@ -17,6 +17,34 @@ HOKUSAI のすべての特筆すべき変更をこのファイルに記録する
 
 ---
 
+## [0.4.4] - 2026-05-14
+
+`hokusai notion-setup --scaffold` のページタイトル形式を更新
+（[#27](https://github.com/shigenoko/hokusai/issues/27) 対応）。
+
+### Changed
+
+- scaffold で作成されるページの title から絵文字 prefix を削除し、絵文字は
+  Notion page icon でのみ表現するよう変更
+  - 旧: title=`📚 HOKUSAI Documentation`, icon=📚 → Notion UI で二重表示
+  - 新: title=`HOKUSAI Documentation`, icon=📚 → icon のみ
+- 4 ページすべて同様（`Discussions` / `Operation Guides` / `Requirements`）
+
+### 後方互換
+
+- `_find_existing_child_page` に `legacy_aliases` パラメータを追加
+- v0.4.3 で作成された絵文字 prefix 付きタイトルのページは legacy alias として
+  検出され、`--scaffold` 再実行時に重複ページが作成されない
+- 既存ページの自動リネームは行わない（破壊的変更を回避）
+- UI 二重表示を解消したい場合は Notion 側で手動リネーム推奨
+
+### バージョン
+
+- `pyproject.toml`: 0.4.3 → 0.4.4
+- `hokusai/__init__.py`: 0.4.3 → 0.4.4
+
+---
+
 ## [0.4.3] - 2026-05-14
 
 `hokusai notion-setup` に `--scaffold` オプションを追加

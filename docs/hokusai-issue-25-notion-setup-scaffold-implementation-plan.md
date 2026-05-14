@@ -17,13 +17,13 @@ v0.4.2 までの `hokusai notion-setup` は親ページ直下に `HOKUSAI Workfl
 ### 2.1 やること
 
 - `hokusai notion-setup` に `--scaffold` オプションを追加（オプトイン）
-- 指定時に親ページ配下に標準ドキュメントツリーを作成:
-  - 📚 HOKUSAI Documentation（ハブ）
-    - 💬 Discussions
-    - 📖 Operation Guides
-    - 📋 Requirements
+- 指定時に親ページ配下に標準ドキュメントツリーを作成（v0.4.4 で title 形式更新）:
+  - HOKUSAI Documentation（ハブ、icon 📚）
+    - Discussions（icon 💬）
+    - Operation Guides（icon 📖）
+    - Requirements（icon 📋）
 - 各ページに placeholder 文を入れる（意図と運用ルールの説明）
-- Idempotent（既存同名ページは skip）
+- Idempotent（既存同名ページは skip、v0.4.3 旧タイトル legacy_aliases 検出含む）
 
 ### 2.2 やらないこと
 
@@ -40,11 +40,16 @@ v0.4.2 までの `hokusai notion-setup` は親ページ直下に `HOKUSAI Workfl
 <親ページ>
 ├── HOKUSAI Workflows (DB)            ← 既存
 ├── HOKUSAI Pull Requests (DB)        ← 既存
-└── 📚 HOKUSAI Documentation          ← 新規
-    ├── 💬 Discussions                ← 新規
-    ├── 📖 Operation Guides           ← 新規
-    └── 📋 Requirements               ← 新規
+└── HOKUSAI Documentation             ← 新規 (icon 📚)
+    ├── Discussions                   ← 新規 (icon 💬)
+    ├── Operation Guides              ← 新規 (icon 📖)
+    └── Requirements                  ← 新規 (icon 📋)
 ```
+
+> v0.4.3 では title に絵文字 prefix（`📚 HOKUSAI Documentation` 等）を付けて
+> いたが、Notion UI で page icon と二重表示される問題のため v0.4.4 (Issue #27)
+> で title 文字列から絵文字を外し icon 側のみで表現するよう変更。後方互換で
+> v0.4.3 のページも検出される。
 
 ### 3.2 ページ仕様
 
