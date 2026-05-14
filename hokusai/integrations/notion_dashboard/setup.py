@@ -348,17 +348,20 @@ def _find_existing_child_page(
 ) -> str | None:
     """親ページの子ブロック一覧から、同名 / 旧タイトルの child_page の id を探す。
 
-    見つからなければ None を返す。`title` または `legacy_aliases` のいずれかと
-    完全一致する child_page を既存扱いにする。`legacy_aliases` は過去バージョン
-    で使われていたタイトル（絵文字 prefix 付き等）を渡すことで、後方互換で
-    重複ページ作成を回避する。
+    見つからなければ None を返す。canonical な `title` と完全一致するページを
+    最優先で返し、見つからなければ `legacy_aliases` の最初の一致を返す。
+    `legacy_aliases` は過去バージョンで使われていたタイトル（絵文字 prefix 付き等）
+    を渡すことで、後方互換で重複ページ作成を回避するが、新旧両方のページが
+    親に存在する場合は canonical 側を優先する（さもないと legacy hub 配下に
+    サブを作ってしまう）。
 
     Notion API は 1 レスポンス最大 100 件のため、`has_more` を見て全ページを
     走査する。途中で API エラーが発生した場合は idempotent チェックを完了
     できないため `NotionSetupError` を送出する（fail-open で重複ページを作って
     しまうのを避ける）。
     """
-    candidates = {title, *legacy_aliases}
+    legacy_set = set(legacy_aliases)
+    legacy_match_id: str | None = None  # canonical が見つからなかった場合の fallback
     cursor: str | None = None
     while True:
         try:
@@ -373,13 +376,19 @@ def _find_existing_child_page(
         for block in blocks.get("results", []):
             if block.get("type") != "child_page":
                 continue
-            if block.get("child_page", {}).get("title") in candidates:
+            block_title = block.get("child_page", {}).get("title")
+            # canonical title 完全一致は最優先で即返し
+            if block_title == title:
                 return block.get("id")
+            # legacy alias は最初の一致を覚えておくが、走査を続けて
+            # canonical が見つかればそちらを優先する
+            if legacy_match_id is None and block_title in legacy_set:
+                legacy_match_id = block.get("id")
         if not blocks.get("has_more"):
-            return None
+            return legacy_match_id
         cursor = blocks.get("next_cursor")
         if not cursor:
-            return None
+            return legacy_match_id
 
 
 def _build_documentation_page_payload(

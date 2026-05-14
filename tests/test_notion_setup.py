@@ -1204,6 +1204,73 @@ def test_scaffold_skips_existing_legacy_hub_page():
         assert payload["parent"]["page_id"] == "existing-📚 HOKUSAI Documentation"
 
 
+def test_scaffold_prefers_canonical_over_legacy_when_both_exist():
+    """親ページに新旧両タイトルのハブが共存する場合、canonical 側を優先する。
+
+    Copilot レビュー 2 回目（setup.py:376）対応: 旧実装は set 化された
+    candidates の中で最初に見つかったページを返していたため、Notion API が
+    legacy ページを先に返すと legacy hub 配下にサブが作られてしまっていた。
+    新実装は走査中 canonical 完全一致を即返し、legacy は fallback として扱う。
+    """
+
+    class _BothExistClient:
+        """legacy hub を先頭、canonical hub を 2 番目に返すモック"""
+
+        def __init__(self):
+            self.created_pages: list[dict] = []
+            # parent 直下のページ列挙: legacy が先、canonical が後
+            # サブの lookup（hub_id 配下）では何も返さない
+            self._call_count = 0
+
+        def list_block_children(self, block_id, *, start_cursor=None):
+            self._call_count += 1
+            # 親直下: legacy + canonical 両方を返す
+            if block_id == "parent":
+                return {
+                    "results": [
+                        {
+                            "type": "child_page",
+                            "id": "legacy-hub-id",
+                            "child_page": {"title": "📚 HOKUSAI Documentation"},
+                        },
+                        {
+                            "type": "child_page",
+                            "id": "canonical-hub-id",
+                            "child_page": {"title": "HOKUSAI Documentation"},
+                        },
+                    ],
+                    "has_more": False,
+                    "next_cursor": None,
+                }
+            # サブの lookup（hub_id 配下）: 空
+            return {"results": [], "has_more": False, "next_cursor": None}
+
+        def create_page(self, payload):
+            self.created_pages.append(payload)
+            title = payload["properties"]["title"][0]["text"]["content"]
+            return {"id": f"new-{title}"}
+
+    client = _BothExistClient()
+    result = scaffold_notion_workspace("token", "parent", api_client=client)
+
+    # canonical 側 (canonical-hub-id) がハブとして選ばれる
+    skipped_titles = [s["title"] for s in result["skipped"]]
+    assert "HOKUSAI Documentation" in skipped_titles
+    skipped_hub = [s for s in result["skipped"] if s["title"] == "HOKUSAI Documentation"]
+    assert skipped_hub[0]["id"] == "canonical-hub-id"
+    # サブは canonical-hub-id の下に作られる
+    sub_payloads = [
+        p for p in client.created_pages
+        if p["properties"]["title"][0]["text"]["content"]
+        in ("Discussions", "Operation Guides", "Requirements")
+    ]
+    assert len(sub_payloads) == 3
+    for p in sub_payloads:
+        assert p["parent"]["page_id"] == "canonical-hub-id", (
+            f"サブの parent は canonical hub であるべき: {p}"
+        )
+
+
 def test_scaffold_rerun_is_idempotent_and_skips_all_four_pages():
     """同じクライアントで再実行すると 4 ページ全てが skip される（end-to-end idempotency）。
 
