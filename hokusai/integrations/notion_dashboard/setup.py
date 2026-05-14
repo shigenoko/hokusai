@@ -3,8 +3,8 @@
 Notion 上に HOKUSAI 用の DB / ページを一括作成する。
 
 作成されるリソース:
-- HOKUSAI Workflows DB
-- HOKUSAI Pull Requests DB（Workflow → Workflows DB の relation 付き）
+- Workflows DB
+- Pull Requests DB（Workflow → Workflows DB の relation 付き）
 
 前提:
 - 親ページ（parent_page_id）が事前に Notion 上に存在し、HOKUSAI integration が
@@ -15,11 +15,11 @@ Notion 上に HOKUSAI 用の DB / ページを一括作成する。
 - 冪等性は **DB 作成と scaffold ページで分ける**:
     - DB 作成（Workflows / Pull Requests）: 冪等ではない。再実行すると新しい DB が
       作られる。失敗時は Notion 側で archived/削除してから再実行することを想定。
-    - `--scaffold` で作るドキュメントツリー: ハブ `HOKUSAI Documentation`（icon 📚）
-      と配下 3 サブページ `Discussions`（💬）/ `Operation Guides`（📖）/
-      `Requirements`（📋）。idempotent で配置先パスごとに既存検出（pagination 全走査）。
-      v0.4.3 で作成された絵文字 prefix 付き旧タイトルも legacy alias として
-      検出する（canonical 優先）。Issue #25 / v0.4.3 / v0.4.4。
+    - `--scaffold` で作るドキュメントツリー: ハブ `Documentation`（icon 📚）と配下
+      3 サブページ `議論`（💬）/ `運用ガイド`（📖）/ `要件定義`（📋）。idempotent で
+      配置先パスごとに既存検出（pagination 全走査）。v0.4.3（絵文字 prefix 付き）
+      / v0.4.4（HOKUSAI prefix + 英語名）の旧タイトルも 2 世代分 legacy alias として
+      検出する（canonical 優先）。Issue #25 / v0.4.3 / v0.4.4 / v0.4.5。
 - スキーマ定義はこのファイルにハードコード: 設定で外部化はしない。スキーマ変更は
   実装側のリリースに合わせて行うのが安全。
 - relation は single_property: dual_property を使うと synced backref 名が固定で
@@ -41,8 +41,11 @@ logger = get_logger("integrations.notion_dashboard.setup")
 
 
 # ----- リソース名（運用ガイドの命名と一致させる） -----------------------
-WORKFLOWS_DB_TITLE = "HOKUSAI Workflows DB"
-PULL_REQUESTS_DB_TITLE = "HOKUSAI Pull Requests DB"
+# v0.4.5（Issue #29）以降: 親ページが HOKUSAI 文脈で配置される想定のため、
+# 配下リソースから冗長な HOKUSAI prefix を削除。識別性は DB description の
+# 警告文と親ページ名で確保する。
+WORKFLOWS_DB_TITLE = "Workflows DB"
+PULL_REQUESTS_DB_TITLE = "Pull Requests DB"
 
 
 # ----- DB 説明（手動編集を抑止する警告文） ------------------------------
@@ -183,11 +186,11 @@ def setup_notion_workspace(
         api_token: HOKUSAI 専用 Notion Integration の Internal Integration Token
         parent_page_id: 親ページの ID（事前に integration を接続しておくこと）
         scaffold: True のとき、DB 作成に加えて標準ドキュメントツリーも作成する。
-            ツリーはハブ `HOKUSAI Documentation`（icon 📚）配下に `Discussions`
-            （icon 💬）/ `Operation Guides`（icon 📖）/ `Requirements`（icon 📋）
-            の 3 サブページ。配置先パスごとに既存検出（idempotent）、v0.4.3 の
-            絵文字 prefix 付き旧タイトル（`📚 HOKUSAI Documentation` 等）も
-            legacy alias として検出し重複作成を回避（canonical 優先）。
+            ツリーはハブ `Documentation`（icon 📚）配下に `議論`（icon 💬）/
+            `運用ガイド`（icon 📖）/ `要件定義`（icon 📋）の 3 サブページ。
+            配置先パスごとに既存検出（idempotent）、v0.4.3（絵文字 prefix 付き）
+            / v0.4.4（HOKUSAI prefix + 英語名）の旧タイトルも legacy alias と
+            して検出し重複作成を回避（canonical 優先）。
         api_client: テスト用に NotionAPIClient を差し替える場合に指定
 
     Returns:
@@ -297,48 +300,51 @@ def setup_notion_workspace(
 
 # 標準ツリー定義: top-level page ごとに icon と placeholder を持つ。
 # 順序を保ちたいので list of tuple で定義。
-# v0.4.4（Issue #27）以降: title 文字列は素のテキスト、絵文字は icon 側のみで
-# 表現する（Notion UI で title と icon に絵文字が二重表示されるのを回避）。
-_DOCUMENTATION_HUB_TITLE = "HOKUSAI Documentation"
+# v0.4.4（Issue #27）: title 文字列は素のテキスト、絵文字は icon 側のみ。
+# v0.4.5（Issue #29）: ハブから HOKUSAI prefix を削除（親ページ名で文脈確保）。
+#                      サブページタイトルを日本語化（日本語運用フローに合わせる）。
+_DOCUMENTATION_HUB_TITLE = "Documentation"
 _DOCUMENTATION_HUB_ICON = "📚"
 _DOCUMENTATION_HUB_PLACEHOLDER = (
     "HOKUSAI の Notion governance layer 上で人間が管理するドキュメントのハブ。"
     "HOKUSAI が自動同期する DB（Workflows / Pull Requests）とは別領域で、"
     "議論・運用・要件などをツリーで整理する。"
 )
-# v0.4.3 以前の旧タイトル（絵文字 prefix 付き）。idempotent 検出時に
-# 後方互換で skip 対象にする（重複ページ作成を回避）。
+# 旧タイトル（idempotent 検出時に後方互換で skip 対象）。新→旧の順で 2 世代分:
+# - v0.4.4: "HOKUSAI Documentation"
+# - v0.4.3: "📚 HOKUSAI Documentation"
 _DOCUMENTATION_HUB_LEGACY_TITLES: tuple[str, ...] = (
+    "HOKUSAI Documentation",
     "📚 HOKUSAI Documentation",
 )
 
 # サブページの定義: (title, icon, placeholder, legacy_aliases)
-# legacy_aliases は v0.4.3 以前のタイトル（絵文字 prefix 付き）で、
-# 後方互換のため既存検出対象に含める。
+# legacy_aliases は v0.4.4 / v0.4.3 で使われていたタイトル（英語 / 絵文字 prefix）。
+# 後方互換のため既存検出対象に含める（canonical 優先）。
 _DOCUMENTATION_CHILDREN: list[tuple[str, str, str, tuple[str, ...]]] = [
     (
-        "Discussions",
+        "議論",
         "💬",
         "コード変更を伴う前段の議論・設計判断を残す場所。"
         "決定後は関連 GitHub Issue を本文に追加して双方向リンクを張る。"
         "「Decided」ステータスのドキュメントは Project Memory の候補にもなる。",
-        ("💬 Discussions",),
+        ("Discussions", "💬 Discussions"),
     ),
     (
-        "Operation Guides",
+        "運用ガイド",
         "📖",
         "日常運用の手順書（profile 切り替え、token 更新、復旧手順、"
         "Operations Console の使い方など）。"
         "リポジトリ内 docs/*-operation-guide.md と整合させる。",
-        ("📖 Operation Guides",),
+        ("Operation Guides", "📖 Operation Guides"),
     ),
     (
-        "Requirements",
+        "要件定義",
         "📋",
         "要件定義書の Notion 版または GitHub へのリンク集。"
         "コード変更を伴わない設計レベルの要件をここに集約する。"
         "リポジトリ内 docs/hokusai-*-requirements.md と対応する。",
-        ("📋 Requirements",),
+        ("Requirements", "📋 Requirements"),
     ),
 ]
 
@@ -432,12 +438,12 @@ def _resolve_hub_page(
     created: list[dict[str, str]],
     skipped: list[dict[str, str]],
 ) -> str:
-    """ハブページ（HOKUSAI Documentation、icon 📚）を取得 or 作成し id を返す。
+    """ハブページ（Documentation、icon 📚）を取得 or 作成し id を返す。
 
     既存なら `skipped` に append、新規作成なら `created` に append する。
     ハブ作成失敗は scaffold 全体の致命扱いとして NotionSetupError を投げる。
-    旧バージョン（v0.4.3）で作成された絵文字 prefix 付きタイトルのページも
-    後方互換で skip 検出する。
+    旧バージョン（v0.4.3: 絵文字 prefix 付き / v0.4.4: HOKUSAI prefix 付き）
+    で作成されたページも 2 世代分の legacy alias で後方互換 skip 検出する。
     """
     existing_hub_id = _find_existing_child_page(
         api, parent_page_id, _DOCUMENTATION_HUB_TITLE,
@@ -524,16 +530,16 @@ def scaffold_notion_workspace(
 ) -> dict[str, Any]:
     """親ページ配下に標準ドキュメントツリーを作成する（idempotent）。
 
-    ツリー構造（v0.4.4〜: title は素のテキスト、絵文字は Notion page icon）:
+    ツリー構造（v0.4.5〜: title はハブ英語 / サブ日本語、絵文字は icon）:
         <parent>
-        └── HOKUSAI Documentation       ← icon 📚
-            ├── Discussions              ← icon 💬
-            ├── Operation Guides         ← icon 📖
-            └── Requirements             ← icon 📋
+        └── Documentation              ← icon 📚
+            ├── 議論                    ← icon 💬
+            ├── 運用ガイド              ← icon 📖
+            └── 要件定義                ← icon 📋
 
-    既存に同名ページがある場合は skip（破壊しない）。v0.4.3 で作成された絵文字
-    prefix 付き旧タイトル（`📚 HOKUSAI Documentation` 等）も legacy alias として
-    検出される。新旧両方のページが共存する場合は canonical 側を優先する。
+    既存に同名ページがある場合は skip（破壊しない）。v0.4.3（絵文字 prefix 付き）
+    と v0.4.4（HOKUSAI prefix + 英語名）の旧タイトルも 2 世代分の legacy alias
+    として検出される。新旧両方のページが共存する場合は canonical 側を優先する。
 
     本関数は入力検証エラー（NotionSetupError）以外は raise しない。実行時の
     API エラー（ハブ作成失敗 / 子要素取得失敗 / サブページ作成失敗）はすべて

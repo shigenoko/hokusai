@@ -1107,10 +1107,10 @@ def test_scaffold_creates_full_tree_when_empty():
     result = scaffold_notion_workspace("token", "parent-page-id", api_client=client)
 
     created_titles = [c["title"] for c in result["created"]]
-    assert "HOKUSAI Documentation" in created_titles
-    assert "Discussions" in created_titles
-    assert "Operation Guides" in created_titles
-    assert "Requirements" in created_titles
+    assert "Documentation" in created_titles
+    assert "議論" in created_titles
+    assert "運用ガイド" in created_titles
+    assert "要件定義" in created_titles
     assert len(result["created"]) == 4
     assert result["skipped"] == []
 
@@ -1179,13 +1179,9 @@ def test_scaffold_payload_uses_page_parent_title_shape():
         assert "content" in title_value[0]["text"]
 
 
-def test_scaffold_skips_existing_legacy_hub_page():
-    """v0.4.3 以前の旧タイトル（絵文字 prefix 付き）のハブが既存なら skip 検出する。
-
-    Issue #27 / 後方互換: 既存ページのタイトルが `📚 HOKUSAI Documentation`
-    でも `_DOCUMENTATION_HUB_LEGACY_TITLES` で検出され重複作成しない。
-    skipped に記録される title は新仕様の canonical (`HOKUSAI Documentation`)
-    でも legacy でもどちらでも可（実装は canonical を使用）。
+def test_scaffold_skips_v0_4_3_legacy_hub_page():
+    """v0.4.3 以前の旧タイトル（絵文字 prefix `📚 HOKUSAI Documentation`）の
+    ハブが既存なら skip 検出する（v0.4.5 でも 2 世代後方互換維持）。
     """
     client = _ScaffoldRecordingClient(
         existing_pages=[("parent-id", "📚 HOKUSAI Documentation")]
@@ -1193,15 +1189,68 @@ def test_scaffold_skips_existing_legacy_hub_page():
     result = scaffold_notion_workspace("token", "parent-id", api_client=client)
 
     skipped_titles = [s["title"] for s in result["skipped"]]
-    assert "HOKUSAI Documentation" in skipped_titles
-    # サブ 3 ページは既存ハブの下に作成される（新タイトル）
+    assert "Documentation" in skipped_titles  # canonical で記録
+    # サブ 3 ページは既存ハブ（legacy id）の下に新 canonical 名で作成される
     created_titles = [c["title"] for c in result["created"]]
-    assert "Discussions" in created_titles
-    assert "Operation Guides" in created_titles
-    assert "Requirements" in created_titles
-    # 既存ハブの id（legacy title 由来）でサブを作る
+    assert "議論" in created_titles
+    assert "運用ガイド" in created_titles
+    assert "要件定義" in created_titles
+    # 既存ハブの id（v0.4.3 legacy title 由来）でサブを作る
     for payload in client.created_pages:
         assert payload["parent"]["page_id"] == "existing-📚 HOKUSAI Documentation"
+
+
+def test_scaffold_skips_v0_4_4_legacy_hub_page():
+    """v0.4.4 の旧タイトル（HOKUSAI prefix 付き `HOKUSAI Documentation`）の
+    ハブが既存なら skip 検出する（v0.4.5 で新規追加された legacy 世代）。
+    """
+    client = _ScaffoldRecordingClient(
+        existing_pages=[("parent-id", "HOKUSAI Documentation")]
+    )
+    result = scaffold_notion_workspace("token", "parent-id", api_client=client)
+
+    skipped_titles = [s["title"] for s in result["skipped"]]
+    assert "Documentation" in skipped_titles
+    created_titles = [c["title"] for c in result["created"]]
+    assert "議論" in created_titles
+    assert "運用ガイド" in created_titles
+    assert "要件定義" in created_titles
+    for payload in client.created_pages:
+        assert payload["parent"]["page_id"] == "existing-HOKUSAI Documentation"
+
+
+def test_scaffold_skips_v0_4_4_legacy_subpages():
+    """v0.4.4 の英語サブページタイトル（Discussions / Operation Guides /
+    Requirements）が既存なら skip 検出する（2 世代後方互換）。
+    """
+    # ハブは新規作成、サブは全て v0.4.4 英語名で既存
+    client = _ScaffoldRecordingClient()
+    # 1 回目: ハブを作って、その配下に英語名サブを追加（v0.4.4 状態を再現）
+    hub_response = client.create_page({
+        "parent": {"type": "page_id", "page_id": "parent"},
+        "icon": {"type": "emoji", "emoji": "📚"},
+        "properties": {"title": [{"type": "text", "text": {"content": "Documentation"}}]},
+        "children": [],
+    })
+    hub_id = hub_response["id"]
+    for legacy_sub in ("Discussions", "Operation Guides", "Requirements"):
+        client.create_page({
+            "parent": {"type": "page_id", "page_id": hub_id},
+            "icon": {"type": "emoji", "emoji": "💬"},
+            "properties": {"title": [{"type": "text", "text": {"content": legacy_sub}}]},
+            "children": [],
+        })
+    # 2 回目: v0.4.5 として再実行 → ハブも v0.4.4 サブも全て skip 検出
+    initial_create_count = len(client.created_pages)
+    result = scaffold_notion_workspace("token", "parent", api_client=client)
+
+    # 2 回目では新規 create は発生しない
+    assert len(client.created_pages) == initial_create_count
+    skipped_titles = [s["title"] for s in result["skipped"]]
+    assert "Documentation" in skipped_titles
+    assert "議論" in skipped_titles
+    assert "運用ガイド" in skipped_titles
+    assert "要件定義" in skipped_titles
 
 
 def test_scaffold_prefers_canonical_over_legacy_when_both_exist():
@@ -1213,36 +1262,36 @@ def test_scaffold_prefers_canonical_over_legacy_when_both_exist():
     新実装は走査中 canonical 完全一致を即返し、legacy は fallback として扱う。
     """
 
-    class _BothExistClient:
-        """legacy hub を先頭、canonical hub を 2 番目に返すモック"""
+    class _ThreeGenerationsClient:
+        """親直下に 3 世代（v0.4.3 / v0.4.4 / v0.4.5 canonical）が共存するモック"""
 
         def __init__(self):
             self.created_pages: list[dict] = []
-            # parent 直下のページ列挙: legacy が先、canonical が後
-            # サブの lookup（hub_id 配下）では何も返さない
-            self._call_count = 0
 
         def list_block_children(self, block_id, *, start_cursor=None):
-            self._call_count += 1
-            # 親直下: legacy + canonical 両方を返す
             if block_id == "parent":
+                # v0.4.3, v0.4.4, v0.4.5(canonical) を順に返す
                 return {
                     "results": [
                         {
                             "type": "child_page",
-                            "id": "legacy-hub-id",
+                            "id": "v043-hub-id",
                             "child_page": {"title": "📚 HOKUSAI Documentation"},
                         },
                         {
                             "type": "child_page",
-                            "id": "canonical-hub-id",
+                            "id": "v044-hub-id",
                             "child_page": {"title": "HOKUSAI Documentation"},
+                        },
+                        {
+                            "type": "child_page",
+                            "id": "canonical-hub-id",
+                            "child_page": {"title": "Documentation"},
                         },
                     ],
                     "has_more": False,
                     "next_cursor": None,
                 }
-            # サブの lookup（hub_id 配下）: 空
             return {"results": [], "has_more": False, "next_cursor": None}
 
         def create_page(self, payload):
@@ -1250,19 +1299,19 @@ def test_scaffold_prefers_canonical_over_legacy_when_both_exist():
             title = payload["properties"]["title"][0]["text"]["content"]
             return {"id": f"new-{title}"}
 
-    client = _BothExistClient()
+    client = _ThreeGenerationsClient()
     result = scaffold_notion_workspace("token", "parent", api_client=client)
 
     # canonical 側 (canonical-hub-id) がハブとして選ばれる
     skipped_titles = [s["title"] for s in result["skipped"]]
-    assert "HOKUSAI Documentation" in skipped_titles
-    skipped_hub = [s for s in result["skipped"] if s["title"] == "HOKUSAI Documentation"]
+    assert "Documentation" in skipped_titles
+    skipped_hub = [s for s in result["skipped"] if s["title"] == "Documentation"]
     assert skipped_hub[0]["id"] == "canonical-hub-id"
     # サブは canonical-hub-id の下に作られる
     sub_payloads = [
         p for p in client.created_pages
         if p["properties"]["title"][0]["text"]["content"]
-        in ("Discussions", "Operation Guides", "Requirements")
+        in ("議論", "運用ガイド", "要件定義")
     ]
     assert len(sub_payloads) == 3
     for p in sub_payloads:
@@ -1286,10 +1335,8 @@ def test_scaffold_rerun_is_idempotent_and_skips_all_four_pages():
 
 
 def test_scaffold_skips_only_existing_subpage_via_legacy_titles():
-    """ハブとサブ 1 つが旧タイトル（絵文字付き）で既存、残りのサブは新規作成。
-
-    Issue #27 / 後方互換: v0.4.3 以前で作成された旧タイトルが残っている
-    部分既存環境でも、legacy_aliases で検出され重複作成されない。
+    """ハブとサブ 1 つが v0.4.3 旧タイトル（絵文字 prefix 付き）で既存、
+    残りのサブは新規作成（部分既存パターン、2 世代 legacy 検出）。
     """
     client = _ScaffoldRecordingClient(
         existing_pages=[
@@ -1301,28 +1348,28 @@ def test_scaffold_skips_only_existing_subpage_via_legacy_titles():
 
     skipped_titles = [s["title"] for s in result["skipped"]]
     created_titles = [c["title"] for c in result["created"]]
-    # ハブと Discussions は legacy 検出で skip（canonical 名で記録）
-    assert "HOKUSAI Documentation" in skipped_titles
-    assert "Discussions" in skipped_titles
-    # 残りの 2 サブは新規作成（新タイトル）
-    assert "Operation Guides" in created_titles
-    assert "Requirements" in created_titles
+    # ハブと 議論 (旧 Discussions) は legacy 検出で skip（canonical 名で記録）
+    assert "Documentation" in skipped_titles
+    assert "議論" in skipped_titles
+    # 残りの 2 サブは新規作成（新 canonical 名）
+    assert "運用ガイド" in created_titles
+    assert "要件定義" in created_titles
 
 
 def test_scaffold_partial_failure_does_not_raise():
     """サブページ作成のいずれかが失敗しても残りは作成（partial success）"""
-    client = _ScaffoldRecordingClient(fail_on_titles={"Operation Guides"})
+    client = _ScaffoldRecordingClient(fail_on_titles={"運用ガイド"})
     result = scaffold_notion_workspace("token", "parent", api_client=client)
 
     created_titles = [c["title"] for c in result["created"]]
     # 失敗したサブを除く 3 つは作成される
-    assert "HOKUSAI Documentation" in created_titles
-    assert "Discussions" in created_titles
-    assert "Requirements" in created_titles
-    assert "Operation Guides" not in created_titles
-    # 失敗したサブは "failed" に記録される（Copilot レビュー #2 対応）
+    assert "Documentation" in created_titles
+    assert "議論" in created_titles
+    assert "要件定義" in created_titles
+    assert "運用ガイド" not in created_titles
+    # 失敗したサブは "failed" に記録される
     failed_titles = [f["title"] for f in result.get("failed", [])]
-    assert "Operation Guides" in failed_titles
+    assert "運用ガイド" in failed_titles
     assert result["failed"][0].get("error")
 
 
@@ -1394,16 +1441,16 @@ def test_scaffold_walks_pagination_to_find_existing_page():
 
     client = _PaginatedClient()
     result = scaffold_notion_workspace("token", "parent", api_client=client)
-    # ハブはページ 2 で見つかった legacy title を legacy_aliases で skip 扱い
+    # ハブはページ 2 で見つかった v0.4.3 legacy title を legacy_aliases で skip 扱い
     skipped_titles = [s["title"] for s in result["skipped"]]
-    assert "HOKUSAI Documentation" in skipped_titles
+    assert "Documentation" in skipped_titles  # canonical で記録
     # ハブ検出時に pagination が走ったことを確認（最初の 2 件が None → cursor-1）
     assert client.calls[:2] == [None, "cursor-1"]
-    # ハブが skip されたので create_page でハブを作っていない（新タイトルも旧タイトルも）
+    # ハブが skip されたので create_page でハブを作っていない（canonical も legacy も）
     hub_creates = [
         p for p in client.created_pages
         if p["properties"]["title"][0]["text"]["content"]
-        in ("HOKUSAI Documentation", "📚 HOKUSAI Documentation")
+        in ("Documentation", "HOKUSAI Documentation", "📚 HOKUSAI Documentation")
     ]
     assert hub_creates == []
 
@@ -1417,7 +1464,7 @@ def test_scaffold_hub_creation_failure_returns_error_dict():
     例外を捕捉して結果 dict にそのまま記録する。
     """
     client = _ScaffoldRecordingClient(
-        fail_on_titles={"HOKUSAI Documentation"}
+        fail_on_titles={"Documentation"}
     )
     result = scaffold_notion_workspace("token", "parent", api_client=client)
     assert "error" in result
@@ -1450,11 +1497,11 @@ def test_scaffold_subpage_lookup_failure_preserves_hub_creation():
     client = _LookupFailsAfterHub()
     result = scaffold_notion_workspace("token", "parent", api_client=client)
     created_titles = [c["title"] for c in result["created"]]
-    assert "HOKUSAI Documentation" in created_titles
+    assert "Documentation" in created_titles
     failed_titles = [f["title"] for f in result["failed"]]
-    assert "Discussions" in failed_titles
-    assert "Operation Guides" in failed_titles
-    assert "Requirements" in failed_titles
+    assert "議論" in failed_titles
+    assert "運用ガイド" in failed_titles
+    assert "要件定義" in failed_titles
     assert "error" not in result
 
 
@@ -1565,7 +1612,7 @@ def test_cli_handler_scaffold_flag_routes_to_setup(capsys, monkeypatch):
         return {
             "workflows_db_id": "wf",
             "pull_requests_db_id": "pr",
-            "scaffold": {"created": [{"title": "HOKUSAI Documentation", "id": "h1"}], "skipped": []},
+            "scaffold": {"created": [{"title": "Documentation", "id": "h1"}], "skipped": []},
         }
 
     monkeypatch.setattr(
@@ -1586,7 +1633,7 @@ def test_cli_handler_scaffold_flag_routes_to_setup(capsys, monkeypatch):
     assert rc == 0
     assert received.get("scaffold") is True
     assert "📚 ドキュメントツリー" in out  # ツリーセクション header (icon 残し)
-    assert "HOKUSAI Documentation" in out
+    assert "Documentation" in out
 
 
 def test_cli_handler_no_scaffold_flag_keeps_default(capsys, monkeypatch):
@@ -1675,10 +1722,10 @@ def test_cli_handler_scaffold_failed_subpages_show_in_output(capsys, monkeypatch
         return {
             "workflows_db_id": "wf", "pull_requests_db_id": "pr",
             "scaffold": {
-                "created": [{"title": "HOKUSAI Documentation", "id": "h1"}],
+                "created": [{"title": "Documentation", "id": "h1"}],
                 "skipped": [],
                 "failed": [
-                    {"title": "Discussions", "error": "RuntimeError: boom"},
+                    {"title": "議論", "error": "RuntimeError: boom"},
                 ],
             },
         }
@@ -1699,8 +1746,8 @@ def test_cli_handler_scaffold_failed_subpages_show_in_output(capsys, monkeypatch
     rc = cli_main._handle_notion_setup(_Args())
     out = capsys.readouterr().out
     assert rc == 0
-    assert "✓ 作成: HOKUSAI Documentation" in out
-    assert "✗ 失敗: Discussions" in out
+    assert "✓ 作成: Documentation" in out
+    assert "✗ 失敗: 議論" in out
     assert "RuntimeError: boom" in out
     # failed があるので「変更なし」は出ない
     assert "（変更なし）" not in out
