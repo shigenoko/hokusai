@@ -15,9 +15,11 @@ Notion 上に HOKUSAI 用の DB / ページを一括作成する。
 - 冪等性は **DB 作成と scaffold ページで分ける**:
     - DB 作成（Workflows / Pull Requests）: 冪等ではない。再実行すると新しい DB が
       作られる。失敗時は Notion 側で archived/削除してから再実行することを想定。
-    - `--scaffold` で作る `📚 HOKUSAI Documentation` ハブと配下 3 サブページ:
-      idempotent。配置先パスごとに既存検出（pagination 全走査）し、同名ページが
-      あれば skip する。Issue #25 / v0.4.3。
+    - `--scaffold` で作るドキュメントツリー: ハブ `HOKUSAI Documentation`（icon 📚）
+      と配下 3 サブページ `Discussions`（💬）/ `Operation Guides`（📖）/
+      `Requirements`（📋）。idempotent で配置先パスごとに既存検出（pagination 全走査）。
+      v0.4.3 で作成された絵文字 prefix 付き旧タイトルも legacy alias として
+      検出する（canonical 優先）。Issue #25 / v0.4.3 / v0.4.4。
 - スキーマ定義はこのファイルにハードコード: 設定で外部化はしない。スキーマ変更は
   実装側のリリースに合わせて行うのが安全。
 - relation は single_property: dual_property を使うと synced backref 名が固定で
@@ -180,10 +182,12 @@ def setup_notion_workspace(
     Args:
         api_token: HOKUSAI 専用 Notion Integration の Internal Integration Token
         parent_page_id: 親ページの ID（事前に integration を接続しておくこと）
-        scaffold: True のとき、DB 作成に加えて標準ドキュメントツリー
-            （📚 HOKUSAI Documentation 配下に 💬 Discussions /
-            📖 Operation Guides / 📋 Requirements）も作成する。
-            既存に同名ページがある場合は skip（idempotent）。
+        scaffold: True のとき、DB 作成に加えて標準ドキュメントツリーも作成する。
+            ツリーはハブ `HOKUSAI Documentation`（icon 📚）配下に `Discussions`
+            （icon 💬）/ `Operation Guides`（icon 📖）/ `Requirements`（icon 📋）
+            の 3 サブページ。配置先パスごとに既存検出（idempotent）、v0.4.3 の
+            絵文字 prefix 付き旧タイトル（`📚 HOKUSAI Documentation` 等）も
+            legacy alias として検出し重複作成を回避（canonical 優先）。
         api_client: テスト用に NotionAPIClient を差し替える場合に指定
 
     Returns:
@@ -520,14 +524,16 @@ def scaffold_notion_workspace(
 ) -> dict[str, Any]:
     """親ページ配下に標準ドキュメントツリーを作成する（idempotent）。
 
-    ツリー構造:
+    ツリー構造（v0.4.4〜: title は素のテキスト、絵文字は Notion page icon）:
         <parent>
-        └── 📚 HOKUSAI Documentation
-            ├── 💬 Discussions
-            ├── 📖 Operation Guides
-            └── 📋 Requirements
+        └── HOKUSAI Documentation       ← icon 📚
+            ├── Discussions              ← icon 💬
+            ├── Operation Guides         ← icon 📖
+            └── Requirements             ← icon 📋
 
-    既存に同名ページがある場合は skip（破壊しない）。
+    既存に同名ページがある場合は skip（破壊しない）。v0.4.3 で作成された絵文字
+    prefix 付き旧タイトル（`📚 HOKUSAI Documentation` 等）も legacy alias として
+    検出される。新旧両方のページが共存する場合は canonical 側を優先する。
 
     本関数は入力検証エラー（NotionSetupError）以外は raise しない。実行時の
     API エラー（ハブ作成失敗 / 子要素取得失敗 / サブページ作成失敗）はすべて

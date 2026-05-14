@@ -61,10 +61,12 @@ def _find_existing_child_page(
     """親ページの子ブロック一覧から、title または legacy_aliases に一致する
     child_page の id を探す。
 
-    旧バージョンで作成されたページとの後方互換のため、現行 title だけでなく
-    過去に使われていたタイトル（絵文字 prefix 付き等）も既存検出対象に含める。
+    canonical title 完全一致を最優先で返し、見つからなければ legacy_aliases
+    の最初の一致を返す。新旧両方のページが親に共存する場合は canonical を
+    選び、サブが legacy hub 配下に作られて重複ツリーになるのを防ぐ。
     """
-    candidates = {title, *legacy_aliases}
+    legacy_set = set(legacy_aliases)
+    legacy_match_id: str | None = None
     cursor: str | None = None
     while True:
         try:
@@ -74,9 +76,18 @@ def _find_existing_child_page(
         for block in blocks.get("results", []):
             if block.get("type") != "child_page":
                 continue
-            if block.get("child_page", {}).get("title") in candidates:
+            block_title = block.get("child_page", {}).get("title")
+            # canonical 完全一致は即返し
+            if block_title == title:
                 return block.get("id")
-        ...
+            # legacy は最初のヒットを覚えるが走査継続（canonical 優先）
+            if legacy_match_id is None and block_title in legacy_set:
+                legacy_match_id = block.get("id")
+        if not blocks.get("has_more"):
+            return legacy_match_id
+        cursor = blocks.get("next_cursor")
+        if not cursor:
+            return legacy_match_id
 ```
 
 ### 3.3 `_resolve_hub_page` / `_create_or_skip_subpage`
@@ -90,6 +101,7 @@ def _find_existing_child_page(
 1. **新タイトルでの基本動作確認**: 既存ページが空のとき、新タイトル `HOKUSAI Documentation` 等で作成される
 2. **legacy alias 検出**: 親ページに旧タイトル `📚 HOKUSAI Documentation` のページがある場合、scaffold は skip 扱いになり重複作成しない
 3. **混在パターン**: ハブが旧タイトル、サブの一部が新タイトル / 残りが未作成 → それぞれ正しく skip / create
+4. **canonical 優先**: 親に新旧両ハブが共存するとき canonical hub が選ばれサブもその下に作られる（重複ツリー回避）
 
 ## 5. ドキュメント更新
 
