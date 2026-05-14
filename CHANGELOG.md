@@ -17,6 +17,36 @@ HOKUSAI のすべての特筆すべき変更をこのファイルに記録する
 
 ---
 
+## [0.4.5] - 2026-05-14
+
+`hokusai notion-setup` のリソース名から `HOKUSAI` prefix を削除し、
+scaffold サブページタイトルを日本語化
+（[#29](https://github.com/shigenoko/hokusai/issues/29) 対応）。
+
+### Changed
+
+- DB タイトル: `HOKUSAI Workflows DB` → `Workflows DB`、`HOKUSAI Pull Requests DB` → `Pull Requests DB`
+- scaffold ハブ: `HOKUSAI Documentation` → `Documentation`（英語のまま、icon 📚）
+- scaffold サブページ: 日本語化
+  - `Discussions` → `議論`（icon 💬）
+  - `Operation Guides` → `運用ガイド`（icon 📖）
+  - `Requirements` → `要件定義`（icon 📋）
+
+### 後方互換
+
+- `_DOCUMENTATION_HUB_LEGACY_TITLES` / 各サブの `legacy_aliases` に **2 世代分** の旧タイトルを追加:
+  - v0.4.4 旧名: `HOKUSAI Documentation` / `Discussions` / `Operation Guides` / `Requirements`
+  - v0.4.3 旧名: `📚 HOKUSAI Documentation` / `💬 Discussions` / `📖 Operation Guides` / `📋 Requirements`
+- 旧バージョンで作成されたページは canonical 優先で skip 検出（重複作成なし）
+- DB は title 検出を行わない（env var が DB ID を保持）ため legacy alias 不要
+
+### バージョン
+
+- `pyproject.toml`: 0.4.4 → 0.4.5
+- `hokusai/__init__.py`: 0.4.4 → 0.4.5
+
+---
+
 ## [0.4.4] - 2026-05-14
 
 `hokusai notion-setup --scaffold` のページタイトル形式を更新
