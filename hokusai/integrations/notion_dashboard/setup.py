@@ -384,6 +384,85 @@ def _build_documentation_page_payload(
     }
 
 
+def _resolve_hub_page(
+    api: NotionAPIClient,
+    parent_page_id: str,
+    created: list[dict[str, str]],
+    skipped: list[dict[str, str]],
+) -> str:
+    """ハブページ（📚 HOKUSAI Documentation）を取得 or 作成し id を返す。
+
+    既存なら `skipped` に append、新規作成なら `created` に append する。
+    ハブ作成失敗は scaffold 全体の致命扱いとして NotionSetupError を投げる。
+    """
+    existing_hub_id = _find_existing_child_page(
+        api, parent_page_id, _DOCUMENTATION_HUB_TITLE
+    )
+    if existing_hub_id:
+        skipped.append({"title": _DOCUMENTATION_HUB_TITLE, "id": existing_hub_id})
+        logger.info(
+            "ハブページは既に存在: %s (id=%s)",
+            _DOCUMENTATION_HUB_TITLE, existing_hub_id,
+        )
+        return existing_hub_id
+    try:
+        hub_response = api.create_page(
+            _build_documentation_page_payload(
+                parent_page_id,
+                _DOCUMENTATION_HUB_TITLE,
+                _DOCUMENTATION_HUB_ICON,
+                _DOCUMENTATION_HUB_PLACEHOLDER,
+            )
+        )
+    except Exception as e:
+        raise NotionSetupError(
+            f"ハブページの作成に失敗: {type(e).__name__}: {e}"
+        ) from e
+    hub_id = hub_response.get("id", "")
+    if not hub_id:
+        raise NotionSetupError("ハブページ作成レスポンスに id が含まれません")
+    created.append({"title": _DOCUMENTATION_HUB_TITLE, "id": hub_id})
+    logger.info("ハブページを作成: %s (id=%s)", _DOCUMENTATION_HUB_TITLE, hub_id)
+    return hub_id
+
+
+def _create_or_skip_subpage(
+    api: NotionAPIClient,
+    hub_id: str,
+    sub_title: str,
+    sub_icon: str,
+    sub_placeholder: str,
+    created: list[dict[str, str]],
+    skipped: list[dict[str, str]],
+    failed: list[dict[str, str]],
+) -> None:
+    """単一サブページを idempotent に作成し、結果を created/skipped/failed に振り分ける。"""
+    existing_sub_id = _find_existing_child_page(api, hub_id, sub_title)
+    if existing_sub_id:
+        skipped.append({"title": sub_title, "id": existing_sub_id})
+        logger.info("サブページは既に存在: %s (id=%s)", sub_title, existing_sub_id)
+        return
+    try:
+        sub_response = api.create_page(
+            _build_documentation_page_payload(
+                hub_id, sub_title, sub_icon, sub_placeholder
+            )
+        )
+    except Exception as e:
+        err_detail = f"{type(e).__name__}: {e}"
+        logger.warning("サブページの作成に失敗（skip）: %s: %s", sub_title, err_detail)
+        failed.append({"title": sub_title, "error": err_detail})
+        return
+    sub_id = sub_response.get("id", "")
+    if not sub_id:
+        err_detail = "create_page レスポンスに id が含まれません"
+        logger.warning("%s: %s", err_detail, sub_title)
+        failed.append({"title": sub_title, "error": err_detail})
+        return
+    created.append({"title": sub_title, "id": sub_id})
+    logger.info("サブページを作成: %s (id=%s)", sub_title, sub_id)
+
+
 def scaffold_notion_workspace(
     api_token: str,
     parent_page_id: str,
@@ -424,71 +503,12 @@ def scaffold_notion_workspace(
     skipped: list[dict[str, str]] = []
     failed: list[dict[str, str]] = []
 
-    # 1. ハブページ（📚 HOKUSAI Documentation）を作成または検出
-    existing_hub_id = _find_existing_child_page(
-        api, parent_page_id, _DOCUMENTATION_HUB_TITLE
-    )
-    if existing_hub_id:
-        hub_id = existing_hub_id
-        skipped.append({"title": _DOCUMENTATION_HUB_TITLE, "id": hub_id})
-        logger.info(
-            "ハブページは既に存在: %s (id=%s)",
-            _DOCUMENTATION_HUB_TITLE, hub_id,
-        )
-    else:
-        try:
-            hub_response = api.create_page(
-                _build_documentation_page_payload(
-                    parent_page_id,
-                    _DOCUMENTATION_HUB_TITLE,
-                    _DOCUMENTATION_HUB_ICON,
-                    _DOCUMENTATION_HUB_PLACEHOLDER,
-                )
-            )
-        except Exception as e:
-            raise NotionSetupError(
-                f"ハブページの作成に失敗: {type(e).__name__}: {e}"
-            ) from e
-        hub_id = hub_response.get("id", "")
-        if not hub_id:
-            raise NotionSetupError("ハブページ作成レスポンスに id が含まれません")
-        created.append({"title": _DOCUMENTATION_HUB_TITLE, "id": hub_id})
-        logger.info("ハブページを作成: %s (id=%s)", _DOCUMENTATION_HUB_TITLE, hub_id)
-
-    # 2. サブページを順次作成（既存なら skip）
+    hub_id = _resolve_hub_page(api, parent_page_id, created, skipped)
     for sub_title, sub_icon, sub_placeholder in _DOCUMENTATION_CHILDREN:
-        existing_sub_id = _find_existing_child_page(api, hub_id, sub_title)
-        if existing_sub_id:
-            skipped.append({"title": sub_title, "id": existing_sub_id})
-            logger.info(
-                "サブページは既に存在: %s (id=%s)", sub_title, existing_sub_id
-            )
-            continue
-        try:
-            sub_response = api.create_page(
-                _build_documentation_page_payload(
-                    hub_id, sub_title, sub_icon, sub_placeholder
-                )
-            )
-        except Exception as e:
-            # 単一サブページの失敗で全体を止めない（partial success を許容）。
-            # 結果 dict の "failed" に詳細を残し、呼び出し側 / CLI 出力で
-            # 利用者に状況を伝える。
-            err_detail = f"{type(e).__name__}: {e}"
-            logger.warning(
-                "サブページの作成に失敗（skip）: %s: %s",
-                sub_title, err_detail,
-            )
-            failed.append({"title": sub_title, "error": err_detail})
-            continue
-        sub_id = sub_response.get("id", "")
-        if not sub_id:
-            err_detail = "create_page レスポンスに id が含まれません"
-            logger.warning("%s: %s", err_detail, sub_title)
-            failed.append({"title": sub_title, "error": err_detail})
-            continue
-        created.append({"title": sub_title, "id": sub_id})
-        logger.info("サブページを作成: %s (id=%s)", sub_title, sub_id)
+        _create_or_skip_subpage(
+            api, hub_id, sub_title, sub_icon, sub_placeholder,
+            created, skipped, failed,
+        )
 
     return {"created": created, "skipped": skipped, "failed": failed}
 
