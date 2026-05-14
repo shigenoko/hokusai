@@ -51,9 +51,9 @@ hokusai notion-setup --parent-page-id <PARENT_PAGE_ID> --persist
 
 `--persist` 無しの場合は `export` コマンド例を出力するだけ（手動でコピーして追記）。
 
-実行すると以下のリソースが作成される:
-- HOKUSAI Workflows DB（プロパティ 23 個 + Status / Waiting Reason / Priority の Select options）
-- HOKUSAI Pull Requests DB（Workflow → Workflows DB の relation 付き）
+実行すると以下のリソースが作成される（v0.4.5〜: HOKUSAI prefix なし）:
+- Workflows DB（プロパティ 23 個 + Status / Waiting Reason / Priority の Select options）
+- Pull Requests DB（Workflow → Workflows DB の relation 付き）
 
 ##### ドキュメントツリーも同時に scaffold する（v0.4.3〜）
 
@@ -113,7 +113,7 @@ hokusai notion-setup \
 
 以下を Notion ワークスペース内に作成し、HOKUSAI インテグレーションを「接続」する。
 
-#### HOKUSAI Workflows DB
+#### Workflows DB（旧名 HOKUSAI Workflows DB）
 推奨プロパティ（実装計画書 §6.2 と同期）:
 
 | プロパティ名 | 型 |
@@ -136,7 +136,7 @@ hokusai notion-setup \
 | Last Updated | Date |
 | Error Summary | Text |
 
-#### HOKUSAI Pull Requests DB
+#### Pull Requests DB（旧名 HOKUSAI Pull Requests DB）
 | プロパティ名 | 型 |
 |---|---|
 | PR Number | Title |
@@ -193,7 +193,7 @@ hokusai start <Notion Task URL>
 
 ### 3.1. ビジネスサイド（営業・マーケ・PM）
 
-**見る場所**: Notion HOKUSAI Workflows DB
+**見る場所**: Notion `Workflows DB`
 
 | やりたいこと | 見るビュー |
 |---|---|
@@ -206,7 +206,7 @@ hokusai start <Notion Task URL>
 
 ### 3.2. エンジニア・テックリード
 
-**見る場所**: Notion HOKUSAI Workflows DB + HOKUSAI Web Dashboard（Operations Console）
+**見る場所**: Notion `Workflows DB` + HOKUSAI Web Dashboard（Operations Console）
 
 #### 通常の作業フロー
 ```bash
