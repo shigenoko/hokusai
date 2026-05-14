@@ -271,7 +271,7 @@ hokusai --profile hokusai notion-setup \
   --persist
 ```
 
-オプトイン + idempotent な実装で、既存に同名のページがあれば skip される（再実行も安全）。
+オプトインのフラグ。scaffold ページ部分は idempotent で、既存に同名のページがあれば skip される。ただし DB 作成ステップは **冪等ではなく**、`notion-setup` を再実行すると新しい `HOKUSAI Workflows DB` / `HOKUSAI Pull Requests DB` が毎回作成される。DB を作り直す意図がない限り再実行は避け、必要なら Notion 側で旧 DB を archive してから再実行すること。
 
 ### Figma / Miro 連携（任意）
 

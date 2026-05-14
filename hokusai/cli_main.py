@@ -727,19 +727,25 @@ def _handle_notion_setup(args, config=None) -> int:
     if scaffold_result is not None:
         created = scaffold_result.get("created", [])
         skipped = scaffold_result.get("skipped", [])
+        failed = scaffold_result.get("failed", [])
         error = scaffold_result.get("error")
         print()
         print("📚 ドキュメントツリー:")
+        # 致命エラー（ハブ作成失敗等）は最初に出して成功と誤読されないようにする。
+        if error:
+            print(f"  ⚠️ scaffold 中にエラー: {error}")
         if created:
             for item in created:
                 print(f"  ✓ 作成: {item['title']}")
         if skipped:
             for item in skipped:
                 print(f"  - skip（既存）: {item['title']}")
-        if not created and not skipped:
+        if failed:
+            for item in failed:
+                print(f"  ✗ 失敗: {item['title']}: {item.get('error', '')}")
+        # 「変更なし」は error / failed が無い場合のみ表示する
+        if not created and not skipped and not failed and not error:
             print("  （変更なし）")
-        if error:
-            print(f"  ⚠️ scaffold 中にエラー: {error}")
 
     print()
     print("以下を環境変数に設定してください（~/.zshrc などに追記推奨）:")

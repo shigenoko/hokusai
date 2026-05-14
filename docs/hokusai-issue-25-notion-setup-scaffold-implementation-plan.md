@@ -230,6 +230,6 @@ def scaffold_notion_workspace(
 ## 10. 関連ドキュメント
 
 - Issue: https://github.com/shigenoko/hokusai/issues/25
-- Notion 議論ページ（配置構成検討）: https://www.notion.so/35f85495565d80b1b15aefee4fe44c18
+- Notion 議論ページ（配置構成検討）: workspace 内で管理（外部公開しない private discussion ページ）
 - 前提となる PR: #18（profile-aware notion-setup, v0.4.1）/ #20（識別パネル, v0.4.2）
 - 関連 Issue: #21〜#24（governance workgraph 関連実装タスク）

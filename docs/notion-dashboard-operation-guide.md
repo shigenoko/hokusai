@@ -88,7 +88,7 @@ hokusai notion-setup \
 
 設計原則:
 - **オプトイン**: `--scaffold` 未指定なら従来通り DB だけ作成
-- **Idempotent**: 既存に同名ページがあれば skip（再実行で重複しない）
+- **scaffold ページのみ idempotent**: `--scaffold` で作る `📚 HOKUSAI Documentation` 配下の 4 ページは、既存に同名ページがあれば skip（再実行で重複しない）
 - **partial success**: 個別サブページ作成失敗で全体が止まらない（ハブ作成失敗のみ致命）
 
 > 旧版に存在した「HOKUSAI Service Status ページ」は、複数ユーザー環境で各自のローカル状態を上書きしてしまう問題（last-writer-wins）があるため廃止。サービス接続状態は HOKUSAI Operations Console（`scripts/dashboard.py`）でのみ参照する。
@@ -96,8 +96,7 @@ hokusai notion-setup \
 成功時に各リソースの ID と環境変数の export コマンド例が出力される。それを
 `~/.zshrc` などに追記する。
 
-冪等性は持たないため、再実行すると新しい DB / ページが作成される。失敗時は Notion 側
-で archived/削除してから再実行すること。
+冪等性の適用範囲は scaffold ページのみで、**DB 作成（Workflows / Pull Requests）は冪等ではない**: `notion-setup` を再実行すると新しい DB が毎回作成される。DB 作成をやり直したい場合は Notion 側で旧 DB を archive/削除してから再実行すること。
 
 #### 手動で作成する場合
 

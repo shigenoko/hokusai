@@ -271,7 +271,7 @@ hokusai --profile hokusai notion-setup \
   --persist
 ```
 
-The flag is opt-in and idempotent — existing same-titled pages are skipped, so re-running is safe.
+The flag is opt-in. The scaffold step itself is idempotent — existing same-titled pages under the parent are skipped on re-run. Note that the DB creation step is **not** idempotent: re-running `notion-setup` will create new `HOKUSAI Workflows DB` / `HOKUSAI Pull Requests DB` each time, so only re-run when you intend to provision a fresh DB pair (or archive the old DBs in Notion first).
 
 ### Figma / Miro integration (optional)
 

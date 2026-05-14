@@ -1074,7 +1074,10 @@ class _ScaffoldRecordingClient:
         self._fail_on_titles = fail_on_titles or set()
         self._next_id = 0
 
-    def list_block_children(self, block_id: str) -> dict:
+    def list_block_children(
+        self, block_id: str, *, start_cursor: str | None = None
+    ) -> dict:
+        # 単純化のため pagination は使わず 1 ページで返す
         self.list_children_calls.append(block_id)
         results = []
         for title, pid in self._existing.get(block_id, []):
@@ -1083,7 +1086,7 @@ class _ScaffoldRecordingClient:
                 "id": pid,
                 "child_page": {"title": title},
             })
-        return {"results": results}
+        return {"results": results, "has_more": False, "next_cursor": None}
 
     def create_page(self, payload: dict) -> dict:
         self.created_pages.append(payload)
@@ -1170,6 +1173,88 @@ def test_scaffold_partial_failure_does_not_raise():
     assert "💬 Discussions" in created_titles
     assert "📋 Requirements" in created_titles
     assert "📖 Operation Guides" not in created_titles
+    # 失敗したサブは "failed" に記録される（Copilot レビュー #2 対応）
+    failed_titles = [f["title"] for f in result.get("failed", [])]
+    assert "📖 Operation Guides" in failed_titles
+    assert result["failed"][0].get("error")
+
+
+def test_scaffold_lookup_failure_raises_to_avoid_duplicates():
+    """list_block_children が失敗したら NotionSetupError を投げる。
+
+    fail-open で None を返すと、Notion API の一過性失敗時に重複ページを作って
+    しまう。idempotent チェックが完了できない場合は呼び出し側に伝える。
+    （Copilot レビュー #1 対応）
+    """
+
+    class _ListFailClient:
+        def list_block_children(self, block_id, *, start_cursor=None):
+            raise RuntimeError("network down")
+
+        def create_page(self, payload):  # pragma: no cover
+            raise AssertionError("should not be called when lookup fails")
+
+    with pytest.raises(NotionSetupError, match="親ページの子要素取得に失敗"):
+        scaffold_notion_workspace("token", "parent", api_client=_ListFailClient())
+
+
+def test_scaffold_walks_pagination_to_find_existing_page():
+    """子要素が複数ページに分割されていても、後方ページの既存ページを発見できる。
+
+    （Copilot レビュー #1 / setup.py:340 pagination 不足の対応）
+    """
+
+    class _PaginatedClient:
+        def __init__(self):
+            self.calls: list[str | None] = []
+            self.created_pages: list[dict] = []
+
+        def list_block_children(self, block_id, *, start_cursor=None):
+            self.calls.append(start_cursor)
+            if start_cursor is None:
+                return {
+                    "results": [
+                        {
+                            "type": "child_page",
+                            "id": "noise-1",
+                            "child_page": {"title": "other page"},
+                        }
+                    ],
+                    "has_more": True,
+                    "next_cursor": "cursor-1",
+                }
+            assert start_cursor == "cursor-1"
+            return {
+                "results": [
+                    {
+                        "type": "child_page",
+                        "id": "hub-on-page-2",
+                        "child_page": {"title": "📚 HOKUSAI Documentation"},
+                    }
+                ],
+                "has_more": False,
+                "next_cursor": None,
+            }
+
+        def create_page(self, payload):
+            self.created_pages.append(payload)
+            title = payload["properties"]["title"]["title"][0]["text"]["content"]
+            return {"id": f"new-{title}"}
+
+    client = _PaginatedClient()
+    result = scaffold_notion_workspace("token", "parent", api_client=client)
+    # ハブはページ 2 で見つかったので skip 扱い、新規作成されない
+    skipped_titles = [s["title"] for s in result["skipped"]]
+    assert "📚 HOKUSAI Documentation" in skipped_titles
+    # ハブ検出時に pagination が走ったことを確認（最初の 2 件が None → cursor-1）
+    assert client.calls[:2] == [None, "cursor-1"]
+    # ハブが skip されたので create_page でハブを作っていない
+    hub_creates = [
+        p for p in client.created_pages
+        if p["properties"]["title"]["title"][0]["text"]["content"]
+        == "📚 HOKUSAI Documentation"
+    ]
+    assert hub_creates == []
 
 
 def test_scaffold_hub_creation_failure_raises():
@@ -1214,9 +1299,9 @@ class _DBPlusScaffoldClient:
         title = payload["properties"]["title"]["title"][0]["text"]["content"]
         return {"id": f"page-{title}"}
 
-    def list_block_children(self, block_id):
+    def list_block_children(self, block_id, *, start_cursor=None):
         self.list_children_calls += 1
-        return {"results": []}
+        return {"results": [], "has_more": False, "next_cursor": None}
 
 
 def test_setup_workspace_without_scaffold_does_not_create_pages():
@@ -1251,8 +1336,8 @@ def test_setup_workspace_scaffold_failure_does_not_fail_db_creation():
             self.db_calls += 1
             return {"id": f"db-{self.db_calls}"}
 
-        def list_block_children(self, block_id):
-            return {"results": []}
+        def list_block_children(self, block_id, *, start_cursor=None):
+            return {"results": [], "has_more": False, "next_cursor": None}
 
         def create_page(self, payload):
             # scaffold のハブ作成で必ず失敗

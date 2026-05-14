@@ -189,6 +189,9 @@ def setup_notion_workspace(
             "scaffold": {                # scaffold=True のときのみ
                 "created": [{"title": str, "id": str}, ...],
                 "skipped": [{"title": str, "id": str}, ...],
+                "failed":  [{"title": str, "error": str}, ...],
+                # 致命的失敗（ハブ作成失敗など）の場合のみ:
+                "error": "ExceptionType: message",
             },
         }
 
@@ -271,6 +274,7 @@ def setup_notion_workspace(
             result["scaffold"] = {
                 "created": [],
                 "skipped": [],
+                "failed": [],
                 "error": f"{type(e).__name__}: {e}",
             }
 
@@ -323,21 +327,33 @@ def _find_existing_child_page(
     """親ページの子ブロック一覧から、同名の child_page の id を探す。
 
     見つからなければ None を返す。child_page の title 完全一致で判定する。
+
+    Notion API は 1 レスポンス最大 100 件のため、`has_more` を見て全ページを
+    走査する。途中で API エラーが発生した場合は idempotent チェックを完了
+    できないため `NotionSetupError` を送出する（fail-open で重複ページを作って
+    しまうのを避ける）。
     """
-    try:
-        blocks = api_client.list_block_children(parent_page_id)
-    except Exception as e:
-        logger.warning(
-            "親ページの子要素取得に失敗（idempotent チェック skip）: %s: %s",
-            type(e).__name__, str(e),
-        )
-        return None
-    for block in blocks.get("results", []):
-        if block.get("type") != "child_page":
-            continue
-        if block.get("child_page", {}).get("title") == title:
-            return block.get("id")
-    return None
+    cursor: str | None = None
+    while True:
+        try:
+            blocks = api_client.list_block_children(
+                parent_page_id, start_cursor=cursor
+            )
+        except Exception as e:
+            raise NotionSetupError(
+                "親ページの子要素取得に失敗（idempotent チェック不能）: "
+                f"{type(e).__name__}: {e}"
+            ) from e
+        for block in blocks.get("results", []):
+            if block.get("type") != "child_page":
+                continue
+            if block.get("child_page", {}).get("title") == title:
+                return block.get("id")
+        if not blocks.get("has_more"):
+            return None
+        cursor = blocks.get("next_cursor")
+        if not cursor:
+            return None
 
 
 def _build_documentation_page_payload(
@@ -394,6 +410,7 @@ def scaffold_notion_workspace(
         {
             "created": [{"title": str, "id": str}, ...],
             "skipped": [{"title": str, "id": str}, ...],
+            "failed":  [{"title": str, "error": str}, ...],  # 個別サブページの失敗
         }
     """
     if not api_token:
@@ -405,6 +422,7 @@ def scaffold_notion_workspace(
 
     created: list[dict[str, str]] = []
     skipped: list[dict[str, str]] = []
+    failed: list[dict[str, str]] = []
 
     # 1. ハブページ（📚 HOKUSAI Documentation）を作成または検出
     existing_hub_id = _find_existing_child_page(
@@ -453,20 +471,26 @@ def scaffold_notion_workspace(
                 )
             )
         except Exception as e:
-            # 単一サブページの失敗で全体を止めない（partial success を許容）
+            # 単一サブページの失敗で全体を止めない（partial success を許容）。
+            # 結果 dict の "failed" に詳細を残し、呼び出し側 / CLI 出力で
+            # 利用者に状況を伝える。
+            err_detail = f"{type(e).__name__}: {e}"
             logger.warning(
-                "サブページの作成に失敗（skip）: %s: %s: %s",
-                sub_title, type(e).__name__, str(e),
+                "サブページの作成に失敗（skip）: %s: %s",
+                sub_title, err_detail,
             )
+            failed.append({"title": sub_title, "error": err_detail})
             continue
         sub_id = sub_response.get("id", "")
         if not sub_id:
-            logger.warning("サブページ作成レスポンスに id が含まれません: %s", sub_title)
+            err_detail = "create_page レスポンスに id が含まれません"
+            logger.warning("%s: %s", err_detail, sub_title)
+            failed.append({"title": sub_title, "error": err_detail})
             continue
         created.append({"title": sub_title, "id": sub_id})
         logger.info("サブページを作成: %s (id=%s)", sub_title, sub_id)
 
-    return {"created": created, "skipped": skipped}
+    return {"created": created, "skipped": skipped, "failed": failed}
 
 
 # ---------------------------------------------------------------------------
