@@ -15,9 +15,11 @@ Notion 上に HOKUSAI 用の DB / ページを一括作成する。
 - 冪等性は **DB 作成と scaffold ページで分ける**:
     - DB 作成（Workflows / Pull Requests）: 冪等ではない。再実行すると新しい DB が
       作られる。失敗時は Notion 側で archived/削除してから再実行することを想定。
-    - `--scaffold` で作る `📚 HOKUSAI Documentation` ハブと配下 3 サブページ:
-      idempotent。配置先パスごとに既存検出（pagination 全走査）し、同名ページが
-      あれば skip する。Issue #25 / v0.4.3。
+    - `--scaffold` で作るドキュメントツリー: ハブ `HOKUSAI Documentation`（icon 📚）
+      と配下 3 サブページ `Discussions`（💬）/ `Operation Guides`（📖）/
+      `Requirements`（📋）。idempotent で配置先パスごとに既存検出（pagination 全走査）。
+      v0.4.3 で作成された絵文字 prefix 付き旧タイトルも legacy alias として
+      検出する（canonical 優先）。Issue #25 / v0.4.3 / v0.4.4。
 - スキーマ定義はこのファイルにハードコード: 設定で外部化はしない。スキーマ変更は
   実装側のリリースに合わせて行うのが安全。
 - relation は single_property: dual_property を使うと synced backref 名が固定で
@@ -180,10 +182,12 @@ def setup_notion_workspace(
     Args:
         api_token: HOKUSAI 専用 Notion Integration の Internal Integration Token
         parent_page_id: 親ページの ID（事前に integration を接続しておくこと）
-        scaffold: True のとき、DB 作成に加えて標準ドキュメントツリー
-            （📚 HOKUSAI Documentation 配下に 💬 Discussions /
-            📖 Operation Guides / 📋 Requirements）も作成する。
-            既存に同名ページがある場合は skip（idempotent）。
+        scaffold: True のとき、DB 作成に加えて標準ドキュメントツリーも作成する。
+            ツリーはハブ `HOKUSAI Documentation`（icon 📚）配下に `Discussions`
+            （icon 💬）/ `Operation Guides`（icon 📖）/ `Requirements`（icon 📋）
+            の 3 サブページ。配置先パスごとに既存検出（idempotent）、v0.4.3 の
+            絵文字 prefix 付き旧タイトル（`📚 HOKUSAI Documentation` 等）も
+            legacy alias として検出し重複作成を回避（canonical 優先）。
         api_client: テスト用に NotionAPIClient を差し替える場合に指定
 
     Returns:
@@ -293,52 +297,75 @@ def setup_notion_workspace(
 
 # 標準ツリー定義: top-level page ごとに icon と placeholder を持つ。
 # 順序を保ちたいので list of tuple で定義。
-_DOCUMENTATION_HUB_TITLE = "📚 HOKUSAI Documentation"
+# v0.4.4（Issue #27）以降: title 文字列は素のテキスト、絵文字は icon 側のみで
+# 表現する（Notion UI で title と icon に絵文字が二重表示されるのを回避）。
+_DOCUMENTATION_HUB_TITLE = "HOKUSAI Documentation"
 _DOCUMENTATION_HUB_ICON = "📚"
 _DOCUMENTATION_HUB_PLACEHOLDER = (
     "HOKUSAI の Notion governance layer 上で人間が管理するドキュメントのハブ。"
     "HOKUSAI が自動同期する DB（Workflows / Pull Requests）とは別領域で、"
     "議論・運用・要件などをツリーで整理する。"
 )
+# v0.4.3 以前の旧タイトル（絵文字 prefix 付き）。idempotent 検出時に
+# 後方互換で skip 対象にする（重複ページ作成を回避）。
+_DOCUMENTATION_HUB_LEGACY_TITLES: tuple[str, ...] = (
+    "📚 HOKUSAI Documentation",
+)
 
-# サブページの定義: (title, icon, placeholder)
-_DOCUMENTATION_CHILDREN: list[tuple[str, str, str]] = [
+# サブページの定義: (title, icon, placeholder, legacy_aliases)
+# legacy_aliases は v0.4.3 以前のタイトル（絵文字 prefix 付き）で、
+# 後方互換のため既存検出対象に含める。
+_DOCUMENTATION_CHILDREN: list[tuple[str, str, str, tuple[str, ...]]] = [
     (
-        "💬 Discussions",
+        "Discussions",
         "💬",
         "コード変更を伴う前段の議論・設計判断を残す場所。"
         "決定後は関連 GitHub Issue を本文に追加して双方向リンクを張る。"
         "「Decided」ステータスのドキュメントは Project Memory の候補にもなる。",
+        ("💬 Discussions",),
     ),
     (
-        "📖 Operation Guides",
+        "Operation Guides",
         "📖",
         "日常運用の手順書（profile 切り替え、token 更新、復旧手順、"
         "Operations Console の使い方など）。"
         "リポジトリ内 docs/*-operation-guide.md と整合させる。",
+        ("📖 Operation Guides",),
     ),
     (
-        "📋 Requirements",
+        "Requirements",
         "📋",
         "要件定義書の Notion 版または GitHub へのリンク集。"
         "コード変更を伴わない設計レベルの要件をここに集約する。"
         "リポジトリ内 docs/hokusai-*-requirements.md と対応する。",
+        ("📋 Requirements",),
     ),
 ]
 
 
 def _find_existing_child_page(
-    api_client: NotionAPIClient, parent_page_id: str, title: str
+    api_client: NotionAPIClient,
+    parent_page_id: str,
+    title: str,
+    *,
+    legacy_aliases: tuple[str, ...] = (),
 ) -> str | None:
-    """親ページの子ブロック一覧から、同名の child_page の id を探す。
+    """親ページの子ブロック一覧から、同名 / 旧タイトルの child_page の id を探す。
 
-    見つからなければ None を返す。child_page の title 完全一致で判定する。
+    見つからなければ None を返す。canonical な `title` と完全一致するページを
+    最優先で返し、見つからなければ `legacy_aliases` の最初の一致を返す。
+    `legacy_aliases` は過去バージョンで使われていたタイトル（絵文字 prefix 付き等）
+    を渡すことで、後方互換で重複ページ作成を回避するが、新旧両方のページが
+    親に存在する場合は canonical 側を優先する（さもないと legacy hub 配下に
+    サブを作ってしまう）。
 
     Notion API は 1 レスポンス最大 100 件のため、`has_more` を見て全ページを
     走査する。途中で API エラーが発生した場合は idempotent チェックを完了
     できないため `NotionSetupError` を送出する（fail-open で重複ページを作って
     しまうのを避ける）。
     """
+    legacy_set = set(legacy_aliases)
+    legacy_match_id: str | None = None  # canonical が見つからなかった場合の fallback
     cursor: str | None = None
     while True:
         try:
@@ -353,13 +380,19 @@ def _find_existing_child_page(
         for block in blocks.get("results", []):
             if block.get("type") != "child_page":
                 continue
-            if block.get("child_page", {}).get("title") == title:
+            block_title = block.get("child_page", {}).get("title")
+            # canonical title 完全一致は最優先で即返し
+            if block_title == title:
                 return block.get("id")
+            # legacy alias は最初の一致を覚えておくが、走査を続けて
+            # canonical が見つかればそちらを優先する
+            if legacy_match_id is None and block_title in legacy_set:
+                legacy_match_id = block.get("id")
         if not blocks.get("has_more"):
-            return None
+            return legacy_match_id
         cursor = blocks.get("next_cursor")
         if not cursor:
-            return None
+            return legacy_match_id
 
 
 def _build_documentation_page_payload(
@@ -399,13 +432,16 @@ def _resolve_hub_page(
     created: list[dict[str, str]],
     skipped: list[dict[str, str]],
 ) -> str:
-    """ハブページ（📚 HOKUSAI Documentation）を取得 or 作成し id を返す。
+    """ハブページ（HOKUSAI Documentation、icon 📚）を取得 or 作成し id を返す。
 
     既存なら `skipped` に append、新規作成なら `created` に append する。
     ハブ作成失敗は scaffold 全体の致命扱いとして NotionSetupError を投げる。
+    旧バージョン（v0.4.3）で作成された絵文字 prefix 付きタイトルのページも
+    後方互換で skip 検出する。
     """
     existing_hub_id = _find_existing_child_page(
-        api, parent_page_id, _DOCUMENTATION_HUB_TITLE
+        api, parent_page_id, _DOCUMENTATION_HUB_TITLE,
+        legacy_aliases=_DOCUMENTATION_HUB_LEGACY_TITLES,
     )
     if existing_hub_id:
         skipped.append({"title": _DOCUMENTATION_HUB_TITLE, "id": existing_hub_id})
@@ -444,9 +480,17 @@ def _create_or_skip_subpage(
     created: list[dict[str, str]],
     skipped: list[dict[str, str]],
     failed: list[dict[str, str]],
+    *,
+    legacy_aliases: tuple[str, ...] = (),
 ) -> None:
-    """単一サブページを idempotent に作成し、結果を created/skipped/failed に振り分ける。"""
-    existing_sub_id = _find_existing_child_page(api, hub_id, sub_title)
+    """単一サブページを idempotent に作成し、結果を created/skipped/failed に振り分ける。
+
+    legacy_aliases は v0.4.3 以前で作成された絵文字 prefix 付きタイトルを
+    後方互換で既存検出するために渡す。
+    """
+    existing_sub_id = _find_existing_child_page(
+        api, hub_id, sub_title, legacy_aliases=legacy_aliases,
+    )
     if existing_sub_id:
         skipped.append({"title": sub_title, "id": existing_sub_id})
         logger.info("サブページは既に存在: %s (id=%s)", sub_title, existing_sub_id)
@@ -480,14 +524,16 @@ def scaffold_notion_workspace(
 ) -> dict[str, Any]:
     """親ページ配下に標準ドキュメントツリーを作成する（idempotent）。
 
-    ツリー構造:
+    ツリー構造（v0.4.4〜: title は素のテキスト、絵文字は Notion page icon）:
         <parent>
-        └── 📚 HOKUSAI Documentation
-            ├── 💬 Discussions
-            ├── 📖 Operation Guides
-            └── 📋 Requirements
+        └── HOKUSAI Documentation       ← icon 📚
+            ├── Discussions              ← icon 💬
+            ├── Operation Guides         ← icon 📖
+            └── Requirements             ← icon 📋
 
-    既存に同名ページがある場合は skip（破壊しない）。
+    既存に同名ページがある場合は skip（破壊しない）。v0.4.3 で作成された絵文字
+    prefix 付き旧タイトル（`📚 HOKUSAI Documentation` 等）も legacy alias として
+    検出される。新旧両方のページが共存する場合は canonical 側を優先する。
 
     本関数は入力検証エラー（NotionSetupError）以外は raise しない。実行時の
     API エラー（ハブ作成失敗 / 子要素取得失敗 / サブページ作成失敗）はすべて
@@ -534,11 +580,12 @@ def scaffold_notion_workspace(
             "error": err_detail,
         }
 
-    for sub_title, sub_icon, sub_placeholder in _DOCUMENTATION_CHILDREN:
+    for sub_title, sub_icon, sub_placeholder, sub_legacy in _DOCUMENTATION_CHILDREN:
         try:
             _create_or_skip_subpage(
                 api, hub_id, sub_title, sub_icon, sub_placeholder,
                 created, skipped, failed,
+                legacy_aliases=sub_legacy,
             )
         except Exception as e:
             # サブ毎の lookup / create エラーで全体を止めない。
