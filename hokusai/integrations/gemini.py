@@ -255,10 +255,13 @@ class GeminiClient:
         except json.JSONDecodeError:
             pass
 
-        match = re.search(r"```(?:json)?\s*\n(.*?)\n```", output, re.DOTALL)
-        if match:
+        # markdown コードフェンス（```json ... ``` または ``` ... ```）を抽出。
+        # ReDoS（python:S5852）対策で regex のラジー量子化子は使わず、
+        # 線形時間の str.find ベースで明示的に取り出す。
+        fenced = self._extract_fenced_block(output)
+        if fenced is not None:
             try:
-                return json.loads(match.group(1))
+                return json.loads(fenced)
             except json.JSONDecodeError:
                 pass
 
@@ -278,6 +281,37 @@ class GeminiClient:
             "summary": output[:500],
             "parse_error": True,
         }
+
+    @staticmethod
+    def _extract_fenced_block(text: str) -> str | None:
+        """markdown コードフェンス内の本文を抽出する（regex なし、O(N)）。
+
+        対応形式:
+            ```json
+            { ... }
+            ```
+            または
+            ```
+            { ... }
+            ```
+
+        最初に見つかったフェンスペアの中身を返す。閉じフェンスが無ければ None。
+        ReDoS 攻撃面を避けるため re.search の lazy quantifier は使わない。
+        """
+        fence = "```"
+        start = text.find(fence)
+        if start == -1:
+            return None
+        # 言語タグ（"json" 等）と改行をスキップして本文の開始位置を決める
+        body_start = text.find("\n", start + len(fence))
+        if body_start == -1:
+            return None
+        body_start += 1  # 改行直後から本文
+        end = text.find(fence, body_start)
+        if end == -1:
+            return None
+        # 末尾の改行を除去
+        return text[body_start:end].rstrip("\n")
 
     @staticmethod
     def _extract_first_top_level_object(text: str) -> str | None:
