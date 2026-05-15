@@ -43,8 +43,19 @@ from .ui.console import (
 from .workflow import WorkflowRunner
 
 
-def main():
-    """メインエントリーポイント"""
+def _build_parser():
+    """CLI 用 argparse パーサを構築する。
+
+    main() から分離している主な理由はテスタビリティ。例えば
+    `hokusai --dry-run notion-migrate-schema` と
+    `hokusai notion-migrate-schema --dry-run` で args.dry_run が
+    意図通り True になるか（サブパーサが SUPPRESS で上書きしないか）を
+    parser-level test で検証する。
+
+    Returns:
+        (parser, profile_parser, connect_parser): main() でハンドラ
+        ディスパッチに使う 3 つの参照。
+    """
     # 共有オプション parent: トップレベル / 各サブコマンドの両方で受け付けるため、
     # `hokusai --profile a start ...` と `hokusai start --profile a ...` の
     # どちらの順序でも動くようにする。
@@ -361,6 +372,13 @@ def main():
         default=None,
         help="listen port（省略時は profile registry の dashboard.port → 8765）",
     )
+
+    return parser, profile_parser, connect_parser
+
+
+def main():
+    """メインエントリーポイント"""
+    parser, profile_parser, connect_parser = _build_parser()
 
     args = parser.parse_args()
 

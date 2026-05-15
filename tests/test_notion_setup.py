@@ -429,6 +429,40 @@ def test_migrate_handler_rejects_invalid_cli_api_token_env(capsys, monkeypatch):
     assert "不正な env 変数名" in out
 
 
+class TestNotionMigrateSchemaParser:
+    """notion-migrate-schema の parser-level test。
+
+    Copilot レビュー 5 回目 #2 対応:
+    サブパーサの `--dry-run` に `default=argparse.SUPPRESS` を付けて
+    トップレベル値を温存している。この挙動が将来 default 変更で
+    silent regression しないよう、3 パターンを parser レベルで検証する。
+    """
+
+    def test_global_dry_run_before_subcommand(self):
+        """`hokusai --dry-run notion-migrate-schema` で args.dry_run=True。"""
+        from hokusai.cli_main import _build_parser
+
+        parser, _, _ = _build_parser()
+        args = parser.parse_args(["--dry-run", "notion-migrate-schema"])
+        assert getattr(args, "dry_run", False) is True
+
+    def test_subcommand_dry_run_after_subcommand(self):
+        """`hokusai notion-migrate-schema --dry-run` で args.dry_run=True。"""
+        from hokusai.cli_main import _build_parser
+
+        parser, _, _ = _build_parser()
+        args = parser.parse_args(["notion-migrate-schema", "--dry-run"])
+        assert getattr(args, "dry_run", False) is True
+
+    def test_no_dry_run_defaults_to_false(self):
+        """`hokusai notion-migrate-schema` のみなら args.dry_run=False。"""
+        from hokusai.cli_main import _build_parser
+
+        parser, _, _ = _build_parser()
+        args = parser.parse_args(["notion-migrate-schema"])
+        assert getattr(args, "dry_run", False) is False
+
+
 def test_migrate_handler_rejects_whitespace_workflows_db_id(capsys, monkeypatch):
     """env / CLI 由来の workflows_db_id が空白のみなら未設定として扱う。
 

@@ -29,7 +29,7 @@
 
 #### 推奨: 自動セットアップツールを使う
 
-23 個のプロパティと relation を手動で作るのは間違いやすいため、HOKUSAI に同梱の
+24 個のプロパティと relation を手動で作るのは間違いやすいため、HOKUSAI に同梱の
 セットアップ CLI で一括作成することを推奨する。
 
 ```bash
@@ -52,7 +52,7 @@ hokusai notion-setup --parent-page-id <PARENT_PAGE_ID> --persist
 `--persist` 無しの場合は `export` コマンド例を出力するだけ（手動でコピーして追記）。
 
 実行すると以下のリソースが作成される（v0.4.5〜: HOKUSAI prefix なし）:
-- Workflows DB（プロパティ 23 個 + Status / Waiting Reason / Priority の Select options）
+- Workflows DB（プロパティ 24 個 + Status / Waiting Reason / Priority の Select options）
 - Pull Requests DB（Workflow → Workflows DB の relation 付き）
 
 ##### ドキュメントツリーも同時に scaffold する（v0.4.3〜）
