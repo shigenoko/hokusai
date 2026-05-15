@@ -25,8 +25,8 @@ logger = get_logger("integrations.notion_dashboard.operator")
 # ブロックしないよう短めに設定する。
 _WHOAMI_TIMEOUT_SECONDS = 3.0
 
-# 解決できないときの fallback 値。Notion 上で「未設定」を一目で識別できる
-# よう、引用符と括弧で囲った形にする。
+# 解決できないときの fallback 値。Notion 上で「未設定」を一目で識別できるよう、
+# 括弧 `()` で囲った形にする（実値は `(unknown)`、リテラルにクォートは含まない）。
 UNKNOWN_OPERATOR = "(unknown)"
 
 

@@ -43,8 +43,12 @@ Issue #21 で期待されていた 3 DB（Workflows / Work Items / Review Issues
 
 ### Changed
 
-- `hokusai/workflow.py`: `start_workflow` の `workflow_started` event payload に
-  `operator=resolve_operator_name()` を含める（以降の event では送信せず Notion 側を温存）
+- `hokusai/workflow.py`: `WorkflowRunner.start` の `workflow_started` event payload
+  に `operator=resolve_operator_name()` を含める（以降の event では送信せず Notion
+  側を温存）。Notion 同期が未設定の場合は operator 解決自体を skip して whoami
+  の余計な遅延を回避する。
+- `_build_properties` で `event_type == "workflow_started"` を明示的にガードし、
+  後段の event で誤って operator が混入しても Notion 側の既存値を温存する（invariant 強制）
 - `hokusai/integrations/notion_dashboard/workflows_db.py`: `_build_properties` で
   payload の `operator` キーを `Operator` rich_text property にマッピング
 - `_WORKFLOWS_DB_DESCRIPTION`: 「HOKUSAI が書き込むプロパティ」一覧に `Operator` を追加

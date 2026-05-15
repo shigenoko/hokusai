@@ -316,13 +316,20 @@ class WorkflowRunner:
         # Notion メインダッシュボード同期（best effort、Slack 通知の前に呼んで page URL を解決）
         # Issue #21 / v0.4.8: workflow_started 時のみ operator を含めて送信し、
         # 複数エンジニア共有 profile 運用での「誰が動かしたか」を可視化する。
-        self._safe_notion_dispatch("workflow_started", _build_notion_payload(
-            state, status="running",
-            operator=resolve_operator_name(),
-            current_phase_name=self.PHASE_NAMES.get(
+        # operator 解決は whoami 実行を含むため、Notion 同期が無効な環境では
+        # 解決自体を skip して余計な遅延を避ける。
+        started_overrides: dict[str, object] = {
+            "status": "running",
+            "current_phase_name": self.PHASE_NAMES.get(
                 state.get("current_phase", 1), ""
             ),
-        ))
+        }
+        if self.notion_dispatcher.is_configured():
+            started_overrides["operator"] = resolve_operator_name()
+        self._safe_notion_dispatch(
+            "workflow_started",
+            _build_notion_payload(state, **started_overrides),
+        )
 
         # ワークフロー開始の通知（best effort: 失敗しても本体は止めない）
         # Notion ページ URL を補ってから Slack 通知

@@ -485,16 +485,59 @@ def main():
 
     # notion-migrate-schema コマンド: 既存 Workflows DB に v0.4.8+ の新プロパティを追加
     if args.command == "notion-migrate-schema":
-        # notion-setup と同様に profile 解決 → config → migration handler
-        notion_migrate_config = None
-        if hasattr(args, "profile") and args.profile:
+        # notion-setup と同等の厳密な profile / --config 解決を行う。
+        # 別案件用の token / DB ID を誤って使うリスクを避けるため、
+        # profile 解決失敗時の silent fallback は行わない（--dry-run は除く）。
+        from .config.profiles import (
+            ConflictingProfileAndConfigError,
+            InvalidProfileNameError,
+            ProfileError,
+            ProfileNotFoundError,
+            ProfileRegistryNotFoundError,
+        )
+
+        migrate_profile = getattr(args, "profile", None)
+        if migrate_profile is not None and not str(migrate_profile).strip():
+            print(
+                f"✗ --profile に空文字（または空白のみ）が指定されました: "
+                f"{migrate_profile!r}"
+            )
+            sys.exit(1)
+
+        migrate_config = None
+        if migrate_profile is not None or getattr(args, "config", None):
             try:
-                notion_migrate_config = create_config_from_env_and_file(
-                    profile_name=args.profile,
+                migrate_config = create_config_from_env_and_file(
+                    getattr(args, "config", None),
+                    profile_name=migrate_profile,
                 )
+            except ConflictingProfileAndConfigError as e:
+                print(f"✗ 引数の併用エラー: {e}")
+                print("  --profile と --config はどちらか一方のみ指定してください")
+                sys.exit(1)
+            except (
+                ProfileNotFoundError, ProfileRegistryNotFoundError,
+                InvalidProfileNameError, ProfileError,
+            ) as e:
+                print(f"✗ profile '{migrate_profile}' の解決に失敗: {e}")
+                sys.exit(1)
             except Exception as e:
-                print(f"⚠️ profile config の読み込みに失敗: {e}（既定 env で続行）")
-        sys.exit(_handle_notion_migrate_schema(args, notion_migrate_config))
+                # config 読み込み失敗。--dry-run なら警告のみで続行（実 API は呼ばない）。
+                if getattr(args, "dry_run", False):
+                    print(
+                        f"⚠️ config 読み込みに失敗: {type(e).__name__}: {e}"
+                        "（--dry-run のため既定 env 名で続行）"
+                    )
+                else:
+                    print(
+                        f"✗ config 読み込みに失敗: {type(e).__name__}: {e}"
+                    )
+                    print(
+                        "  対処: --dry-run で計画のみ確認するか、"
+                        "config を修正してください"
+                    )
+                    sys.exit(1)
+        sys.exit(_handle_notion_migrate_schema(args, migrate_config))
 
     # profile コマンドは registry のみ参照し、WorkflowConfig は不要
     if args.command == "profile":
@@ -918,7 +961,11 @@ def _handle_notion_migrate_schema(args, config=None) -> int:
         "Operator": {"rich_text": {}},
     }
 
-    # api token env 名 / DB ID の解決
+    dry_run = getattr(args, "dry_run", False)
+
+    # api token env 名 / DB ID の解決順序
+    # - api_token_env: CLI 明示 > profile config > "HOKUSAI_NOTION_API_TOKEN"
+    # - workflows_db_id: CLI 明示 > profile config の env 変数 > 既定 HOKUSAI_NOTION_WORKFLOWS_DB_ID
     api_token_env = getattr(args, "api_token_env", None)
     workflows_db_id_env = None
     workflows_db_id = getattr(args, "workflows_db_id", None)
@@ -932,31 +979,34 @@ def _handle_notion_migrate_schema(args, config=None) -> int:
 
     if api_token_env is None:
         api_token_env = "HOKUSAI_NOTION_API_TOKEN"
-
-    api_token = os.environ.get(api_token_env)
-    if not api_token:
-        print(f"✗ API token 環境変数 {api_token_env} が設定されていません")
-        return 1
+    if not workflows_db_id_env:
+        # profile config 未指定または fields 未設定の場合、既定の env 名にフォールバック
+        workflows_db_id_env = "HOKUSAI_NOTION_WORKFLOWS_DB_ID"
 
     if not workflows_db_id:
-        if workflows_db_id_env:
-            workflows_db_id = os.environ.get(workflows_db_id_env)
-        if not workflows_db_id:
-            print(
-                "✗ Workflows DB ID が解決できません。--workflows-db-id <id> で "
-                "明示するか、profile config の notion_dashboard.workflows_db_id_env が "
-                "示す環境変数を設定してください。"
-            )
-            return 1
+        workflows_db_id = os.environ.get(workflows_db_id_env)
+
+    if not workflows_db_id:
+        print(
+            f"✗ Workflows DB ID が解決できません。--workflows-db-id <id> で明示するか、"
+            f"環境変数 {workflows_db_id_env} を設定してください。"
+        )
+        return 1
 
     print(f"対象 Workflows DB: {workflows_db_id}")
     print("追加予定プロパティ:")
     for name, schema in PROPERTIES_TO_ADD.items():
         print(f"  - {name}: {schema}")
 
-    if getattr(args, "dry_run", False):
+    # --dry-run は API 呼び出しを行わないため、token 未設定でも実行可能にする。
+    if dry_run:
         print("--dry-run 指定のため API 呼び出しはスキップしました。")
         return 0
+
+    api_token = os.environ.get(api_token_env)
+    if not api_token:
+        print(f"✗ API token 環境変数 {api_token_env} が設定されていません")
+        return 1
 
     try:
         api = NotionAPIClient(api_token=api_token)

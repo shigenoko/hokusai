@@ -479,6 +479,26 @@ def test_workflows_db_omits_operator_when_payload_value_is_empty():
     assert "Operator" not in props
 
 
+def test_workflows_db_ignores_operator_on_non_started_event():
+    """workflow_started 以外の event で operator が payload に混入しても
+    Operator は送信しない（Notion 側の既存値を温存する invariant 強制）。
+
+    Copilot レビュー 1 回目 #5 対応: event_type ガードの回帰防止。
+    """
+    api = _RecordingAPI(query_result=[{"id": "p"}])
+    client = WorkflowsDBClient(api=api, database_id="db1")
+    # 例: phase_changed event に誤って operator が混入したケース
+    client.apply_event("phase_changed", {
+        "workflow_id": "wf-1",
+        "current_phase": 5,
+        "operator": "alice",  # workflow_started 以外で来ても無視されるべき
+    })
+    props = api.calls[-1][1]["properties"]
+    assert "Operator" not in props
+    # 他のプロパティは正常に書き込まれる
+    assert "Current Phase" in props
+
+
 # ---------------------------------------------------------------------------
 # update_database API（Issue #21 / v0.4.8、migration 用）
 # ---------------------------------------------------------------------------

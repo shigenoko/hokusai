@@ -265,6 +265,153 @@ def test_cli_handler_returns_one_when_token_missing(capsys, monkeypatch):
     assert "設定されていません" in out
 
 
+# ---------------------------------------------------------------------------
+# notion-migrate-schema ハンドラ（Issue #21 / v0.4.8、Copilot レビュー対応）
+# ---------------------------------------------------------------------------
+
+
+class _MigrateArgs:
+    """notion-migrate-schema 用の最小 args オブジェクト（テスト用）。"""
+
+    def __init__(
+        self,
+        *,
+        workflows_db_id=None,
+        api_token_env=None,
+        dry_run=False,
+    ):
+        self.workflows_db_id = workflows_db_id
+        self.api_token_env = api_token_env
+        self.dry_run = dry_run
+
+
+def test_migrate_handler_dry_run_skips_api_call(capsys, monkeypatch):
+    """--dry-run は API を呼ばずに計画のみ表示し、token 未設定でも成功する。"""
+    from hokusai import cli_main
+
+    monkeypatch.delenv("HOKUSAI_NOTION_API_TOKEN", raising=False)
+    monkeypatch.setenv("HOKUSAI_NOTION_WORKFLOWS_DB_ID", "wf-db-123")
+    rc = cli_main._handle_notion_migrate_schema(
+        _MigrateArgs(dry_run=True), None,
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "wf-db-123" in out
+    assert "Operator" in out
+    assert "dry-run" in out
+
+
+def test_migrate_handler_dry_run_uses_explicit_db_id(capsys, monkeypatch):
+    """--workflows-db-id 明示時はその ID を使う（env 不要）。"""
+    from hokusai import cli_main
+
+    monkeypatch.delenv("HOKUSAI_NOTION_WORKFLOWS_DB_ID", raising=False)
+    rc = cli_main._handle_notion_migrate_schema(
+        _MigrateArgs(workflows_db_id="explicit-db", dry_run=True), None,
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "explicit-db" in out
+
+
+def test_migrate_handler_resolves_default_workflows_db_env(capsys, monkeypatch):
+    """profile config 未指定でも HOKUSAI_NOTION_WORKFLOWS_DB_ID 既定 env を確認する。
+
+    Copilot レビュー 1 回目 #4 対応: profile 無し利用者でも既定 env を fallback
+    として使えるようにする。
+    """
+    from hokusai import cli_main
+
+    monkeypatch.setenv("HOKUSAI_NOTION_WORKFLOWS_DB_ID", "from-default-env")
+    rc = cli_main._handle_notion_migrate_schema(
+        _MigrateArgs(dry_run=True), None,
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "from-default-env" in out
+
+
+def test_migrate_handler_fails_when_no_db_id_resolved(capsys, monkeypatch):
+    """workflows_db_id が CLI / env どちらでも解決できない場合は 1 を返す。"""
+    from hokusai import cli_main
+
+    monkeypatch.delenv("HOKUSAI_NOTION_WORKFLOWS_DB_ID", raising=False)
+    rc = cli_main._handle_notion_migrate_schema(
+        _MigrateArgs(dry_run=True), None,
+    )
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "Workflows DB ID が解決できません" in out
+
+
+def test_migrate_handler_calls_update_database_on_success(capsys, monkeypatch):
+    """非 dry-run で update_database に Operator プロパティ payload が渡る。
+
+    Copilot レビュー 1 回目 #7 対応: handler の正常系パスを直接検証する。
+    """
+    from hokusai import cli_main
+
+    monkeypatch.setenv("HOKUSAI_NOTION_API_TOKEN", "secret")
+    monkeypatch.setenv("HOKUSAI_NOTION_WORKFLOWS_DB_ID", "wf-db-target")
+
+    captured: dict = {}
+
+    class _FakeAPI:
+        def __init__(self, **kwargs):
+            captured["init"] = kwargs
+
+        def update_database(self, database_id, payload):
+            captured["database_id"] = database_id
+            captured["payload"] = payload
+            return {"id": database_id, "object": "database"}
+
+    monkeypatch.setattr(
+        "hokusai.integrations.notion_dashboard.client.NotionAPIClient", _FakeAPI,
+    )
+    rc = cli_main._handle_notion_migrate_schema(_MigrateArgs(), None)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "更新しました" in out
+    assert captured["database_id"] == "wf-db-target"
+    assert "Operator" in captured["payload"]["properties"]
+
+
+def test_migrate_handler_fails_when_token_missing_non_dry_run(capsys, monkeypatch):
+    """非 dry-run で token 未設定は 1 を返す（dry-run は token 不要、こちらは必要）。"""
+    from hokusai import cli_main
+
+    monkeypatch.delenv("HOKUSAI_NOTION_API_TOKEN", raising=False)
+    monkeypatch.setenv("HOKUSAI_NOTION_WORKFLOWS_DB_ID", "wf-db-target")
+    rc = cli_main._handle_notion_migrate_schema(_MigrateArgs(), None)
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "設定されていません" in out
+
+
+def test_migrate_handler_uses_profile_config_token_env_and_db_id_env(
+    capsys, monkeypatch,
+):
+    """profile config が指す env 変数名で token / DB ID を解決する。"""
+    from hokusai import cli_main
+
+    monkeypatch.setenv("COMPANY_A_NOTION_API_TOKEN", "company-a-secret")
+    monkeypatch.setenv("COMPANY_A_NOTION_WORKFLOWS_DB_ID", "company-a-wf-db")
+
+    class _NDConfig:
+        api_token_env = "COMPANY_A_NOTION_API_TOKEN"
+        workflows_db_id_env = "COMPANY_A_NOTION_WORKFLOWS_DB_ID"
+
+    class _Config:
+        notion_dashboard = _NDConfig()
+
+    rc = cli_main._handle_notion_migrate_schema(
+        _MigrateArgs(dry_run=True), _Config(),
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "company-a-wf-db" in out
+
+
 def test_cli_handler_prints_export_lines_on_success(capsys, monkeypatch):
     """成功時に export コマンド例を出力する"""
     from hokusai import cli_main
