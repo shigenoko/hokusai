@@ -412,6 +412,51 @@ def test_migrate_handler_uses_profile_config_token_env_and_db_id_env(
     assert "company-a-wf-db" in out
 
 
+def test_migrate_handler_rejects_invalid_cli_api_token_env(capsys, monkeypatch):
+    """--api-token-env に不正な env 変数名（空白 / `;` 等）が来たら即 1 を返す。
+
+    Copilot レビュー 3 回目 #3 対応: notion-setup と同等の検証を行う。
+    """
+    from hokusai import cli_main
+
+    monkeypatch.setenv("HOKUSAI_NOTION_WORKFLOWS_DB_ID", "wf-db-target")
+    rc = cli_main._handle_notion_migrate_schema(
+        _MigrateArgs(api_token_env="BAD NAME;rm -rf /", dry_run=True),
+        None,
+    )
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "不正な env 変数名" in out
+
+
+def test_migrate_handler_falls_back_when_profile_config_env_invalid(
+    capsys, monkeypatch,
+):
+    """profile config の env 名が不正なら警告して既定にフォールバックし、続行する。
+
+    Copilot レビュー 3 回目 #3 対応: notion-setup と同じ `_pick_env_name` 方針。
+    """
+    from hokusai import cli_main
+
+    monkeypatch.setenv("HOKUSAI_NOTION_WORKFLOWS_DB_ID", "fallback-wf-db")
+
+    class _NDConfig:
+        api_token_env = "BAD;TOKEN"  # 不正
+        workflows_db_id_env = "BAD WF NAME"  # 不正
+
+    class _Config:
+        notion_dashboard = _NDConfig()
+
+    rc = cli_main._handle_notion_migrate_schema(
+        _MigrateArgs(dry_run=True), _Config(),
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    # 警告メッセージが出ていることと、既定 env で解決された ID が使われていること
+    assert "不正な env 変数名" in out
+    assert "fallback-wf-db" in out
+
+
 def test_cli_handler_prints_export_lines_on_success(capsys, monkeypatch):
     """成功時に export コマンド例を出力する"""
     from hokusai import cli_main

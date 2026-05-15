@@ -305,6 +305,13 @@ def main():
     notion_migrate_parser.add_argument(
         "--dry-run",
         action="store_true",
+        # default=argparse.SUPPRESS:
+        # トップレベルで先に解析された --dry-run（store_true なので未指定時 False）が
+        # サブパーサの暗黙 default=False で上書きされ、
+        # `hokusai --dry-run notion-migrate-schema` の意図に反して False になる問題を回避。
+        # 未指定時は属性自体を追加しないことで、トップレベルの値を保持する。
+        # 参照側は getattr(args, "dry_run", False) で取得する。
+        default=argparse.SUPPRESS,
         help="実際の API 呼び出しを行わず、追加予定のプロパティのみ表示する。",
     )
 
@@ -957,6 +964,7 @@ def _handle_notion_migrate_schema(args, config=None) -> int:
     Returns:
         0=成功 / 1=失敗
     """
+    from .integrations.notion_dashboard import is_valid_env_var_name
     from .integrations.notion_dashboard.client import NotionAPIClient
 
     # 追加対象のプロパティ。将来 v0.4.x で追加されるプロパティもここに足せる。
@@ -969,7 +977,31 @@ def _handle_notion_migrate_schema(args, config=None) -> int:
     # api token env 名 / DB ID の解決順序
     # - api_token_env: CLI 明示 > profile config > "HOKUSAI_NOTION_API_TOKEN"
     # - workflows_db_id: CLI 明示 > profile config の env 変数 > 既定 HOKUSAI_NOTION_WORKFLOWS_DB_ID
+    #
+    # config 由来の env 名は採用前にシェル変数名として妥当か検証する
+    # （notion-setup と同じ方針）。不正値（空白 / 改行 / `;` 等）が混入すると
+    # rc 破損 / コマンド注入のリスクがあるため、無効なら警告して既定にフォールバック。
+    def _pick_env_name(
+        cfg_value: object, default: str, role: str
+    ) -> str:
+        if cfg_value is None:
+            return default
+        if not is_valid_env_var_name(cfg_value):
+            print(
+                f"⚠️ profile config の {role}={cfg_value!r} は不正な env 変数名です。"
+                f"既定値 {default!r} を使用します（[A-Za-z_][A-Za-z0-9_]* に合致する必要）"
+            )
+            return default
+        return cfg_value
+
     api_token_env = getattr(args, "api_token_env", None)
+    if api_token_env is not None and not is_valid_env_var_name(api_token_env):
+        # CLI 明示で不正値の場合は中断する（誤って source した時に致命的なため）
+        print(
+            f"✗ --api-token-env={api_token_env!r} は不正な env 変数名です "
+            f"（[A-Za-z_][A-Za-z0-9_]* に合致する必要があります）"
+        )
+        return 1
     workflows_db_id_env = None
     workflows_db_id = getattr(args, "workflows_db_id", None)
 
@@ -977,8 +1009,16 @@ def _handle_notion_migrate_schema(args, config=None) -> int:
         nd_cfg = getattr(config, "notion_dashboard", None)
         if nd_cfg is not None:
             if api_token_env is None:
-                api_token_env = getattr(nd_cfg, "api_token_env", None)
-            workflows_db_id_env = getattr(nd_cfg, "workflows_db_id_env", None)
+                api_token_env = _pick_env_name(
+                    getattr(nd_cfg, "api_token_env", None),
+                    "HOKUSAI_NOTION_API_TOKEN",
+                    "notion_dashboard.api_token_env",
+                )
+            workflows_db_id_env = _pick_env_name(
+                getattr(nd_cfg, "workflows_db_id_env", None),
+                "HOKUSAI_NOTION_WORKFLOWS_DB_ID",
+                "notion_dashboard.workflows_db_id_env",
+            )
 
     if api_token_env is None:
         api_token_env = "HOKUSAI_NOTION_API_TOKEN"
