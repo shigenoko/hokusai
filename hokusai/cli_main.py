@@ -487,7 +487,9 @@ def main():
     if args.command == "notion-migrate-schema":
         # notion-setup と同等の厳密な profile / --config 解決を行う。
         # 別案件用の token / DB ID を誤って使うリスクを避けるため、
-        # profile 解決失敗時の silent fallback は行わない（--dry-run は除く）。
+        # profile 解決失敗（ProfileError 系）は --dry-run でも常に exit 1 で中断する。
+        # 例外として、汎用の config 読み込み失敗（例: ファイル parse error）のみ
+        # --dry-run 時に警告で続行を許可する（API を叩かないため）。
         from .config.profiles import (
             ConflictingProfileAndConfigError,
             InvalidProfileNameError,
@@ -949,7 +951,8 @@ def _handle_notion_migrate_schema(args, config=None) -> int:
 
     解決順序:
     - api token env 名: CLI 明示 > profile config > "HOKUSAI_NOTION_API_TOKEN"
-    - workflows_db_id: CLI 明示 > profile config の env 変数値
+    - workflows_db_id: CLI 明示 > profile config の env 変数 >
+      既定 env 変数 "HOKUSAI_NOTION_WORKFLOWS_DB_ID"
 
     Returns:
         0=成功 / 1=失敗
