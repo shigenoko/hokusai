@@ -244,6 +244,7 @@ chmod 600 ~/.hokusai/profiles.yaml
 
 # 2. Copy the project config template to a shared directory
 cp configs/profile-config-template.yaml ~/work/hokusai-configs/<profile_name>.yaml
+chmod 600 ~/work/hokusai-configs/<profile_name>.yaml  # config also contains operational metadata (env var names, repo paths)
 
 # 3. Replace `<TODO:...>` placeholders (grep helps you find leftovers)
 grep -n "<TODO:" ~/.hokusai/profiles.yaml ~/work/hokusai-configs/<profile_name>.yaml

@@ -244,6 +244,7 @@ chmod 600 ~/.hokusai/profiles.yaml
 
 # 2. 案件 config テンプレートをチーム共有ディレクトリ配下にコピー
 cp configs/profile-config-template.yaml ~/work/hokusai-configs/<profile_name>.yaml
+chmod 600 ~/work/hokusai-configs/<profile_name>.yaml  # 案件 config も内部運用情報（env 変数名 / repo path 等）を含むため保護
 
 # 3. `<TODO:...>` プレースホルダを実値に置換（残置検出は grep で）
 grep -n "<TODO:" ~/.hokusai/profiles.yaml ~/work/hokusai-configs/<profile_name>.yaml

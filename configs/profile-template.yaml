@@ -29,14 +29,22 @@
 #     `:` がマッピング区切りと誤解釈されるのを防ぐため）。置換後はクォートを外して
 #     構いません。
 
+# 制約:
+#   - profile 名は小文字英数字 + `_` + `-` のみ。先頭は英小文字
+#     （正規表現: ^[a-z][a-z0-9_-]*$ — 例 OK: "company-a" / "demo_2025"、NG: "Demo Project" / "1st"）
+#   - default_profile の値は、下の profiles: 直下のキー名と **完全一致** させること
+#     （ここを別の値にしたまま `--profile` 未指定で実行すると profile 解決に失敗する）
+#   - dashboard.port は他 profile と重複しないユニーク値（既定 8765、隣に登録する場合は 8766 等）
+
 # 任意。複数 profile を登録した場合、--profile 明示が無いときに使われる既定 profile。
-default_profile: "<TODO:既定 profile 名>"
+default_profile: "<TODO:既定 profile 名（下の profile キーと一致）>"
 
 profiles:
   # ─────────────────────────────────────────────────────────
   # 1 案件 = 1 profile。チーム内で profile 名を共有して使う想定。
   # config の絶対パス例（参考）: ~/work/hokusai-configs/<profile_name>.yaml
   # data_dir の例（参考）:       ~/.hokusai/profiles/<profile_name>
+  # profile 名は ^[a-z][a-z0-9_-]*$ に従うこと（先頭英小文字、英数 / _ / - のみ）。
   "<TODO:profile_name>":
     label: "<TODO:案件ラベル、例 A社 EC Platform>"
     config: "<TODO:profile config の絶対パス>"

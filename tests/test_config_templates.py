@@ -3,8 +3,10 @@
 検証内容:
 - `configs/profile-template.yaml` と `configs/profile-config-template.yaml` が
   valid YAML であること
-- プレースホルダを実値に置換した後、profile loader / config loader でロード
-  できること
+- プレースホルダを実値に置換した後、**hokusai の本物の profile registry loader
+  および各種 config parser** でロードできること（profile 名 regex、port 範囲、
+  default_profile キーの一致、notion_dashboard / cross_review のバリデーションを
+  実際に通過することを保証）
 - テンプレート内にシークレット実値（"sk-..." / "secret_..." 形式等）が含まれて
   いないこと（人為的な commit 漏れを防ぐ）
 """
@@ -135,31 +137,62 @@ def _has_unresolved_todo_in_data(data: object) -> bool:
     return False
 
 
-def test_profile_registry_template_loads_after_substitution(tmp_path):
-    """registry template のプレースホルダを置換すれば valid YAML としてロード可能。"""
+def test_profile_registry_template_loads_via_real_loader(tmp_path):
+    """registry template のプレースホルダ置換後、本物の `load_profile_registry`
+    でロードできることを保証する。
+
+    本物の loader は profile 名 regex（`^[a-z][a-z0-9_-]*$`）、default_profile が
+    profiles のキーに一致するか、port range 等を検証する。
+    Copilot レビュー 1 回目 #1 対応。
+    """
+    from hokusai.config.profiles import load_profile_registry
+
+    cfg_path = tmp_path / "demo-config.yaml"
+    data_dir = tmp_path / "data"
     content = PROFILE_REGISTRY_TEMPLATE.read_text(encoding="utf-8")
     substituted = _substitute_placeholders(
         content,
         {
             "既定 profile 名": "demo",
             "profile_name": "demo",
-            "profile config の絶対パス": str(tmp_path / "demo-config.yaml"),
-            "profile 用 data_dir": str(tmp_path / "data"),
+            "profile config の絶対パス": str(cfg_path),
+            "profile 用 data_dir": str(data_dir),
             "案件ラベル": "Demo Project",
             "案件の短い説明": "demo profile for tests",
         },
     )
+    registry_path = tmp_path / "profiles.yaml"
+    registry_path.write_text(substituted, encoding="utf-8")
+
+    # 本物の loader でパース（profile 名 regex / default_profile キー一致 等を検証）
+    registry = load_profile_registry(registry_path)
+    assert registry.default_profile == "demo"
+    assert "demo" in registry.profiles
+    profile = registry.profiles["demo"]
+    assert profile.dashboard_port == 8765
+    assert str(profile.config_path) == str(cfg_path)
+
+    # データ構造に <TODO:...> 残置がないこと
     data = yaml.safe_load(substituted)
     assert not _has_unresolved_todo_in_data(data), (
         f"パース後のデータに <TODO: が残っています:\n{data}"
     )
-    assert "profiles" in data
-    assert "demo" in data["profiles"]
-    assert data["profiles"]["demo"]["dashboard"]["port"] == 8765
 
 
-def test_profile_config_template_loads_after_substitution():
-    """config template のプレースホルダを置換すれば valid YAML として読める。"""
+def test_profile_config_template_parses_via_hokusai_loaders():
+    """config template のプレースホルダ置換後、hokusai の各種 config parser で
+    各セクションが正しく解釈されることを保証する。
+
+    `_parse_notion_dashboard_config` / `_parse_cross_review_config` 等の実装に
+    通すことで、enum 値（cross_review.provider）や数値範囲、env 変数名の妥当性も
+    実環境と同じルールで検証される。
+    Copilot レビュー 1 回目 #1 対応。
+    """
+    from hokusai.config.loaders import (
+        _parse_cross_review_config,
+        _parse_notion_dashboard_config,
+    )
+
     content = PROFILE_CONFIG_TEMPLATE.read_text(encoding="utf-8")
     substituted = _substitute_placeholders(
         content,
@@ -188,8 +221,19 @@ def test_profile_config_template_loads_after_substitution():
     assert not _has_unresolved_todo_in_data(data), (
         f"パース後のデータに <TODO: が残っています:\n{data}"
     )
+
+    # 各セクションを実 parser に通す（v0.4.6 で導入された provider 検証も含む）
+    nd = _parse_notion_dashboard_config(data)
+    assert nd.enabled is True
+    assert nd.api_token_env == "DEMO_NOTION_API_TOKEN"
+
+    cr = _parse_cross_review_config(data)
+    assert cr.provider == "codex"  # template の default
+    assert cr.model == "codex-mini-latest"
+    assert cr.enabled is False
+    assert cr.on_failure == "warn"
+
+    # トップレベル値の確認
     assert data["project_root"] == "/repo/demo"
     assert data["task_backend"]["type"] == "notion"
     assert data["git_hosting"]["type"] == "github"
-    assert data["notion_dashboard"]["enabled"] is True
-    assert data["notion_dashboard"]["api_token_env"] == "DEMO_NOTION_API_TOKEN"
