@@ -61,9 +61,11 @@ A → B の引き継ぎが発生したときに:
 
 [Engineer B]
 3. handover_note を Status=active にする（B 自身または PM 承認）
-4. hokusai prime --supersedes <wf-A> で旧 wf の context を要約取得
-5. hokusai --profile X start <task_url> で新規 workflow を起動
+4. hokusai --profile X start <task_url> で新規 workflow を起動
    - Workflows DB の Supersedes プロパティを旧 wf-A に設定
+5. hokusai prime <wf-B> 実行時、Workflows DB の Supersedes リレーションを
+   辿って旧 wf-A に紐づく active な handover_note が自動で prompt に要約注入
+   される（要件定義書 §8.4 参照、追加 CLI フラグは不要）
 6. 新規 workflow が起動後、handover_note は `applied_at` に記録
 
 [両者で監査]

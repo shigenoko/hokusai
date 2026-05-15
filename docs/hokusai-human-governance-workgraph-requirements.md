@@ -435,10 +435,27 @@ hokusai --profile a-company prime <workflow-id>
 * 次に人間判断が必要な事項
 
 `handover_note` の注入は、対象 workflow が `Supersedes` リレーション（§9.3）で
-旧 workflow に紐づいている場合に、その旧 workflow の Related Workflow に紐づく
-active な `handover_note` を優先的に prompt 先頭付近に要約注入する。これにより
-新オペレータ B は旧オペレータ A の経緯・試行・未確認前提を Agent が把握した状態で
-作業を再開できる。
+旧 workflow に紐づいている場合に、active な `handover_note` を優先的に prompt
+先頭付近に要約注入する。これにより新オペレータ B は旧オペレータ A の経緯・
+試行・未確認前提を Agent が把握した状態で作業を再開できる。
+
+**Lookup rule（クエリ仕様）**:
+
+`hokusai prime <wf-B>` 実行時、HOKUSAI は以下の順で handover_note を解決する。
+
+1. Workflows DB から `wf-B` レコードを取得し、その `Supersedes` プロパティ値
+   （= 旧 workflow id `wf-A`）を得る
+2. `Supersedes` が空なら handover_note 注入はスキップ（通常 prime 動作）
+3. Project Memory DB に対して以下の条件で active レコードを抽出:
+   - `Type` == `handover_note`
+   - `Status` == `active`
+   - `Related Workflow` リレーションが `wf-A` を含む
+   - `Profile` == 現在の profile
+4. 該当レコードを `Summary` 優先で prompt 先頭付近に要約注入する
+5. `Supersedes` が複数世代に渡る場合（A → A' → B）、A' の handover_note を
+   優先し、必要に応じて A まで遡る（深さ上限は実装側で設定、目安 3 世代）
+
+複数 handover_note が該当した場合は `Updated At` 降順で並べ、上位を優先する。
 
 ### 8.5 制約
 
@@ -551,7 +568,10 @@ Engineer B が引き継ぐケースが発生する。本節はその標準フロ
 
 5. Agent prompt 注入
    - hokusai prime <wf-B> 実行時、Supersedes 経由で旧 wf-A に紐づく
-     active handover_note が prompt 先頭付近に要約注入される（§8.4 参照）
+     active handover_note が prompt 先頭付近に要約注入される
+   - 具体的なクエリ仕様（lookup rule）は §8.4 を参照:
+     wf-B.Supersedes → wf-A → Project Memory where Type=handover_note
+     ∧ Status=active ∧ Related Workflow contains wf-A ∧ Profile=current
 
 [両者で監査]
 6. audit log に supersedes link 設定と handover_note 承認の双方向が記録される
