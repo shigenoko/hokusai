@@ -56,7 +56,7 @@ _WORKFLOWS_DB_DESCRIPTION = (
     "行わないでください。HOKUSAI が書き込むプロパティ（Name / Workflow ID / "
     "Status / Current Phase / Current Phase Name / Waiting Reason / Next Action / "
     "GitLab MR / Research Page / Design Page / Plan Page / Started At / Completed At / "
-    "Last Updated / Last Sync / Sync Errors / Error Summary）への手動編集は"
+    "Last Updated / Last Sync / Sync Errors / Error Summary / Operator）への手動編集は"
     "避けてください。人間が入力するプロパティ: Business Owner / Tech Lead / "
     "Priority / Assignee / GitLab Epic / GitLab Issue。詳細は HOKUSAI 運用ガイド"
     "（docs/notion-dashboard-operation-guide.md）を参照。"
@@ -130,6 +130,11 @@ _WORKFLOWS_DB_PROPERTIES: dict[str, dict[str, Any]] = {
     "Last Sync": {"date": {}},
     "Sync Errors": {"rich_text": {}},
     "Error Summary": {"rich_text": {}},
+    # Issue #21 / v0.4.8: 複数エンジニア共有 profile 運用で「誰が hokusai start を
+    # 叩いたか」を可視化する。workflow_started 時に env HOKUSAI_OPERATOR_NAME →
+    # whoami → "(unknown)" の順で解決して書き込む。以降の event では上書きしない
+    # （Notion 側の既存値を温存）。
+    "Operator": {"rich_text": {}},
 }
 
 

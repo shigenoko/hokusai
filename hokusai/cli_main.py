@@ -43,8 +43,19 @@ from .ui.console import (
 from .workflow import WorkflowRunner
 
 
-def main():
-    """メインエントリーポイント"""
+def _build_parser():
+    """CLI 用 argparse パーサを構築する。
+
+    main() から分離している主な理由はテスタビリティ。例えば
+    `hokusai --dry-run notion-migrate-schema` と
+    `hokusai notion-migrate-schema --dry-run` で args.dry_run が
+    意図通り True になるか（サブパーサが SUPPRESS で上書きしないか）を
+    parser-level test で検証する。
+
+    Returns:
+        (parser, profile_parser, connect_parser): main() でハンドラ
+        ディスパッチに使う 3 つの参照。
+    """
     # 共有オプション parent: トップレベル / 各サブコマンドの両方で受け付けるため、
     # `hokusai --profile a start ...` と `hokusai start --profile a ...` の
     # どちらの順序でも動くようにする。
@@ -280,6 +291,42 @@ def main():
         help="--persist 時に rc ファイルのバックアップを作成しない（非推奨）",
     )
 
+    # notion-migrate-schema コマンド: 既存 DB に v0.4.8+ で追加された
+    # Operator プロパティ等を後から追加する（Issue #21）
+    notion_migrate_parser = subparsers.add_parser(
+        "notion-migrate-schema",
+        help="既存 HOKUSAI Workflows DB に v0.4.8+ の新プロパティを追加",
+        parents=[shared_options],
+    )
+    notion_migrate_parser.add_argument(
+        "--workflows-db-id",
+        help=(
+            "対象 Workflows DB の ID。省略時は profile config の "
+            "notion_dashboard.workflows_db_id_env が指す env を参照し、"
+            "それも無ければ既定 env HOKUSAI_NOTION_WORKFLOWS_DB_ID にフォールバックする。"
+        ),
+    )
+    notion_migrate_parser.add_argument(
+        "--api-token-env",
+        default=None,
+        help=(
+            "Notion API token を保持する環境変数名。省略時は profile config の "
+            "notion_dashboard.api_token_env、それも無ければ HOKUSAI_NOTION_API_TOKEN。"
+        ),
+    )
+    notion_migrate_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        # default=argparse.SUPPRESS:
+        # トップレベルで先に解析された --dry-run（store_true なので未指定時 False）が
+        # サブパーサの暗黙 default=False で上書きされ、
+        # `hokusai --dry-run notion-migrate-schema` の意図に反して False になる問題を回避。
+        # 未指定時は属性自体を追加しないことで、トップレベルの値を保持する。
+        # 参照側は getattr(args, "dry_run", False) で取得する。
+        default=argparse.SUPPRESS,
+        help="実際の API 呼び出しを行わず、追加予定のプロパティのみ表示する。",
+    )
+
     # profile コマンド: profile registry の管理
     profile_parser = subparsers.add_parser(
         "profile",
@@ -325,6 +372,13 @@ def main():
         default=None,
         help="listen port（省略時は profile registry の dashboard.port → 8765）",
     )
+
+    return parser, profile_parser, connect_parser
+
+
+def main():
+    """メインエントリーポイント"""
+    parser, profile_parser, connect_parser = _build_parser()
 
     args = parser.parse_args()
 
@@ -454,6 +508,64 @@ def main():
                     f"既定 env 名フォールバックで続行します"
                 )
         sys.exit(_handle_notion_setup(args, notion_setup_config))
+
+    # notion-migrate-schema コマンド: 既存 Workflows DB に v0.4.8+ の新プロパティを追加
+    if args.command == "notion-migrate-schema":
+        # notion-setup と同等の厳密な profile / --config 解決を行う。
+        # 別案件用の token / DB ID を誤って使うリスクを避けるため、
+        # profile 解決失敗（ProfileError 系）は --dry-run でも常に exit 1 で中断する。
+        # 例外として、汎用の config 読み込み失敗（例: ファイル parse error）のみ
+        # --dry-run 時に警告で続行を許可する（API を叩かないため）。
+        from .config.profiles import (
+            ConflictingProfileAndConfigError,
+            InvalidProfileNameError,
+            ProfileError,
+            ProfileNotFoundError,
+            ProfileRegistryNotFoundError,
+        )
+
+        migrate_profile = getattr(args, "profile", None)
+        if migrate_profile is not None and not str(migrate_profile).strip():
+            print(
+                f"✗ --profile に空文字（または空白のみ）が指定されました: "
+                f"{migrate_profile!r}"
+            )
+            sys.exit(1)
+
+        migrate_config = None
+        if migrate_profile is not None or getattr(args, "config", None):
+            try:
+                migrate_config = create_config_from_env_and_file(
+                    getattr(args, "config", None),
+                    profile_name=migrate_profile,
+                )
+            except ConflictingProfileAndConfigError as e:
+                print(f"✗ 引数の併用エラー: {e}")
+                print("  --profile と --config はどちらか一方のみ指定してください")
+                sys.exit(1)
+            except (
+                ProfileNotFoundError, ProfileRegistryNotFoundError,
+                InvalidProfileNameError, ProfileError,
+            ) as e:
+                print(f"✗ profile '{migrate_profile}' の解決に失敗: {e}")
+                sys.exit(1)
+            except Exception as e:
+                # config 読み込み失敗。--dry-run なら警告のみで続行（実 API は呼ばない）。
+                if getattr(args, "dry_run", False):
+                    print(
+                        f"⚠️ config 読み込みに失敗: {type(e).__name__}: {e}"
+                        "（--dry-run のため既定 env 名で続行）"
+                    )
+                else:
+                    print(
+                        f"✗ config 読み込みに失敗: {type(e).__name__}: {e}"
+                    )
+                    print(
+                        "  対処: --dry-run で計画のみ確認するか、"
+                        "config を修正してください"
+                    )
+                    sys.exit(1)
+        sys.exit(_handle_notion_migrate_schema(args, migrate_config))
 
     # profile コマンドは registry のみ参照し、WorkflowConfig は不要
     if args.command == "profile":
@@ -854,6 +966,126 @@ def _handle_dashboard(args, config) -> int:
         else:
             print(f"エラー: port {port} の確認中に予期しない OS エラー: {e}")
         return 1
+
+
+def _handle_notion_migrate_schema(args, config=None) -> int:
+    """既存 Workflows DB に v0.4.8+ で追加されたプロパティを追加する。
+
+    Issue #21 / v0.4.8: 既存環境の Workflows DB に Operator (rich_text) を
+    追加する。Notion API は同名プロパティが存在する場合は no-op になるため
+    idempotent。
+
+    解決順序:
+    - api token env 名: CLI 明示 > profile config > "HOKUSAI_NOTION_API_TOKEN"
+    - workflows_db_id: CLI 明示 > profile config の env 変数 >
+      既定 env 変数 "HOKUSAI_NOTION_WORKFLOWS_DB_ID"
+
+    Returns:
+        0=成功 / 1=失敗
+    """
+    from .integrations.notion_dashboard import is_valid_env_var_name
+    from .integrations.notion_dashboard.client import NotionAPIClient
+
+    # 追加対象のプロパティ。将来 v0.4.x で追加されるプロパティもここに足せる。
+    PROPERTIES_TO_ADD: dict = {
+        "Operator": {"rich_text": {}},
+    }
+
+    dry_run = getattr(args, "dry_run", False)
+
+    # api token env 名 / DB ID の解決順序
+    # - api_token_env: CLI 明示 > profile config > "HOKUSAI_NOTION_API_TOKEN"
+    # - workflows_db_id: CLI 明示 > profile config の env 変数 > 既定 HOKUSAI_NOTION_WORKFLOWS_DB_ID
+    #
+    # config 由来の env 名は採用前にシェル変数名として妥当か検証する
+    # （notion-setup と同じ方針）。不正値（空白 / 改行 / `;` 等）が混入すると
+    # rc 破損 / コマンド注入のリスクがあるため、無効なら警告して既定にフォールバック。
+    def _pick_env_name(
+        cfg_value: object, default: str, role: str
+    ) -> str:
+        if cfg_value is None:
+            return default
+        if not is_valid_env_var_name(cfg_value):
+            print(
+                f"⚠️ profile config の {role}={cfg_value!r} は不正な env 変数名です。"
+                f"既定値 {default!r} を使用します（[A-Za-z_][A-Za-z0-9_]* に合致する必要）"
+            )
+            return default
+        return cfg_value
+
+    api_token_env = getattr(args, "api_token_env", None)
+    if api_token_env is not None and not is_valid_env_var_name(api_token_env):
+        # CLI 明示で不正値の場合は中断する（誤って source した時に致命的なため）
+        print(
+            f"✗ --api-token-env={api_token_env!r} は不正な env 変数名です "
+            f"（[A-Za-z_][A-Za-z0-9_]* に合致する必要があります）"
+        )
+        return 1
+    workflows_db_id_env = None
+    workflows_db_id = getattr(args, "workflows_db_id", None)
+
+    if config is not None:
+        nd_cfg = getattr(config, "notion_dashboard", None)
+        if nd_cfg is not None:
+            if api_token_env is None:
+                api_token_env = _pick_env_name(
+                    getattr(nd_cfg, "api_token_env", None),
+                    "HOKUSAI_NOTION_API_TOKEN",
+                    "notion_dashboard.api_token_env",
+                )
+            workflows_db_id_env = _pick_env_name(
+                getattr(nd_cfg, "workflows_db_id_env", None),
+                "HOKUSAI_NOTION_WORKFLOWS_DB_ID",
+                "notion_dashboard.workflows_db_id_env",
+            )
+
+    if api_token_env is None:
+        api_token_env = "HOKUSAI_NOTION_API_TOKEN"
+    if not workflows_db_id_env:
+        # profile config 未指定または fields 未設定の場合、既定の env 名にフォールバック
+        workflows_db_id_env = "HOKUSAI_NOTION_WORKFLOWS_DB_ID"
+
+    if not workflows_db_id:
+        workflows_db_id = os.environ.get(workflows_db_id_env, "")
+    # 空白のみの値は未設定として扱う（API に `/databases/   ` を投げないため）
+    workflows_db_id = (workflows_db_id or "").strip()
+
+    if not workflows_db_id:
+        print(
+            f"✗ Workflows DB ID が解決できません。--workflows-db-id <id> で明示するか、"
+            f"環境変数 {workflows_db_id_env} を設定してください。"
+        )
+        return 1
+
+    print(f"対象 Workflows DB: {workflows_db_id}")
+    print("追加予定プロパティ:")
+    for name, schema in PROPERTIES_TO_ADD.items():
+        print(f"  - {name}: {schema}")
+
+    # --dry-run は API 呼び出しを行わないため、token 未設定でも実行可能にする。
+    if dry_run:
+        print("--dry-run 指定のため API 呼び出しはスキップしました。")
+        return 0
+
+    # token も whitespace-only を未設定扱いにする（notion-setup と同じ方針）
+    api_token = os.environ.get(api_token_env, "").strip()
+    if not api_token:
+        print(f"✗ API token 環境変数 {api_token_env} が設定されていません")
+        return 1
+
+    try:
+        api = NotionAPIClient(api_token=api_token)
+        result = api.update_database(
+            workflows_db_id,
+            {"properties": PROPERTIES_TO_ADD},
+        )
+    except Exception as e:
+        print(f"✗ Workflows DB の schema 更新に失敗: {type(e).__name__}: {e}")
+        return 1
+
+    print("✓ Workflows DB schema を更新しました")
+    print(f"  database id: {result.get('id', workflows_db_id)}")
+    return 0
 
 
 def _handle_profile_command(args, profile_parser) -> int:

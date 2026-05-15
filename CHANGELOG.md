@@ -17,6 +17,73 @@ HOKUSAI のすべての特筆すべき変更をこのファイルに記録する
 
 ---
 
+## [0.4.8] - 2026-05-15
+
+Workflows DB に `Operator` プロパティを追加し、複数エンジニア共有 profile 運用で
+「誰が `hokusai start` を叩いたか」を可視化
+（[#21](https://github.com/shigenoko/hokusai/issues/21) 部分実装 / Notion 議論 §D-1）。
+
+Issue #21 で期待されていた 3 DB（Workflows / Work Items / Review Issues）のうち、
+後 2 者は v0.5.x の Human Governance Workgraph 本実装で新規作成される計画機能のため、
+本リリースでは **Workflows DB のみ** を対象とする。
+
+### Added
+
+- `hokusai/integrations/notion_dashboard/operator.py`:
+  - `resolve_operator_name() -> str`: env `HOKUSAI_OPERATOR_NAME` → `whoami` → `"(unknown)"` の順で解決
+- `_WORKFLOWS_DB_PROPERTIES` に `Operator` (rich_text) を追加（`hokusai notion-setup` で新規 DB は自動反映）
+- `NotionAPIClient.update_database(database_id, payload)`: 既存 DB スキーマ更新用 API
+- `hokusai notion-migrate-schema` サブコマンド: 既存 Workflows DB に v0.4.8+ の新プロパティを idempotent に追加
+  - `--workflows-db-id`、`--api-token-env`、`--dry-run` をサポート
+  - profile 解決にも対応
+- `tests/test_operator.py`: Operator 解決ロジック 11 ケース
+- 既存テスト拡張:
+  - `tests/test_notion_setup.py`: Workflows DB schema に `Operator` が含まれることを検証
+  - `tests/test_notion_dashboard.py`: payload に operator がある時 / 無い時 / 空文字の時の挙動、`update_database` の PATCH URL 検証
+
+### Changed
+
+- `hokusai/workflow.py`: `WorkflowRunner.start` の `workflow_started` event payload
+  に `operator=resolve_operator_name()` を含める（以降の event では送信せず Notion
+  側を温存）。Notion 同期が未設定の場合は operator 解決自体を skip して whoami
+  の余計な遅延を回避する。
+- `_build_properties` で `event_type == "workflow_started"` を明示的にガードし、
+  後段の event で誤って operator が混入しても Notion 側の既存値を温存する（invariant 強制）
+- `hokusai/integrations/notion_dashboard/workflows_db.py`: `_build_properties` で
+  payload の `operator` キーを `Operator` rich_text property にマッピング
+- `_WORKFLOWS_DB_DESCRIPTION`: 「HOKUSAI が書き込むプロパティ」一覧に `Operator` を追加
+
+### 後方互換
+
+- 既存レコードは破壊しない（既存ページの `Operator` は空のまま）
+- 既存 DB（v0.4.7 以前で作成済み）に `Operator` プロパティが無い場合:
+  - `_submit_with_property_pruning` の既存ロジックで自動的に該当プロパティを除去して再試行
+  - migration したい場合は `hokusai notion-migrate-schema` で追加
+- 新規 DB（`hokusai notion-setup`）: schema に `Operator` 含まれて作成される
+
+### 使い方
+
+```bash
+# 環境変数で明示
+export HOKUSAI_OPERATOR_NAME="alice"
+hokusai --profile a-company start <issue-url>
+
+# 既存 DB に Operator プロパティを追加
+hokusai --profile a-company notion-migrate-schema --dry-run  # 確認
+hokusai --profile a-company notion-migrate-schema            # 実行
+```
+
+### バージョン
+
+- `pyproject.toml`: 0.4.7 → 0.4.8
+- `hokusai/__init__.py`: 0.4.7 → 0.4.8
+
+### 関連
+
+- 後続: Work Items DB / Review Issues DB への Operator 追加は v0.5.x の Human Governance Workgraph 本実装で行う
+
+---
+
 ## [0.4.7] - 2026-05-15
 
 profile 共有テンプレートをリポジトリに追加

@@ -432,6 +432,107 @@ def test_workflows_db_rejects_empty_database_id():
 
 
 # ---------------------------------------------------------------------------
+# Operator プロパティ（Issue #21 / v0.4.8）
+# ---------------------------------------------------------------------------
+
+
+def test_workflows_db_writes_operator_when_payload_includes_it():
+    """payload に operator が含まれる場合、Operator rich_text プロパティが
+    Notion に送信される。複数エンジニア共有 profile 運用で「誰が動かしたか」
+    を可視化する。
+    """
+    api = _RecordingAPI(query_result=[{"id": "p"}])
+    client = WorkflowsDBClient(api=api, database_id="db1")
+    client.apply_event("workflow_started", {
+        "workflow_id": "wf-1",
+        "task_title": "Test",
+        "operator": "alice",
+    })
+    props = api.calls[-1][1]["properties"]
+    assert "Operator" in props
+    assert props["Operator"]["rich_text"][0]["text"]["content"] == "alice"
+
+
+def test_workflows_db_omits_operator_when_payload_lacks_it():
+    """payload に operator が無い場合、Operator プロパティは送信されない
+    （Notion 側の既存値を温存する）。
+    """
+    api = _RecordingAPI(query_result=[{"id": "p"}])
+    client = WorkflowsDBClient(api=api, database_id="db1")
+    client.apply_event("phase_changed", {
+        "workflow_id": "wf-1",
+        "current_phase": 5,
+    })
+    props = api.calls[-1][1]["properties"]
+    assert "Operator" not in props
+
+
+def test_workflows_db_omits_operator_when_payload_value_is_empty():
+    """payload に operator="" のような falsy 値があれば Operator は送信しない。"""
+    api = _RecordingAPI(query_result=[{"id": "p"}])
+    client = WorkflowsDBClient(api=api, database_id="db1")
+    client.apply_event("workflow_started", {
+        "workflow_id": "wf-1",
+        "operator": "",
+    })
+    props = api.calls[-1][1]["properties"]
+    assert "Operator" not in props
+
+
+def test_workflows_db_ignores_operator_on_non_started_event():
+    """workflow_started 以外の event で operator が payload に混入しても
+    Operator は送信しない（Notion 側の既存値を温存する invariant 強制）。
+
+    Copilot レビュー 1 回目 #5 対応: event_type ガードの回帰防止。
+    """
+    api = _RecordingAPI(query_result=[{"id": "p"}])
+    client = WorkflowsDBClient(api=api, database_id="db1")
+    # 例: phase_changed event に誤って operator が混入したケース
+    client.apply_event("phase_changed", {
+        "workflow_id": "wf-1",
+        "current_phase": 5,
+        "operator": "alice",  # workflow_started 以外で来ても無視されるべき
+    })
+    props = api.calls[-1][1]["properties"]
+    assert "Operator" not in props
+    # 他のプロパティは正常に書き込まれる
+    assert "Current Phase" in props
+
+
+# ---------------------------------------------------------------------------
+# update_database API（Issue #21 / v0.4.8、migration 用）
+# ---------------------------------------------------------------------------
+
+
+def test_notion_api_client_update_database_uses_patch(monkeypatch):
+    """update_database() が PATCH /v1/databases/{id} を呼ぶ。
+
+    既存 Workflows DB に Operator プロパティを追加する `notion-migrate-schema`
+    サブコマンドが本メソッドを呼び出す。
+    """
+    captured = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["method"] = req.get_method()
+        captured["url"] = req.full_url
+        captured["data"] = req.data
+        return _FakeResponse({"id": "db-123", "object": "database"})
+
+    monkeypatch.setattr(client_module.urllib.request, "urlopen", fake_urlopen)
+    api = NotionAPIClient(api_token="secret", requests_per_second=100)
+    result = api.update_database(
+        "db-123",
+        {"properties": {"Operator": {"rich_text": {}}}},
+    )
+    assert result["id"] == "db-123"
+    assert captured["method"] == "PATCH"
+    assert captured["url"].endswith("/databases/db-123")
+    # body に properties が含まれる（module 先頭で import 済みの json を使用）
+    body = json.loads(captured["data"])
+    assert "Operator" in body["properties"]
+
+
+# ---------------------------------------------------------------------------
 # property_not_found リトライ（DB スキーマ差異の吸収）
 # ---------------------------------------------------------------------------
 

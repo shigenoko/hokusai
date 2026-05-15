@@ -86,6 +86,18 @@ class NotionAPIClient:
     def update_page(self, page_id: str, payload: dict) -> dict:
         return self._request("PATCH", f"/pages/{page_id}", body=payload)
 
+    def update_database(self, database_id: str, payload: dict) -> dict:
+        """DB のスキーマやメタ情報を更新する（PATCH /v1/databases/{id}）。
+
+        既存 DB へのプロパティ追加 migration 等に使う。Notion API はキー単位の
+        partial update を許容するため、`{"properties": {"NewProp": {...}}}` の
+        ような payload で 1 プロパティずつ追加可能。
+
+        Issue #21 / v0.4.8: `hokusai notion-migrate-schema` で Operator
+        プロパティを既存 Workflows DB に追加する用途に使用。
+        """
+        return self._request("PATCH", f"/databases/{database_id}", body=payload)
+
     def retrieve_database(self, database_id: str) -> dict:
         return self._request("GET", f"/databases/{database_id}")
 

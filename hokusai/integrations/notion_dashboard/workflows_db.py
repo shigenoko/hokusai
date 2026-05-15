@@ -244,6 +244,18 @@ class WorkflowsDBClient:
         if "error_summary" in payload and payload["error_summary"]:
             props["Error Summary"] = _rich_text(str(payload["error_summary"]))
 
+        # Operator: workflow_started event でのみ書き込む（Issue #21 / v0.4.8）。
+        # 以降の event で誤って payload に operator が混入しても Notion 側の既存値を
+        # 温存できるよう、event_type を明示的にガードする（invariant の強制）。
+        # DB に Operator プロパティが無い環境では property_not_found pruning で
+        # 自動的に除外される（後方互換）。
+        if (
+            event_type == EVENT_WORKFLOW_STARTED
+            and "operator" in payload
+            and payload["operator"]
+        ):
+            props["Operator"] = _rich_text(str(payload["operator"]))
+
         # Last Updated は常に書き戻す
         props["Last Updated"] = _date(payload.get("last_updated") or datetime.now().isoformat())
 

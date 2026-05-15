@@ -456,3 +456,103 @@ class TestStepModeStopCondition:
         # in_progress なので停止判定は発火しない
         runner._prompt_step_confirmation.assert_not_called()
         assert result.interrupted is False
+
+
+class TestStartOperatorWiring:
+    """Issue #21 / v0.4.8: WorkflowRunner.start() の operator 引き渡しテスト。
+
+    notion_dispatcher.is_configured() の True / False で
+    resolve_operator_name() の呼び出し有無と
+    `_safe_notion_dispatch("workflow_started", ...)` の payload に
+    `operator` が含まれるかが分岐する。
+    """
+
+    def _setup_runner_for_start(self, monkeypatch, *, is_configured: bool):
+        """start() を走らせるための最小モック環境を構築する。
+
+        - notion_dispatcher.is_configured() を制御
+        - resolve_operator_name() の呼び出しを捕捉
+        - _safe_notion_dispatch の呼び出しを捕捉
+        - 余計な処理（stream loop / Slack / worktree 検証）はすべて no-op 化
+        """
+        runner = _make_runner()
+
+        # 既存ワークフロー無し（早期 return を回避）
+        runner.store.find_workflow_by_task_url = MagicMock(return_value=None)
+        runner.dry_run = False
+
+        # notion_dispatcher を MagicMock で差し替え
+        runner.notion_dispatcher = MagicMock()
+        runner.notion_dispatcher.is_configured.return_value = is_configured
+
+        # _safe_notion_dispatch を捕捉
+        dispatch_calls: list[tuple[str, dict]] = []
+        runner._safe_notion_dispatch = lambda event, payload: dispatch_calls.append(
+            (event, payload)
+        )
+
+        # resolve_operator_name の呼び出し回数 / 戻り値を捕捉
+        operator_call_count = {"n": 0}
+
+        def _fake_resolve():
+            operator_call_count["n"] += 1
+            return "tester"
+
+        monkeypatch.setattr(
+            "hokusai.workflow.resolve_operator_name",
+            _fake_resolve,
+        )
+
+        # stream loop / Slack / Notion URL 補完は no-op 化
+        runner._run_stream_loop = MagicMock()
+        runner._enrich_state_with_notion_url = lambda s: s
+        monkeypatch.setattr(
+            "hokusai.workflow._safe_notify", lambda *_args, **_kwargs: None
+        )
+        monkeypatch.setattr(
+            "hokusai.workflow._log_cross_review_config", lambda *_args, **_kwargs: None
+        )
+        # print 系の補助も呼ばれるが副作用無しなので放置
+
+        return runner, dispatch_calls, operator_call_count
+
+    def test_start_includes_operator_when_notion_configured(self, monkeypatch):
+        """notion_dispatcher.is_configured()=True の場合、
+        workflow_started payload に operator が含まれ、
+        resolve_operator_name() が 1 回呼ばれる。
+        """
+        runner, dispatch_calls, op_calls = self._setup_runner_for_start(
+            monkeypatch, is_configured=True
+        )
+
+        runner.start("https://notion.so/task-1")
+
+        # workflow_started dispatch を抽出
+        started_calls = [
+            payload for (event, payload) in dispatch_calls
+            if event == "workflow_started"
+        ]
+        assert len(started_calls) == 1, (
+            f"workflow_started dispatch が 1 回呼ばれるべき: {dispatch_calls}"
+        )
+        assert started_calls[0].get("operator") == "tester"
+        assert op_calls["n"] == 1
+
+    def test_start_skips_operator_when_notion_unconfigured(self, monkeypatch):
+        """notion_dispatcher.is_configured()=False の場合、
+        operator は payload に含まれず、resolve_operator_name() も呼ばれない
+        （whoami レイテンシ回避）。
+        """
+        runner, dispatch_calls, op_calls = self._setup_runner_for_start(
+            monkeypatch, is_configured=False
+        )
+
+        runner.start("https://notion.so/task-2")
+
+        started_calls = [
+            payload for (event, payload) in dispatch_calls
+            if event == "workflow_started"
+        ]
+        assert len(started_calls) == 1
+        assert "operator" not in started_calls[0]
+        assert op_calls["n"] == 0

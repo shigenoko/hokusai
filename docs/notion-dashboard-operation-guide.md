@@ -29,7 +29,7 @@
 
 #### 推奨: 自動セットアップツールを使う
 
-23 個のプロパティと relation を手動で作るのは間違いやすいため、HOKUSAI に同梱の
+24 個のプロパティと relation を手動で作るのは間違いやすいため、HOKUSAI に同梱の
 セットアップ CLI で一括作成することを推奨する。
 
 ```bash
@@ -52,7 +52,7 @@ hokusai notion-setup --parent-page-id <PARENT_PAGE_ID> --persist
 `--persist` 無しの場合は `export` コマンド例を出力するだけ（手動でコピーして追記）。
 
 実行すると以下のリソースが作成される（v0.4.5〜: HOKUSAI prefix なし）:
-- Workflows DB（プロパティ 23 個 + Status / Waiting Reason / Priority の Select options）
+- Workflows DB（プロパティ 24 個 + Status / Waiting Reason / Priority の Select options）
 - Pull Requests DB（Workflow → Workflows DB の relation 付き）
 
 ##### ドキュメントツリーも同時に scaffold する（v0.4.3〜）
@@ -135,6 +135,40 @@ hokusai notion-setup \
 | Completed At | Date |
 | Last Updated | Date |
 | Error Summary | Text |
+| Operator | Text（v0.4.8〜、複数エンジニア共有 profile 運用で実行者を記録） |
+
+#### Operator プロパティの動作（v0.4.8〜）
+
+`hokusai start` 実行時に以下の順序で operator 名を解決し、Workflows DB の
+`Operator` プロパティに rich_text として書き込む:
+
+1. 環境変数 `HOKUSAI_OPERATOR_NAME`（空白以外）
+2. `whoami` コマンドの出力
+3. 解決失敗時は `"(unknown)"`
+
+`workflow_started` event でのみ書き込まれ、以降の phase_changed / pr_created 等
+の event では Notion 側の既存値を温存する。
+
+複数エンジニアが同じ profile を共有して使う場合、各自の `~/.zshrc` で:
+
+```bash
+export HOKUSAI_OPERATOR_NAME="alice"   # 各自固有の名前
+```
+
+を設定すると、引き継ぎ時の連絡先が即座に Notion 上で確認できる。
+
+既存 DB（v0.4.7 以前で作成済み）に `Operator` プロパティを追加するには、
+migration コマンドを使う:
+
+```bash
+# 追加予定を確認
+hokusai --profile <profile_name> notion-migrate-schema --dry-run
+
+# 実行
+hokusai --profile <profile_name> notion-migrate-schema
+```
+
+`hokusai notion-setup` で **新規** 作成される DB には自動的に含まれる。
 
 #### Pull Requests DB（旧名 HOKUSAI Pull Requests DB）
 | プロパティ名 | 型 |
