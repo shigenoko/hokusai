@@ -291,7 +291,8 @@ def main():
         "--workflows-db-id",
         help=(
             "対象 Workflows DB の ID。省略時は profile config の "
-            "notion_dashboard.workflows_db_id_env 経由で解決される。"
+            "notion_dashboard.workflows_db_id_env が指す env を参照し、"
+            "それも無ければ既定 env HOKUSAI_NOTION_WORKFLOWS_DB_ID にフォールバックする。"
         ),
     )
     notion_migrate_parser.add_argument(
@@ -1027,7 +1028,9 @@ def _handle_notion_migrate_schema(args, config=None) -> int:
         workflows_db_id_env = "HOKUSAI_NOTION_WORKFLOWS_DB_ID"
 
     if not workflows_db_id:
-        workflows_db_id = os.environ.get(workflows_db_id_env)
+        workflows_db_id = os.environ.get(workflows_db_id_env, "")
+    # 空白のみの値は未設定として扱う（API に `/databases/   ` を投げないため）
+    workflows_db_id = (workflows_db_id or "").strip()
 
     if not workflows_db_id:
         print(
@@ -1046,7 +1049,8 @@ def _handle_notion_migrate_schema(args, config=None) -> int:
         print("--dry-run 指定のため API 呼び出しはスキップしました。")
         return 0
 
-    api_token = os.environ.get(api_token_env)
+    # token も whitespace-only を未設定扱いにする（notion-setup と同じ方針）
+    api_token = os.environ.get(api_token_env, "").strip()
     if not api_token:
         print(f"✗ API token 環境変数 {api_token_env} が設定されていません")
         return 1

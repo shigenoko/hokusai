@@ -98,10 +98,10 @@ def resolve_operator_name() -> str:
 
 ## 6. 受入条件（Issue #21）
 
-- [ ] Workflows DB schema に `Operator` プロパティが追加される
-- [ ] `hokusai start` で workflow を起動した実行者の名前が記録される
-- [ ] 既存レコードは破壊しない（migration コマンドを用意）
-- [ ] `hokusai notion-setup` の DB 自動作成にも反映される
+- [x] Workflows DB schema に `Operator` プロパティが追加される
+- [x] `hokusai start` で workflow を起動した実行者の名前が記録される
+- [x] 既存レコードは破壊しない（migration コマンドを用意）
+- [x] `hokusai notion-setup` の DB 自動作成にも反映される
 
 ## 7. バージョン
 
