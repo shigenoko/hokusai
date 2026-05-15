@@ -13,6 +13,7 @@ from .config import get_config
 from .constants import MAX_WORKFLOW_EVENTS, PHASE_NAMES
 from .integrations.notifications import notify_slack
 from .integrations.notion_dashboard import NotionSyncDispatcher
+from .integrations.notion_dashboard.operator import resolve_operator_name
 from .logging_config import get_logger
 from .state import PhaseStatus, add_audit_log, create_initial_state, update_phase_status
 
@@ -313,8 +314,12 @@ class WorkflowRunner:
         logger.debug(f"初期状態を永続化: workflow_id={workflow_id}")
 
         # Notion メインダッシュボード同期（best effort、Slack 通知の前に呼んで page URL を解決）
+        # Issue #21 / v0.4.8: workflow_started 時のみ operator を含めて送信し、
+        # 複数エンジニア共有 profile 運用での「誰が動かしたか」を可視化する。
         self._safe_notion_dispatch("workflow_started", _build_notion_payload(
-            state, status="running", current_phase_name=self.PHASE_NAMES.get(
+            state, status="running",
+            operator=resolve_operator_name(),
+            current_phase_name=self.PHASE_NAMES.get(
                 state.get("current_phase", 1), ""
             ),
         ))

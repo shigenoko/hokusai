@@ -280,6 +280,34 @@ def main():
         help="--persist 時に rc ファイルのバックアップを作成しない（非推奨）",
     )
 
+    # notion-migrate-schema コマンド: 既存 DB に v0.4.8+ で追加された
+    # Operator プロパティ等を後から追加する（Issue #21）
+    notion_migrate_parser = subparsers.add_parser(
+        "notion-migrate-schema",
+        help="既存 HOKUSAI Workflows DB に v0.4.8+ の新プロパティを追加",
+        parents=[shared_options],
+    )
+    notion_migrate_parser.add_argument(
+        "--workflows-db-id",
+        help=(
+            "対象 Workflows DB の ID。省略時は profile config の "
+            "notion_dashboard.workflows_db_id_env 経由で解決される。"
+        ),
+    )
+    notion_migrate_parser.add_argument(
+        "--api-token-env",
+        default=None,
+        help=(
+            "Notion API token を保持する環境変数名。省略時は profile config の "
+            "notion_dashboard.api_token_env、それも無ければ HOKUSAI_NOTION_API_TOKEN。"
+        ),
+    )
+    notion_migrate_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="実際の API 呼び出しを行わず、追加予定のプロパティのみ表示する。",
+    )
+
     # profile コマンド: profile registry の管理
     profile_parser = subparsers.add_parser(
         "profile",
@@ -454,6 +482,19 @@ def main():
                     f"既定 env 名フォールバックで続行します"
                 )
         sys.exit(_handle_notion_setup(args, notion_setup_config))
+
+    # notion-migrate-schema コマンド: 既存 Workflows DB に v0.4.8+ の新プロパティを追加
+    if args.command == "notion-migrate-schema":
+        # notion-setup と同様に profile 解決 → config → migration handler
+        notion_migrate_config = None
+        if hasattr(args, "profile") and args.profile:
+            try:
+                notion_migrate_config = create_config_from_env_and_file(
+                    profile_name=args.profile,
+                )
+            except Exception as e:
+                print(f"⚠️ profile config の読み込みに失敗: {e}（既定 env で続行）")
+        sys.exit(_handle_notion_migrate_schema(args, notion_migrate_config))
 
     # profile コマンドは registry のみ参照し、WorkflowConfig は不要
     if args.command == "profile":
@@ -854,6 +895,82 @@ def _handle_dashboard(args, config) -> int:
         else:
             print(f"エラー: port {port} の確認中に予期しない OS エラー: {e}")
         return 1
+
+
+def _handle_notion_migrate_schema(args, config=None) -> int:
+    """既存 Workflows DB に v0.4.8+ で追加されたプロパティを追加する。
+
+    Issue #21 / v0.4.8: 既存環境の Workflows DB に Operator (rich_text) を
+    追加する。Notion API は同名プロパティが存在する場合は no-op になるため
+    idempotent。
+
+    解決順序:
+    - api token env 名: CLI 明示 > profile config > "HOKUSAI_NOTION_API_TOKEN"
+    - workflows_db_id: CLI 明示 > profile config の env 変数値
+
+    Returns:
+        0=成功 / 1=失敗
+    """
+    from .integrations.notion_dashboard.client import NotionAPIClient
+
+    # 追加対象のプロパティ。将来 v0.4.x で追加されるプロパティもここに足せる。
+    PROPERTIES_TO_ADD: dict = {
+        "Operator": {"rich_text": {}},
+    }
+
+    # api token env 名 / DB ID の解決
+    api_token_env = getattr(args, "api_token_env", None)
+    workflows_db_id_env = None
+    workflows_db_id = getattr(args, "workflows_db_id", None)
+
+    if config is not None:
+        nd_cfg = getattr(config, "notion_dashboard", None)
+        if nd_cfg is not None:
+            if api_token_env is None:
+                api_token_env = getattr(nd_cfg, "api_token_env", None)
+            workflows_db_id_env = getattr(nd_cfg, "workflows_db_id_env", None)
+
+    if api_token_env is None:
+        api_token_env = "HOKUSAI_NOTION_API_TOKEN"
+
+    api_token = os.environ.get(api_token_env)
+    if not api_token:
+        print(f"✗ API token 環境変数 {api_token_env} が設定されていません")
+        return 1
+
+    if not workflows_db_id:
+        if workflows_db_id_env:
+            workflows_db_id = os.environ.get(workflows_db_id_env)
+        if not workflows_db_id:
+            print(
+                "✗ Workflows DB ID が解決できません。--workflows-db-id <id> で "
+                "明示するか、profile config の notion_dashboard.workflows_db_id_env が "
+                "示す環境変数を設定してください。"
+            )
+            return 1
+
+    print(f"対象 Workflows DB: {workflows_db_id}")
+    print("追加予定プロパティ:")
+    for name, schema in PROPERTIES_TO_ADD.items():
+        print(f"  - {name}: {schema}")
+
+    if getattr(args, "dry_run", False):
+        print("--dry-run 指定のため API 呼び出しはスキップしました。")
+        return 0
+
+    try:
+        api = NotionAPIClient(api_token=api_token)
+        result = api.update_database(
+            workflows_db_id,
+            {"properties": PROPERTIES_TO_ADD},
+        )
+    except Exception as e:
+        print(f"✗ Workflows DB の schema 更新に失敗: {type(e).__name__}: {e}")
+        return 1
+
+    print("✓ Workflows DB schema を更新しました")
+    print(f"  database id: {result.get('id', workflows_db_id)}")
+    return 0
 
 
 def _handle_profile_command(args, profile_parser) -> int:

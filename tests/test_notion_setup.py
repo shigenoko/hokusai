@@ -140,6 +140,7 @@ def test_setup_workflows_db_payload_has_required_properties():
         "Last Sync",
         "Sync Errors",
         "Error Summary",
+        "Operator",  # Issue #21 / v0.4.8
     ]:
         assert required in props, f"missing property: {required}"
 

@@ -135,6 +135,40 @@ hokusai notion-setup \
 | Completed At | Date |
 | Last Updated | Date |
 | Error Summary | Text |
+| Operator | Text（v0.4.8〜、複数エンジニア共有 profile 運用で実行者を記録） |
+
+#### Operator プロパティの動作（v0.4.8〜）
+
+`hokusai start` 実行時に以下の順序で operator 名を解決し、Workflows DB の
+`Operator` プロパティに rich_text として書き込む:
+
+1. 環境変数 `HOKUSAI_OPERATOR_NAME`（空白以外）
+2. `whoami` コマンドの出力
+3. 解決失敗時は `"(unknown)"`
+
+`workflow_started` event でのみ書き込まれ、以降の phase_changed / pr_created 等
+の event では Notion 側の既存値を温存する。
+
+複数エンジニアが同じ profile を共有して使う場合、各自の `~/.zshrc` で:
+
+```bash
+export HOKUSAI_OPERATOR_NAME="alice"   # 各自固有の名前
+```
+
+を設定すると、引き継ぎ時の連絡先が即座に Notion 上で確認できる。
+
+既存 DB（v0.4.7 以前で作成済み）に `Operator` プロパティを追加するには、
+migration コマンドを使う:
+
+```bash
+# 追加予定を確認
+hokusai --profile <profile_name> notion-migrate-schema --dry-run
+
+# 実行
+hokusai --profile <profile_name> notion-migrate-schema
+```
+
+`hokusai notion-setup` で **新規** 作成される DB には自動的に含まれる。
 
 #### Pull Requests DB（旧名 HOKUSAI Pull Requests DB）
 | プロパティ名 | 型 |
