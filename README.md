@@ -230,8 +230,32 @@ git_hosting:
 
 For profile-based operation, start from:
 
-- `configs/example-profiles.yaml` — profile registry example (`~/.hokusai/profiles.yaml`)
-- `configs/example-profile-company.yaml` — per-project configuration example
+- `configs/example-profiles.yaml` — profile registry **example** (illustrative, multi-project)
+- `configs/example-profile-company.yaml` — per-project configuration **example** (all fields)
+- `configs/profile-template.yaml` — profile registry **template** for team operations (v0.4.7+, copy-and-fill placeholders)
+- `configs/profile-config-template.yaml` — per-project configuration **template** (v0.4.7+, copy-and-fill placeholders)
+
+**New team member onboarding (using templates):**
+
+```bash
+# 1. Copy the registry template to your home directory
+cp configs/profile-template.yaml ~/.hokusai/profiles.yaml
+chmod 600 ~/.hokusai/profiles.yaml
+
+# 2. Copy the project config template to a shared directory
+cp configs/profile-config-template.yaml ~/work/hokusai-configs/<profile_name>.yaml
+chmod 600 ~/work/hokusai-configs/<profile_name>.yaml  # config also contains operational metadata (env var names, repo paths)
+
+# 3. Replace `<TODO:...>` placeholders (grep helps you find leftovers)
+grep -n "<TODO:" ~/.hokusai/profiles.yaml ~/work/hokusai-configs/<profile_name>.yaml
+
+# 4. Set environment variables (API tokens, etc.) in your shell rc
+
+# 5. Verify with profile doctor
+hokusai --profile <profile_name> profile doctor
+```
+
+The `example-*` files are illustrative samples covering many use cases; the `*-template.yaml` files are ready-to-copy starting points with explicit `<TODO:...>` markers.
 
 Common profile commands:
 

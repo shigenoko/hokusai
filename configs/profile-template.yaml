@@ -1,0 +1,66 @@
+# HOKUSAI profile registry テンプレート
+#
+# 用途:
+#   複数エンジニアで同じ案件を共有運用するときに、各メンバーが手元で profile を
+#   揃えるための **コピーして使うベース** です。学習用サンプルは
+#   `configs/example-profiles.yaml` を参照してください（こちらは複数案件の例示）。
+#
+# 展開手順（新メンバー向け）:
+#   1. このファイルをホームディレクトリ配下にコピー:
+#        cp configs/profile-template.yaml ~/.hokusai/profiles.yaml
+#        chmod 600 ~/.hokusai/profiles.yaml
+#   2. `<TODO:...>` を実値に置換する（残置検出: grep -n "<TODO:" ~/.hokusai/profiles.yaml）。
+#   3. profile config 本体を別途配置:
+#        cp configs/profile-config-template.yaml ~/work/hokusai-configs/<profile_name>.yaml
+#      （配置パスは下の config: フィールドと合わせる）
+#   4. 必要な環境変数（API token 等）を `~/.zshrc` 等に設定する。
+#      profile config 側で env 変数名を参照する設計のため、値は YAML には書かない。
+#   5. 動作確認:
+#        hokusai --profile <profile_name> profile doctor
+#
+# 安全性:
+#   - シークレット値（API token / password）は **絶対にこのファイルに書かない**。
+#     env 変数名のみを profile config 側で参照すること。
+#   - 顧客識別情報を label / description に含める場合、public repo にコミットしないこと。
+#   - registry 自体も内部運用情報であるため、chmod 600 で multi-user OS 上でも保護する。
+#
+# YAML 注意:
+#   - 値に "<TODO:...>" を含むキーはダブルクォートで囲んでいます（YAML スカラー内の
+#     `:` がマッピング区切りと誤解釈されるのを防ぐため）。置換後はクォートを外して
+#     構いません。
+
+# 制約:
+#   - profile 名は小文字英数字 + `_` + `-` のみ。先頭は英小文字
+#     （正規表現: ^[a-z][a-z0-9_-]*$ — 例 OK: "company-a" / "demo_2025"、NG: "Demo Project" / "1st"）
+#   - default_profile の値は、下の profiles: 直下のキー名と **完全一致** させること
+#     （ここを別の値にしたまま `--profile` 未指定で実行すると profile 解決に失敗する）
+#   - dashboard.port は他 profile と重複しないユニーク値（既定 8765、隣に登録する場合は 8766 等）
+
+# 任意。複数 profile を登録した場合、--profile 明示が無いときに使われる既定 profile。
+default_profile: "<TODO:既定 profile 名（下の profile キーと一致）>"
+
+profiles:
+  # ─────────────────────────────────────────────────────────
+  # 1 案件 = 1 profile。チーム内で profile 名を共有して使う想定。
+  # config の絶対パス例（参考）: ~/work/hokusai-configs/<profile_name>.yaml
+  # data_dir の例（参考）:       ~/.hokusai/profiles/<profile_name>
+  # profile 名は ^[a-z][a-z0-9_-]*$ に従うこと（先頭英小文字、英数 / _ / - のみ）。
+  "<TODO:profile_name>":
+    label: "<TODO:案件ラベル、例 A社 EC Platform>"
+    config: "<TODO:profile config の絶対パス>"
+    data_dir: "<TODO:profile 用 data_dir、例 ~/.hokusai/profiles/PROFILE_NAME>"
+    dashboard:
+      # profile 並列起動時に衝突しない port を選ぶ。既存 profile と被らないこと。
+      port: 8765
+    description: "<TODO:案件の短い説明>"
+
+  # ─────────────────────────────────────────────────────────
+  # 案件が増えたら下にコピーして追加。各 profile の port / data_dir は重複させない。
+  # コメントアウトを外して、TODO を置換する。
+  # "<TODO:profile_name_2>":
+  #   label: "<TODO:案件ラベル 2>"
+  #   config: "<TODO:profile config の絶対パス 2>"
+  #   data_dir: "<TODO:profile 用 data_dir 2>"
+  #   dashboard:
+  #     port: 8766
+  #   description: "<TODO:案件の短い説明 2>"
