@@ -17,6 +17,40 @@ HOKUSAI のすべての特筆すべき変更をこのファイルに記録する
 
 ---
 
+## [0.4.7] - 2026-05-15
+
+profile 共有テンプレートをリポジトリに追加
+（[#22](https://github.com/shigenoko/hokusai/issues/22) 対応 / Notion 議論「複数エンジニアによる開発の課題」§D-2）。
+
+### Added
+
+- `configs/profile-template.yaml`: profile registry の実運用テンプレート
+  - `<TODO:...>` プレースホルダ形式で、`grep "<TODO:"` で残置検出可能
+  - `cp` → 置換 → `hokusai profile doctor` で動作確認可能
+- `configs/profile-config-template.yaml`: 個別案件 profile config の実運用テンプレート
+  - 全主要セクション（task_backend / git_hosting / notion_dashboard / figma / miro
+    / notifications / web_dashboard / cross_review）を含む
+  - v0.4.6 で導入された `cross_review.provider` にも対応
+- `tests/test_config_templates.py`: テンプレートの妥当性検証
+  - YAML として valid
+  - シークレット実値（OpenAI / Notion / GitHub PAT / Slack token / webhook URL）が
+    混入していないことを正規表現でチェック
+  - プレースホルダ置換後に YAML loader でロード可能
+
+### Changed
+
+- README.md / README_JP.md: profile セクションに「新メンバー向け展開手順」を追加
+- `example-*` と `*-template.yaml` の位置づけを整理:
+  - `example-*` は学習用サンプル
+  - `*-template.yaml` はコピー → プレースホルダ置換だけで動く実運用ベース
+
+### バージョン
+
+- `pyproject.toml`: 0.4.6 → 0.4.7
+- `hokusai/__init__.py`: 0.4.6 → 0.4.7
+
+---
+
 ## [0.4.6] - 2026-05-14
 
 クロスレビュー LLM として **Google Gemini CLI** に対応

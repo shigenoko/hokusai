@@ -1,0 +1,123 @@
+# HOKUSAI profile config テンプレート
+#
+# 用途:
+#   `configs/profile-template.yaml`（profile registry）から `config:` で参照される
+#   個別案件用 config の **コピーして使うベース** です。全フィールドを網羅した
+#   サンプルは `configs/example-profile-company.yaml` を参照してください。
+#
+# 展開手順:
+#   1. 案件ごとに 1 ファイル作成:
+#      cp configs/profile-config-template.yaml ~/work/hokusai-configs/<profile_name>.yaml
+#   2. `<TODO:...>` を実値に置換する:
+#      grep -n "<TODO:" ~/work/hokusai-configs/<profile_name>.yaml
+#   3. 不要なセクションは丸ごと削除して構わない（例: GitLab 案件なら GitHub ブロックを削る）。
+#   4. registry 側の `config:` フィールドが本ファイルの絶対パスを指していることを確認。
+#   5. 動作確認:
+#      hokusai --profile <profile_name> profile doctor
+#
+# 安全性:
+#   - API token / password / webhook URL の **値** は絶対に書かない。
+#     env 変数名のみを参照する設計。値は `~/.zshrc` 等で個別に export する。
+#   - env 変数名は案件 prefix を付けて衝突を防ぐ。
+#
+# YAML 注意:
+#   - 値に "<TODO:...>" を含むキーはダブルクォートで囲んでいます（YAML スカラー内の
+#     `:` がマッピング区切りと誤解釈されるのを防ぐため）。置換後はクォートを外して
+#     構いません（裸の文字列でも valid）。
+
+# ─────────────────────────────────────────────────────────
+# プロジェクト基本設定
+# ─────────────────────────────────────────────────────────
+project_root: "<TODO:project_root の絶対パス、例 ~/repo/company/backend>"
+base_branch: "<TODO:base_branch、例 main / develop>"
+
+# ビルド・テスト・lint コマンド（プロジェクトのものに合わせる）
+build_command: "<TODO:build コマンド、例 npm run build>"
+test_command: "<TODO:test コマンド、例 npm run test>"
+lint_command: "<TODO:lint コマンド、例 npm run lint>"
+
+# ─────────────────────────────────────────────────────────
+# Task backend
+# ─────────────────────────────────────────────────────────
+task_backend:
+  # 選択肢: notion / github_issue
+  type: "<TODO:notion または github_issue>"
+  # github_issue の場合のみ:
+  # repo: "<TODO:owner/repo>"
+
+# ─────────────────────────────────────────────────────────
+# Git hosting
+# ─────────────────────────────────────────────────────────
+git_hosting:
+  # 選択肢: github / gitlab
+  type: "<TODO:github または gitlab>"
+  # github の場合:
+  repo: "<TODO:owner/repo>"
+  # gitlab の場合:
+  # type: gitlab
+  # base_url: "<TODO:GitLab base URL、例 https://gitlab.example.com>"
+  # project_path: "<TODO:group/project>"
+
+# ─────────────────────────────────────────────────────────
+# Notion メインダッシュボード同期
+# ─────────────────────────────────────────────────────────
+notion_dashboard:
+  enabled: true
+  # 案件 prefix 付きの env 変数名を使うこと（他案件と衝突しないように）
+  api_token_env: "<TODO:Notion API token env 変数名、例 COMPANY_NOTION_API_TOKEN>"
+  workflows_db_id_env: "<TODO:Workflows DB id env 変数名、例 COMPANY_NOTION_WORKFLOWS_DB_ID>"
+  pull_requests_db_id_env: "<TODO:PR DB id env 変数名、例 COMPANY_NOTION_PR_DB_ID>"
+  sync_outbox:
+    enabled: true
+    max_retry_attempts: 10
+
+# ─────────────────────────────────────────────────────────
+# Figma 連携（任意・read-only MVP）
+# ─────────────────────────────────────────────────────────
+# 不要なら enabled: false にするか、ブロック全体を削除して可。
+figma:
+  enabled: false
+  api_token_env: "<TODO:Figma API token env 変数名、例 COMPANY_FIGMA_API_TOKEN>"
+  fetch_comments: true
+  export_images: true
+
+# ─────────────────────────────────────────────────────────
+# Miro 連携（任意・read-only MVP）
+# ─────────────────────────────────────────────────────────
+miro:
+  enabled: false
+  api_token_env: "<TODO:Miro API token env 変数名、例 COMPANY_MIRO_API_TOKEN>"
+  default_team_id_env: "<TODO:Miro team id env 変数名、例 COMPANY_MIRO_TEAM_ID>"
+
+# ─────────────────────────────────────────────────────────
+# Slack 通知
+# ─────────────────────────────────────────────────────────
+notifications:
+  slack:
+    enabled: false
+    webhook_url_env: "<TODO:Slack webhook URL env 変数名、例 COMPANY_SLACK_WEBHOOK_URL>"
+    events:
+      - waiting_for_human
+      - workflow_failed
+      - pr_created
+      - workflow_completed
+
+# ─────────────────────────────────────────────────────────
+# Operations Console（HOKUSAI Web Dashboard）BASIC 認証
+# ─────────────────────────────────────────────────────────
+web_dashboard:
+  auth:
+    enabled: false
+    username_env: "<TODO:Console BASIC 認証ユーザ env 変数名、例 COMPANY_HOKUSAI_OPS_USERNAME>"
+    password_env: "<TODO:Console BASIC 認証パスワード env 変数名、例 COMPANY_HOKUSAI_OPS_PASSWORD>"
+
+# ─────────────────────────────────────────────────────────
+# クロス LLM レビュー（任意・v0.4.6+ で provider 選択可）
+# ─────────────────────────────────────────────────────────
+cross_review:
+  enabled: false
+  # 選択肢: codex / gemini（v0.4.6 以降）
+  provider: codex
+  model: "<TODO:cross-review モデル、例 codex-mini-latest / gemini-2.5-pro>"
+  phases: [2, 4]
+  on_failure: warn  # warn | block | skip

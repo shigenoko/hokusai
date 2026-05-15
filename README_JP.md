@@ -228,10 +228,33 @@ git_hosting:
   type: github
 ```
 
-profile ベースで運用する場合は、以下のサンプルから始める。
+profile ベースで運用する場合は、以下のサンプル / テンプレートから始める。
 
-- `configs/example-profiles.yaml` — profile registry の例（`~/.hokusai/profiles.yaml`）
-- `configs/example-profile-company.yaml` — 案件ごとの config 例
+- `configs/example-profiles.yaml` — profile registry の **サンプル**（読み物用、複数案件の例示）
+- `configs/example-profile-company.yaml` — 案件ごとの config **サンプル**（全フィールド網羅）
+- `configs/profile-template.yaml` — profile registry の **実運用テンプレート**（v0.4.7〜、`<TODO:...>` をコピー → 置換）
+- `configs/profile-config-template.yaml` — 案件 config の **実運用テンプレート**（v0.4.7〜）
+
+**新メンバー向け展開手順（テンプレ使用時）:**
+
+```bash
+# 1. registry テンプレートをホームディレクトリにコピー
+cp configs/profile-template.yaml ~/.hokusai/profiles.yaml
+chmod 600 ~/.hokusai/profiles.yaml
+
+# 2. 案件 config テンプレートをチーム共有ディレクトリ配下にコピー
+cp configs/profile-config-template.yaml ~/work/hokusai-configs/<profile_name>.yaml
+
+# 3. `<TODO:...>` プレースホルダを実値に置換（残置検出は grep で）
+grep -n "<TODO:" ~/.hokusai/profiles.yaml ~/work/hokusai-configs/<profile_name>.yaml
+
+# 4. API token 等の環境変数を ~/.zshrc 等に設定
+
+# 5. 動作確認
+hokusai --profile <profile_name> profile doctor
+```
+
+`example-*` は学習用サンプル、`*-template.yaml` は **コピー → プレースホルダ置換だけで動く** 実運用ベース。
 
 代表的な profile コマンド:
 
