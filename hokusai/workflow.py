@@ -101,14 +101,28 @@ class WorkflowRunner:
         if self.compiled_workflow is None:
             self.compiled_workflow = create_compiled_workflow()
 
-    def _safe_notion_dispatch(self, event_type: str, payload: dict) -> None:
+    def _safe_notion_dispatch(
+        self,
+        event_type: str,
+        payload: dict,
+        *,
+        idempotency_key: str | None = None,
+    ) -> None:
         """Notion 同期 dispatcher を best effort で呼ぶ。
 
         ワークフロー本体には絶対に例外を伝播させない。
         is_configured() = False（disabled or 環境変数未設定）の場合は no-op。
+
+        idempotency_key を渡すと、Notion outbox 上での重複抑止キーを明示できる。
+        既定では dispatcher が `workflow_id:event_type:phase:revision` を組み
+        立てるが、同一 phase 内で複数イベント（review_issue_raised 等）を発火
+        する場合は per-issue な key を呼び出し側で構築して outbox 集約崩壊を
+        防ぐ（PR #37 Copilot 指摘）。
         """
         try:
-            self.notion_dispatcher.dispatch(event_type, payload)
+            self.notion_dispatcher.dispatch(
+                event_type, payload, idempotency_key=idempotency_key
+            )
         except Exception as e:
             logger.debug(f"Notion 同期で例外を抑制: event={event_type}, error={e}")
 
@@ -828,6 +842,9 @@ class WorkflowRunner:
                 # dispatch して、state からは取り除く。同一 dedupe_key で重複
                 # enqueue されても Notion 側で upsert されるので問題ない。
                 # operator は dispatch 直前に whoami / env で解決して補う。
+                # idempotency_key は per-issue（workflow_id:event:dedupe_key）で
+                # 構築し、複数指摘を 1 つの outbox エントリに集約してしまう既定
+                # キーの崩壊を防ぐ（PR #37 Copilot 指摘）。
                 try:
                     pending = current_state.values.get("pending_review_issues") or []
                     if pending:
@@ -840,8 +857,17 @@ class WorkflowRunner:
                             enriched = dict(payload)
                             if operator and "operator" not in enriched:
                                 enriched["operator"] = operator
+                            wid = enriched.get("workflow_id") or ""
+                            dkey = enriched.get("dedupe_key") or ""
+                            idempotency_key = (
+                                f"{wid}:review_issue_raised:{dkey}"
+                                if (wid and dkey)
+                                else None
+                            )
                             self._safe_notion_dispatch(
-                                "review_issue_raised", enriched
+                                "review_issue_raised",
+                                enriched,
+                                idempotency_key=idempotency_key,
                             )
                         # state から drain（永続化は次のループで行われる）
                         self.compiled_workflow.update_state(

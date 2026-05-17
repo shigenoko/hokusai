@@ -55,6 +55,8 @@ def test_parse_notion_dashboard_full_config():
             "enabled": True,
             "api_token_env": "MY_TOKEN",
             "workflows_db_id_env": "MY_DB",
+            "pull_requests_db_id_env": "MY_PR_DB",
+            "review_issues_db_id_env": "MY_RI_DB",
             "sync_outbox": {"enabled": True, "max_retry_attempts": 5},
             "retry": {"max_attempts": 5, "backoff_seconds": 10},
             "rate_limit": {"requests_per_second": 3, "debounce_ms": 2000},
@@ -63,11 +65,21 @@ def test_parse_notion_dashboard_full_config():
     assert cfg.enabled is True
     assert cfg.api_token_env == "MY_TOKEN"
     assert cfg.workflows_db_id_env == "MY_DB"
+    assert cfg.pull_requests_db_id_env == "MY_PR_DB"
+    assert cfg.review_issues_db_id_env == "MY_RI_DB"
     assert cfg.sync_outbox.max_retry_attempts == 5
     assert cfg.retry.max_attempts == 5
     assert cfg.retry.backoff_seconds == 10.0
     assert cfg.rate_limit.requests_per_second == 3.0
     assert cfg.rate_limit.debounce_ms == 2000
+
+
+def test_parse_notion_dashboard_review_issues_env_falls_back_to_default():
+    """review_issues_db_id_env が空文字の場合は既定値にフォールバック（#36）"""
+    cfg = _parse_notion_dashboard_config({
+        "notion_dashboard": {"review_issues_db_id_env": ""}
+    })
+    assert cfg.review_issues_db_id_env == "HOKUSAI_NOTION_REVIEW_ISSUES_DB_ID"
 
 
 def test_parse_notion_dashboard_clamps_extreme_values():
@@ -1297,6 +1309,48 @@ def test_dispatcher_review_issue_raised_requires_source_and_message(
     })
     assert result is True
     assert api.calls == []
+
+
+def test_dispatcher_review_issue_raised_resolves_workflow_relation(
+    store: SQLiteStore, monkeypatch
+):
+    """workflow_id が Workflows DB に存在する場合、Workflow relation を張る（#36 / PR #37）"""
+    monkeypatch.setenv("TEST_TOKEN", "secret")
+    monkeypatch.setenv("TEST_DB", "wf-db")
+    monkeypatch.setenv("TEST_REVIEW_ISSUES_DB", "ri-db")
+
+    cfg = _make_config()
+    cfg.review_issues_db_id_env = "TEST_REVIEW_ISSUES_DB"
+
+    # workflows_db._find_page_id がヒットを返す + Review Issues DB の dedupe
+    # 検索は空（新規作成パス）。_RecordingAPI は単一の query_result を使い回す
+    # ため、workflows_db への lookup と review_issues_db への lookup の両方が
+    # 同じ結果を返してしまうが、Review Issues 側は dedupe_key で検索するため
+    # 「既存ページがある」と解釈されて update_page にルートする。テストの
+    # 目的は Workflow relation の resolution なので update でも payload を
+    # 検証可能。
+    api = _RecordingAPI(query_result=[{"id": "wf-existing-page"}])
+
+    class _Disp(NotionSyncDispatcher):
+        def _get_api(self):
+            return api  # type: ignore[return-value]
+
+    disp = _Disp(store=store, config=cfg)
+    result = disp.dispatch("review_issue_raised", {
+        "workflow_id": "wf-1",
+        "source": "final_review",
+        "message": "Missing validation",
+        "rule": "P01",
+        "repository": "Backend",
+    })
+    assert result is True
+
+    # update / create のどちらかに Workflow relation が含まれる
+    write_calls = [c for c in api.calls if c[0] in ("create", "update")]
+    assert len(write_calls) == 1
+    payload = write_calls[0][1]
+    props = payload["properties"]
+    assert props["Workflow"] == {"relation": [{"id": "wf-existing-page"}]}
 
 
 # ---------------------------------------------------------------------------

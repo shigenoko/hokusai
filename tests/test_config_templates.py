@@ -208,6 +208,7 @@ def test_profile_config_template_parses_via_hokusai_loaders():
             "Notion API token env 変数名": "DEMO_NOTION_API_TOKEN",
             "Workflows DB id env 変数名": "DEMO_NOTION_WORKFLOWS_DB_ID",
             "PR DB id env 変数名": "DEMO_NOTION_PR_DB_ID",
+            "Review Issues DB id env 変数名": "DEMO_NOTION_REVIEW_ISSUES_DB_ID",
             "Figma API token env 変数名": "DEMO_FIGMA_API_TOKEN",
             "Miro API token env 変数名": "DEMO_MIRO_API_TOKEN",
             "Miro team id env 変数名": "DEMO_MIRO_TEAM_ID",

@@ -311,8 +311,12 @@ def _build_verification_review_issue_payloads(
     """Phase 6 verification 失敗エントリから Review Issues DB 送信用 payload を作る。
 
     失敗 1 件につき 1 payload を生成する。重複は Notion 側 dedupe_key
-    （rule + file + message の hash）で抑止される。operator は workflow.py の
-    drain ロジックが dispatch 直前に補う。
+    （source + repository + rule + file + message の hash）で抑止される。
+    operator は workflow.py の drain ロジックが dispatch 直前に補う。
+
+    dedupe_key を payload に含めることで、workflow.py 側で per-issue な
+    idempotency_key を構築できる（複数指摘の outbox 集約崩壊を防ぐ。PR #37
+    Copilot 指摘）。
 
     Args:
         verification_errors: list[VerificationErrorEntry]
@@ -321,6 +325,8 @@ def _build_verification_review_issue_payloads(
     Returns:
         dispatcher の review_issue_raised payload list
     """
+    from ..integrations.notion_dashboard.review_issues_db import build_dedupe_key
+
     workflow_id = state.get("workflow_id") or ""
     payloads: list[dict] = []
     for entry in verification_errors:
@@ -335,6 +341,13 @@ def _build_verification_review_issue_payloads(
             message = first_line if first_line else f"{repo_name}:{command} failed"
         else:
             message = f"{repo_name}:{command} failed"
+        dedupe_key = build_dedupe_key(
+            source="verification_failure",
+            rule=command,
+            file=None,
+            message=message,
+            repository=repo_name,
+        )
         payloads.append({
             "workflow_id": workflow_id,
             "source": "verification_failure",
@@ -343,6 +356,7 @@ def _build_verification_review_issue_payloads(
             "status": "open",
             "rule": command,
             "repository": repo_name,
+            "dedupe_key": dedupe_key,
         })
     return payloads
 

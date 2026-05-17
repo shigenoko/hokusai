@@ -89,6 +89,37 @@ def test_phase7_payloads_does_not_include_operator():
     assert "operator" not in payloads[0]
 
 
+def test_phase7_payloads_include_dedupe_key_with_repository():
+    """payload に dedupe_key を含め、repository が hash 入力に反映される（PR #37 Copilot 指摘）"""
+    review_by_repo = {
+        "Backend": {
+            "passed": False,
+            "issues": [],
+            "rules": {
+                "P01": {"name": "x", "result": "NG", "note": ""},
+            },
+        },
+        "Frontend": {
+            "passed": False,
+            "issues": [],
+            "rules": {
+                "P01": {"name": "x", "result": "NG", "note": ""},
+            },
+        },
+    }
+    payloads = _build_review_issue_payloads(review_by_repo, {"workflow_id": "wf"})
+    assert len(payloads) == 2
+    backend = next(p for p in payloads if p["repository"] == "Backend")
+    frontend = next(p for p in payloads if p["repository"] == "Frontend")
+    # dedupe_key が含まれる
+    assert "dedupe_key" in backend
+    assert "dedupe_key" in frontend
+    # 16 hex 文字
+    assert len(backend["dedupe_key"]) == 16
+    # 同じ source / rule / message でも repository が違うと別キー
+    assert backend["dedupe_key"] != frontend["dedupe_key"]
+
+
 # ---------------------------------------------------------------------------
 # Phase 6: _build_verification_review_issue_payloads
 # ---------------------------------------------------------------------------
@@ -146,3 +177,28 @@ def test_phase6_payloads_skips_successful_entries():
     ]
     payloads = _build_verification_review_issue_payloads(errors, {"workflow_id": "wf"})
     assert payloads == []
+
+
+def test_phase6_payloads_include_dedupe_key_with_repository():
+    """payload に dedupe_key を含め、repository 違いで別キーになる（PR #37 Copilot 指摘）"""
+    errors = [
+        {
+            "repository": "Backend",
+            "command": "build",
+            "success": False,
+            "error_output": "same error message",
+        },
+        {
+            "repository": "Frontend",
+            "command": "build",
+            "success": False,
+            "error_output": "same error message",
+        },
+    ]
+    payloads = _build_verification_review_issue_payloads(errors, {"workflow_id": "wf"})
+    assert len(payloads) == 2
+    backend = next(p for p in payloads if p["repository"] == "Backend")
+    frontend = next(p for p in payloads if p["repository"] == "Frontend")
+    assert "dedupe_key" in backend
+    assert "dedupe_key" in frontend
+    assert backend["dedupe_key"] != frontend["dedupe_key"]

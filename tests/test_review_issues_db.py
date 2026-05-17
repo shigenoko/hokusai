@@ -105,6 +105,25 @@ def test_build_dedupe_key_differs_for_different_source():
     assert k_a != k_b
 
 
+def test_build_dedupe_key_differs_for_different_repository():
+    """同じ source / rule / message でも repository が違えば別キー（PR #37 Copilot 指摘）"""
+    k_backend = build_dedupe_key(
+        source="final_review",
+        rule="P01",
+        file=None,
+        message="same",
+        repository="Backend",
+    )
+    k_frontend = build_dedupe_key(
+        source="final_review",
+        rule="P01",
+        file=None,
+        message="same",
+        repository="Frontend",
+    )
+    assert k_backend != k_frontend
+
+
 def test_build_dedupe_key_handles_none_inputs():
     k = build_dedupe_key(source="ci_failure", rule=None, file=None, message="boom")
     assert len(k) == 16

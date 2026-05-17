@@ -321,6 +321,16 @@ def test_setup_raises_when_pr_db_fails():
         setup_notion_workspace("token", "parent", api_client=client)
 
 
+def test_setup_raises_when_review_issues_db_fails():
+    """Review Issues DB 作成失敗時に NotionSetupError でラップされる（#36）"""
+    client = _RecordingClient(fail_on="review_issues")
+    with pytest.raises(NotionSetupError, match="Review Issues DB"):
+        setup_notion_workspace("token", "parent", api_client=client)
+    # Workflows / PR は作成済み、Review Issues で失敗するので 3 回の create_database
+    actions = [c[0] for c in client.calls]
+    assert actions == ["create_database", "create_database", "create_database"]
+
+
 def test_setup_raises_when_response_missing_id(monkeypatch):
     """API レスポンスに id が無いケース"""
 
@@ -811,6 +821,42 @@ def test_persist_env_vars_creates_file_when_missing(tmp_path, sample_ids):
     assert result["backup_path"] is None  # 元ファイルが無いのでバックアップ無し
 
 
+def test_persist_env_vars_writes_review_issues_db_id_when_present(tmp_path):
+    """Review Issues DB ID が ids に含まれる場合は rc に書き込む（#36）"""
+    from hokusai.integrations.notion_dashboard.setup import persist_env_vars
+
+    rc = tmp_path / "test.zshrc"
+    ids = {
+        "workflows_db_id": "wf-id",
+        "pull_requests_db_id": "pr-id",
+        "review_issues_db_id": "ri-id",
+    }
+    persist_env_vars(rc, ids)
+    content = rc.read_text()
+    assert 'HOKUSAI_NOTION_REVIEW_ISSUES_DB_ID="ri-id"' in content
+
+
+def test_persist_env_vars_skips_review_issues_line_when_absent(tmp_path, sample_ids):
+    """旧呼び出し（ids に review_issues_db_id 無し）でも壊れず、行を出力しない"""
+    from hokusai.integrations.notion_dashboard.setup import persist_env_vars
+
+    rc = tmp_path / "test.zshrc"
+    persist_env_vars(rc, sample_ids)
+    content = rc.read_text()
+    assert "HOKUSAI_NOTION_REVIEW_ISSUES_DB_ID" not in content
+
+
+def test_persist_env_vars_rejects_invalid_review_issues_env_name(tmp_path, sample_ids):
+    """review_issues_env_name のシェル変数名バリデーション"""
+    from hokusai.integrations.notion_dashboard.setup import persist_env_vars
+
+    rc = tmp_path / "test.zshrc"
+    with pytest.raises(ValueError, match="review_issues_env_name"):
+        persist_env_vars(
+            rc, sample_ids, review_issues_env_name="INVALID NAME"
+        )
+
+
 def test_persist_env_vars_preserves_existing_content_around_block(tmp_path, sample_ids):
     """既存の前後コンテンツを破壊しない"""
     from hokusai.integrations.notion_dashboard.setup import persist_env_vars
@@ -852,6 +898,7 @@ def test_cli_handler_persist_writes_to_rc(capsys, monkeypatch, tmp_path):
         return {
             "workflows_db_id": "wfNEW",
             "pull_requests_db_id": "prNEW",
+            "review_issues_db_id": "riNEW",
         }
 
     monkeypatch.setattr(
@@ -872,11 +919,16 @@ def test_cli_handler_persist_writes_to_rc(capsys, monkeypatch, tmp_path):
     out = capsys.readouterr().out
     assert rc_code == 0
     assert "追記しました" in out or "更新しました" in out
-    # rc ファイルに ID が書き込まれている
+    # 標準出力に Review Issues DB が含まれる（CLI 表示の回帰防止）
+    assert "Review Issues DB:" in out
+    assert "riNEW" in out
+    # rc ファイルに 3 種すべての ID が書き込まれている
     assert rc.exists()
     content = rc.read_text()
     assert "wfNEW" in content
     assert "prNEW" in content
+    assert "riNEW" in content
+    assert "HOKUSAI_NOTION_REVIEW_ISSUES_DB_ID" in content
 
 
 def test_cli_handler_persist_disabled_shows_hint(capsys, monkeypatch):
