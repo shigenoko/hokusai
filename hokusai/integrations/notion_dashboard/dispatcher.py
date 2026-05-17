@@ -19,9 +19,15 @@ from typing import Any
 from ...logging_config import get_logger
 from .client import NotionAPIClient, NotionAPIError, NotionRateLimitError
 from .pull_requests_db import PullRequestsDBClient
+from .review_issues_db import ReviewIssuesDBClient
 from .workflows_db import WorkflowsDBClient
 
 logger = get_logger("integrations.notion_dashboard.dispatcher")
+
+
+# Review Issue 発火イベント。Phase 6 verification failure / Phase 7 final review 等
+# から dispatch される。payload 構造は _handle_review_issue_raised を参照。
+EVENT_REVIEW_ISSUE_RAISED = "review_issue_raised"
 
 
 class NotionSyncDispatcher:
@@ -38,6 +44,7 @@ class NotionSyncDispatcher:
         self._api: NotionAPIClient | None = None
         self._workflows_db: WorkflowsDBClient | None = None
         self._pull_requests_db: PullRequestsDBClient | None = None
+        self._review_issues_db: ReviewIssuesDBClient | None = None
 
     def is_configured(self) -> bool:
         """設定が enabled で、必要な環境変数が揃っているかを返す。"""
@@ -170,6 +177,12 @@ class NotionSyncDispatcher:
                 payload, exclude_idempotency_key=exclude_idempotency_key
             )
             self._handle_pr_created(payload)
+            return
+
+        if event_type == EVENT_REVIEW_ISSUE_RAISED:
+            # Review Issues DB 系は Workflows DB の Last Sync / Sync Errors とは
+            # 別軸の同期。enrich は不要。
+            self._handle_review_issue_raised(payload)
             return
 
         # 後方互換: 旧 Service Status sync が outbox に積んだ
@@ -329,6 +342,70 @@ class NotionSyncDispatcher:
                 created_at=pr.get("created_at"),
             )
 
+    def _handle_review_issue_raised(self, payload: dict[str, Any]) -> None:
+        """Review Issue 発火イベントを Review Issues DB に upsert する。
+
+        Review Issues DB の database_id が未設定の場合はスキップ。Workflow relation
+        は workflows_db への lookup で workflow_page_id を取得して張る（取得失敗
+        時は relation 無しで作成。後から手動で結び直せる）。
+
+        payload 構造:
+            workflow_id: str (required)
+            source: str (required) — review_issues_db.SOURCE_* のいずれか
+            message: str (required)
+            severity: str (default "medium")
+            status: str (default "open")
+            rule: str | None
+            file: str | None
+            repository: str | None
+            operator: str | None
+            dedupe_key: str | None — 省略時は build_dedupe_key で生成
+            title: str | None — 省略時は source + file + summary で生成
+        """
+        review_db_id = os.environ.get(self._config.review_issues_db_id_env, "").strip()
+        if not review_db_id:
+            logger.debug(
+                "Review Issues DB ID が未設定のため Review Issue 同期をスキップ"
+            )
+            return
+
+        source = payload.get("source")
+        message = payload.get("message")
+        if not source or not message:
+            logger.warning(
+                "review_issue_raised に source / message が無いためスキップ"
+            )
+            return
+
+        workflow_id = payload.get("workflow_id")
+        workflow_page_id: str | None = None
+        if workflow_id:
+            try:
+                workflow_page_id = self._get_workflows_client()._find_page_id(
+                    workflow_id
+                )
+            except Exception as e:
+                logger.debug(
+                    f"workflow page_id 解決失敗（relation なしで作成）: "
+                    f"workflow_id={workflow_id}, error={e}"
+                )
+                workflow_page_id = None
+
+        client = self._get_review_issues_client(review_db_id)
+        client.upsert_record(
+            source=str(source),
+            message=str(message),
+            severity=str(payload.get("severity") or "medium"),
+            status=str(payload.get("status") or "open"),
+            rule=payload.get("rule"),
+            file=payload.get("file"),
+            repository=payload.get("repository"),
+            workflow_page_id=workflow_page_id,
+            operator=payload.get("operator"),
+            dedupe_key=payload.get("dedupe_key"),
+            title=payload.get("title"),
+        )
+
     def _enqueue_failure(
         self,
         idempotency_key: str,
@@ -398,6 +475,14 @@ class NotionSyncDispatcher:
                 database_id=database_id,
             )
         return self._pull_requests_db
+
+    def _get_review_issues_client(self, database_id: str) -> ReviewIssuesDBClient:
+        if self._review_issues_db is None:
+            self._review_issues_db = ReviewIssuesDBClient(
+                api=self._get_api(),
+                database_id=database_id,
+            )
+        return self._review_issues_db
 
     def _get_api(self) -> NotionAPIClient:
         if self._api is None:

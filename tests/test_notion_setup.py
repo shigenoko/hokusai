@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from hokusai.integrations.notion_dashboard.setup import (
     NotionSetupError,
     PULL_REQUESTS_DB_TITLE,
+    REVIEW_ISSUES_DB_TITLE,
     WORKFLOWS_DB_TITLE,
     scaffold_notion_workspace,
     setup_notion_workspace,
@@ -30,11 +31,13 @@ class _RecordingClient:
         *,
         workflows_id: str = "wf-db-id",
         pr_id: str = "pr-db-id",
+        review_issues_id: str = "ri-db-id",
         fail_on: str | None = None,
     ):
         self.calls: list[tuple[str, dict]] = []
         self._workflows_id = workflows_id
         self._pr_id = pr_id
+        self._review_issues_id = review_issues_id
         self._fail_on = fail_on
 
     def create_database(self, payload: dict) -> dict:
@@ -44,9 +47,13 @@ class _RecordingClient:
             raise RuntimeError("workflows db creation failed")
         if self._fail_on == "pull_requests" and "Pull Requests" in title:
             raise RuntimeError("pr db creation failed")
+        if self._fail_on == "review_issues" and "Review Issues" in title:
+            raise RuntimeError("review issues db creation failed")
         if "Workflows" in title:
             return {"id": self._workflows_id}
-        return {"id": self._pr_id}
+        if "Pull Requests" in title:
+            return {"id": self._pr_id}
+        return {"id": self._review_issues_id}
 
 
 # ---------------------------------------------------------------------------
@@ -65,21 +72,22 @@ def test_setup_rejects_empty_parent_page_id():
 
 
 # ---------------------------------------------------------------------------
-# 正常系: 2 つのリソース作成
+# 正常系: 3 つのリソース作成
 # ---------------------------------------------------------------------------
 
 
-def test_setup_creates_two_resources_in_order():
+def test_setup_creates_three_resources_in_order():
     client = _RecordingClient()
     result = setup_notion_workspace(
         "token", "parent-page-id", api_client=client
     )
 
     actions = [c[0] for c in client.calls]
-    # Workflows DB → Pull Requests DB の順
-    assert actions == ["create_database", "create_database"]
+    # Workflows DB → Pull Requests DB → Review Issues DB の順
+    assert actions == ["create_database", "create_database", "create_database"]
     assert result["workflows_db_id"] == "wf-db-id"
     assert result["pull_requests_db_id"] == "pr-db-id"
+    assert result["review_issues_db_id"] == "ri-db-id"
 
 
 def test_setup_workflows_db_payload_includes_description_warning():
@@ -1816,7 +1824,7 @@ def test_setup_workspace_without_scaffold_does_not_create_pages():
     """scaffold=False（既定）なら DB のみ作成、ページは作らない"""
     client = _DBPlusScaffoldClient()
     result = setup_notion_workspace("token", "parent", api_client=client)
-    assert client.create_database_calls == 2  # Workflows + PR
+    assert client.create_database_calls == 3  # Workflows + PR + Review Issues
     assert client.create_page_calls == []
     assert "scaffold" not in result
 
@@ -1827,7 +1835,7 @@ def test_setup_workspace_with_scaffold_creates_both():
     result = setup_notion_workspace(
         "token", "parent", scaffold=True, api_client=client
     )
-    assert client.create_database_calls == 2
+    assert client.create_database_calls == 3
     assert len(client.create_page_calls) == 4  # ハブ + サブ 3
     assert "scaffold" in result
     assert len(result["scaffold"]["created"]) == 4
