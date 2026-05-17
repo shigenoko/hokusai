@@ -823,6 +823,35 @@ class WorkflowRunner:
                 except Exception as sync_err:
                     logger.debug(f"Notion 同期中のエラーを抑制: {sync_err}")
 
+                # Review Issues DB 同期キューの drain（#36 / v0.5.0）
+                # Phase 6 / Phase 7 が pending_review_issues に積んだ payload を
+                # dispatch して、state からは取り除く。同一 dedupe_key で重複
+                # enqueue されても Notion 側で upsert されるので問題ない。
+                # operator は dispatch 直前に whoami / env で解決して補う。
+                try:
+                    pending = current_state.values.get("pending_review_issues") or []
+                    if pending:
+                        operator = (
+                            resolve_operator_name()
+                            if self.notion_dispatcher.is_configured()
+                            else None
+                        )
+                        for payload in pending:
+                            enriched = dict(payload)
+                            if operator and "operator" not in enriched:
+                                enriched["operator"] = operator
+                            self._safe_notion_dispatch(
+                                "review_issue_raised", enriched
+                            )
+                        # state から drain（永続化は次のループで行われる）
+                        self.compiled_workflow.update_state(
+                            config, {"pending_review_issues": []}
+                        )
+                except Exception as ri_err:
+                    logger.debug(
+                        f"Review Issues 同期 drain 中のエラーを抑制: {ri_err}"
+                    )
+
                 # ループ検出: 同じフェーズが繰り返されているか
                 if current_phase:
                     phase_history.append(current_phase)

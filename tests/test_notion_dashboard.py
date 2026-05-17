@@ -1202,6 +1202,104 @@ def test_dispatcher_pr_created_skips_existing_prs(store: SQLiteStore, monkeypatc
 
 
 # ---------------------------------------------------------------------------
+# review_issue_raised イベントのルーティング（#36 / v0.5.0）
+# ---------------------------------------------------------------------------
+
+
+def test_dispatcher_review_issue_raised_skips_when_db_id_unset(
+    store: SQLiteStore, monkeypatch
+):
+    """Review Issues DB ID が未設定なら no-op で成功扱い"""
+    monkeypatch.setenv("TEST_TOKEN", "secret")
+    monkeypatch.setenv("TEST_DB", "wf-db")
+    monkeypatch.delenv("TEST_REVIEW_ISSUES_DB", raising=False)
+
+    cfg = _make_config()
+    cfg.review_issues_db_id_env = "TEST_REVIEW_ISSUES_DB"
+
+    api = _RecordingAPI()
+
+    class _Disp(NotionSyncDispatcher):
+        def _get_api(self):
+            return api  # type: ignore[return-value]
+
+    disp = _Disp(store=store, config=cfg)
+    result = disp.dispatch("review_issue_raised", {
+        "workflow_id": "wf-1",
+        "source": "final_review",
+        "message": "x",
+    })
+    assert result is True
+    # API は呼ばれない
+    assert api.calls == []
+
+
+def test_dispatcher_review_issue_raised_creates_record_via_review_issues_db(
+    store: SQLiteStore, monkeypatch
+):
+    """設定済みなら Review Issues DB に create_page される"""
+    monkeypatch.setenv("TEST_TOKEN", "secret")
+    monkeypatch.setenv("TEST_DB", "wf-db")
+    monkeypatch.setenv("TEST_REVIEW_ISSUES_DB", "ri-db")
+
+    cfg = _make_config()
+    cfg.review_issues_db_id_env = "TEST_REVIEW_ISSUES_DB"
+
+    # workflows_db._find_page_id が返す既存ページ + Review Issues DB の
+    # find_by_dedupe_key が返す空結果（新規作成パス）を兼ねる query_result
+    api = _RecordingAPI(query_result=None)
+
+    class _Disp(NotionSyncDispatcher):
+        def _get_api(self):
+            return api  # type: ignore[return-value]
+
+    disp = _Disp(store=store, config=cfg)
+    result = disp.dispatch("review_issue_raised", {
+        "workflow_id": "wf-1",
+        "source": "final_review",
+        "message": "Missing validation",
+        "severity": "high",
+        "rule": "P01",
+        "repository": "Backend",
+    })
+    assert result is True
+
+    creates = [c for c in api.calls if c[0] == "create"]
+    assert len(creates) == 1
+    props = creates[0][1]["properties"]
+    assert props["Source"]["select"]["name"] == "final_review"
+    assert props["Repository"]["select"]["name"] == "Backend"
+    assert props["Rule ID"]["rich_text"][0]["text"]["content"] == "P01"
+
+
+def test_dispatcher_review_issue_raised_requires_source_and_message(
+    store: SQLiteStore, monkeypatch
+):
+    """source / message 欠落時は API を呼ばずに no-op"""
+    monkeypatch.setenv("TEST_TOKEN", "secret")
+    monkeypatch.setenv("TEST_DB", "wf-db")
+    monkeypatch.setenv("TEST_REVIEW_ISSUES_DB", "ri-db")
+
+    cfg = _make_config()
+    cfg.review_issues_db_id_env = "TEST_REVIEW_ISSUES_DB"
+
+    api = _RecordingAPI()
+
+    class _Disp(NotionSyncDispatcher):
+        def _get_api(self):
+            return api  # type: ignore[return-value]
+
+    disp = _Disp(store=store, config=cfg)
+    # message 欠落
+    result = disp.dispatch("review_issue_raised", {
+        "workflow_id": "wf-1",
+        "source": "final_review",
+    })
+    assert result is True
+    assert api.calls == []
+
+
+# ---------------------------------------------------------------------------
 # WorkflowRunner: Notion sync hooks (top-level helpers)
 # ---------------------------------------------------------------------------
 

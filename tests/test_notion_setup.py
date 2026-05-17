@@ -223,6 +223,85 @@ def test_setup_pr_db_status_select_has_five_options():
 
 
 # ---------------------------------------------------------------------------
+# Review Issues DB schema（#36 / v0.5.0）
+# ---------------------------------------------------------------------------
+
+
+def test_setup_review_issues_db_payload_includes_description_warning():
+    client = _RecordingClient()
+    setup_notion_workspace("token", "parent", api_client=client)
+
+    ri_payload = client.calls[2][1]
+    title = ri_payload["title"][0]["text"]["content"]
+    assert title == REVIEW_ISSUES_DB_TITLE
+    text = ri_payload["description"][0]["text"]["content"]
+    assert "HOKUSAI が自動管理する DB" in text
+    assert "dedupe_key" in text
+
+
+def test_setup_review_issues_db_has_required_properties():
+    client = _RecordingClient()
+    setup_notion_workspace("token", "parent", api_client=client)
+
+    ri_payload = client.calls[2][1]
+    props = ri_payload["properties"]
+    for required in [
+        "Title",
+        "Source",
+        "Status",
+        "Severity",
+        "Repository",
+        "Workflow",
+        "Dedupe Key",
+        "Operator",
+        "Rule ID",
+        "File Path",
+        "Message",
+        "Created At",
+        "Last Updated",
+    ]:
+        assert required in props, f"missing Review Issues DB property: {required}"
+
+
+def test_setup_review_issues_source_select_includes_future_slots():
+    """後続機能（policy / llm_gateway / dependency）の枠が最初から含まれる"""
+    client = _RecordingClient()
+    setup_notion_workspace("token", "parent", api_client=client)
+
+    ri_payload = client.calls[2][1]
+    names = [
+        o["name"]
+        for o in ri_payload["properties"]["Source"]["select"]["options"]
+    ]
+    # MVP の 4 種
+    assert "final_review" in names
+    assert "verification_failure" in names
+    assert "copilot_review" in names
+    assert "ci_failure" in names
+    # 後続機能用の先行確保枠
+    assert "policy_violation" in names
+    assert "llm_gateway_block" in names
+    assert "dependency_vuln" in names
+    # 全 7 種
+    assert len(names) == 7
+
+
+def test_setup_review_issues_workflow_relation_points_to_workflows_db():
+    client = _RecordingClient()
+    setup_notion_workspace("token", "parent", api_client=client)
+
+    ri_payload = client.calls[2][1]
+    relation = ri_payload["properties"]["Workflow"]["relation"]
+    assert relation["database_id"] == "wf-db-id"
+
+
+def test_setup_review_issues_db_id_in_result():
+    client = _RecordingClient()
+    result = setup_notion_workspace("token", "parent", api_client=client)
+    assert result["review_issues_db_id"] == "ri-db-id"
+
+
+# ---------------------------------------------------------------------------
 # 失敗系
 # ---------------------------------------------------------------------------
 
