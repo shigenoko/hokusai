@@ -230,6 +230,57 @@ def test_upsert_record_updates_existing_when_dedupe_key_matches():
     assert "Last Updated" in payload["properties"]
 
 
+def test_upsert_record_does_not_overwrite_status_on_update():
+    """更新時は Status を payload に含めない（人手の waived / resolved を温存）
+
+    PR #37 Copilot 2 回目指摘: 再 dispatch で Status が default "open" に
+    巻き戻ると、人手の運用判断が消える。
+    """
+    api = _FakeAPI(existing_id="existing-page")
+    client = ReviewIssuesDBClient(api=api, database_id="db-id")
+    client.upsert_record(
+        source="final_review",
+        message="Missing validation",
+        status="open",  # 明示的に渡しても update 時は反映しない
+        rule="P01",
+    )
+    payload = api.update_calls[0][1]
+    assert "Status" not in payload["properties"]
+
+
+def test_upsert_record_sets_status_on_create():
+    """新規作成時は Status を初期値として書き込む"""
+    api = _FakeAPI(existing_id=None)
+    client = ReviewIssuesDBClient(api=api, database_id="db-id")
+    client.upsert_record(
+        source="final_review",
+        message="Missing validation",
+        status="open",
+        rule="P01",
+    )
+    props = api.create_calls[0]["properties"]
+    assert props["Status"] == {"select": {"name": "open"}}
+
+
+def test_upsert_record_uses_single_timestamp_for_created_and_last_updated():
+    """新規作成時、Created At と Last Updated は同一の datetime.now() を使う
+
+    PR #37 Copilot 2 回目指摘: 別々に now() を呼ぶと Created At が Last Updated
+    より遅れ得る。
+    """
+    api = _FakeAPI(existing_id=None)
+    client = ReviewIssuesDBClient(api=api, database_id="db-id")
+    client.upsert_record(
+        source="final_review",
+        message="Missing validation",
+        rule="P01",
+    )
+    props = api.create_calls[0]["properties"]
+    created_at = props["Created At"]["date"]["start"]
+    last_updated = props["Last Updated"]["date"]["start"]
+    assert created_at == last_updated
+
+
 def test_upsert_record_uses_explicit_dedupe_key():
     api = _FakeAPI(existing_id=None)
     client = ReviewIssuesDBClient(api=api, database_id="db-id")

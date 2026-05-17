@@ -181,6 +181,32 @@ hokusai --profile <profile_name> notion-migrate-schema
 | Created At | Date |
 | Last Updated | Date |
 
+#### Review Issues DB（v0.5.0〜 / #36）
+
+Phase 6 verification failure / Phase 7 final review NG ルール等の指摘を構造化レコードとして蓄積する DB。後続の Policy Governance / LLM Gateway / Dependency Governance からも共通 sink として書き込まれる予定（Source enum に枠を確保済み）。
+
+| プロパティ名 | 型 | 説明 |
+|---|---|---|
+| Title | Title | `[source] file — summary` 形式で自動生成 |
+| Source | Select | `final_review` / `verification_failure` / `copilot_review` / `ci_failure` / `policy_violation` / `llm_gateway_block` / `dependency_vuln` |
+| Status | Select | 初期 `open`。`waived` / `resolved` / `duplicate` への遷移は **人手の運用判断**で行う（HOKUSAI は再 dispatch 時に Status を上書きしない） |
+| Severity | Select | `critical` / `high` / `medium` / `low` / `info` |
+| Repository | Select | リポジトリ表示名（PR DB と揃える） |
+| Workflow | Relation（→ Workflows DB） | 関連 workflow へのリンク（dispatcher が自動解決） |
+| Dedupe Key | rich_text | `source + repository + rule + file + message` の sha256 16 桁 hex。同一指摘の重複作成を抑止 |
+| Operator | rich_text | workflow を起動した実行者（Issue #21 と整合） |
+| Rule ID | rich_text | linter rule / レビュー観点 ID |
+| File Path | rich_text | 該当ファイル（payload が file を持つ場合） |
+| Message | rich_text | 指摘本文（先頭 2000 文字） |
+| Created At | Date | 初回作成時刻（再 dispatch では更新しない） |
+| Last Updated | Date | 最終 upsert 時刻 |
+
+**運用上の留意点**:
+
+- **Status を `waived` / `resolved` にした指摘**: HOKUSAI が再度同じ workflow を実行しても、その dedupe_key にマッチする既存レコードの Status は上書きされない（v0.5.0 時点）。Status 以外（Severity / Message / Repository 等）は最新の dispatch 内容で更新される。
+- **既存 Notion ワークスペースへの追加（マイグレーション）**: v0.5.0 で 3 DB セット（Workflows / PR / Review Issues）を一括作成する `hokusai notion-setup` を新規実行する場合、**現在は単独で Review Issues DB のみを追加する CLI フローは未実装**。既存 Workflows DB を流用しつつ Review Issues DB だけ追加したいケースは、当面 Notion 上で手動 DB 作成 + プロパティ追加 + `HOKUSAI_NOTION_REVIEW_ISSUES_DB_ID` の env 設定で対応する（Issue 化候補）。
+- **DB ID が未設定の環境**: `HOKUSAI_NOTION_REVIEW_ISSUES_DB_ID` が空のときは Review Issue 同期だけが no-op になり、ワークフロー本体は停止しない（best effort）。
+
 ### 2.3. 環境変数の設定
 
 ```bash
@@ -188,6 +214,7 @@ hokusai --profile <profile_name> notion-migrate-schema
 export HOKUSAI_NOTION_API_TOKEN="secret_xxxxxxxxxx"
 export HOKUSAI_NOTION_WORKFLOWS_DB_ID="32桁のDB ID"
 export HOKUSAI_NOTION_PR_DB_ID="32桁のPR DB ID"
+export HOKUSAI_NOTION_REVIEW_ISSUES_DB_ID="32桁のReview Issues DB ID"  # v0.5.0〜
 ```
 
 DB ID は、Notion の URL の末尾 32 桁から取得できる。
@@ -200,6 +227,7 @@ notion_dashboard:
   api_token_env: HOKUSAI_NOTION_API_TOKEN
   workflows_db_id_env: HOKUSAI_NOTION_WORKFLOWS_DB_ID
   pull_requests_db_id_env: HOKUSAI_NOTION_PR_DB_ID
+  review_issues_db_id_env: HOKUSAI_NOTION_REVIEW_ISSUES_DB_ID  # v0.5.0〜
   sync_outbox:
     enabled: true
     max_retry_attempts: 10

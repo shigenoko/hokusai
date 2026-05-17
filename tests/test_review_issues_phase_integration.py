@@ -202,3 +202,33 @@ def test_phase6_payloads_include_dedupe_key_with_repository():
     assert "dedupe_key" in backend
     assert "dedupe_key" in frontend
     assert backend["dedupe_key"] != frontend["dedupe_key"]
+
+
+def test_phase6_dedupe_uses_full_error_output_not_just_first_line():
+    """先頭行が同じバナーで詳細が違う失敗を別レコードとして扱う
+
+    PR #37 Copilot 2 回目指摘: test runner が共通バナーを先頭行に出すと、
+    別ケースが同じ Notion ページに集約されてしまう。
+    """
+    banner = "==== test session starts ===="
+    errors = [
+        {
+            "repository": "Backend",
+            "command": "test",
+            "success": False,
+            "error_output": f"{banner}\nFAILED tests/test_a.py::test_alpha",
+        },
+        {
+            "repository": "Backend",
+            "command": "test",
+            "success": False,
+            "error_output": f"{banner}\nFAILED tests/test_b.py::test_beta",
+        },
+    ]
+    payloads = _build_verification_review_issue_payloads(errors, {"workflow_id": "wf"})
+    assert len(payloads) == 2
+    # message は先頭行（表示用、両方同じバナー）
+    assert payloads[0]["message"] == banner
+    assert payloads[1]["message"] == banner
+    # dedupe_key は detail 込みで違う（衝突回避）
+    assert payloads[0]["dedupe_key"] != payloads[1]["dedupe_key"]

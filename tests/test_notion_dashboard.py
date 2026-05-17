@@ -1545,12 +1545,174 @@ def test_safe_notion_dispatch_swallows_exceptions():
     """WorkflowRunner._safe_notion_dispatch は dispatcher の例外を握り潰す"""
     runner = _make_runner()
 
-    def raising(event_type, payload):
+    def raising(event_type, payload, **kwargs):
         raise RuntimeError("boom")
 
     runner.notion_dispatcher.dispatch = raising  # type: ignore[assignment]
     # 例外が漏れないこと
     runner._safe_notion_dispatch("phase_changed", {"workflow_id": "x"})
+
+
+# ---------------------------------------------------------------------------
+# WorkflowRunner._drain_pending_review_issues（#36 / PR #37 Copilot 2 回目）
+# ---------------------------------------------------------------------------
+
+
+class _CapturingDispatch:
+    """_safe_notion_dispatch を差し替えて event / payload / idempotency_key を記録"""
+
+    def __init__(self, runner):
+        self.calls: list[dict] = []
+
+        def fake(event_type, payload, *, idempotency_key=None):
+            self.calls.append({
+                "event_type": event_type,
+                "payload": payload,
+                "idempotency_key": idempotency_key,
+            })
+
+        runner._safe_notion_dispatch = fake  # type: ignore[method-assign]
+
+
+class _FakeCompiledWorkflow:
+    """compiled_workflow の update_state を記録するスタブ"""
+
+    def __init__(self):
+        self.update_state_calls: list[tuple[dict, dict]] = []
+
+    def update_state(self, config: dict, values: dict) -> None:
+        self.update_state_calls.append((config, values))
+
+
+def test_drain_pending_review_issues_no_op_when_empty():
+    runner = _make_runner()
+    capt = _CapturingDispatch(runner)
+    runner.compiled_workflow = _FakeCompiledWorkflow()  # type: ignore[assignment]
+
+    n = runner._drain_pending_review_issues(
+        {"pending_review_issues": []}, {"thread": "x"}
+    )
+    assert n == 0
+    assert capt.calls == []
+    assert runner.compiled_workflow.update_state_calls == []
+
+
+def test_drain_pending_review_issues_dispatches_each_with_per_issue_idempotency_key():
+    """複数の pending 指摘を per-issue idempotency_key で dispatch する"""
+    runner = _make_runner()
+    capt = _CapturingDispatch(runner)
+    fake_cw = _FakeCompiledWorkflow()
+    runner.compiled_workflow = fake_cw  # type: ignore[assignment]
+
+    pending = [
+        {
+            "workflow_id": "wf-1",
+            "source": "final_review",
+            "message": "msg1",
+            "rule": "P01",
+            "repository": "Backend",
+            "dedupe_key": "dkey-alpha",
+        },
+        {
+            "workflow_id": "wf-1",
+            "source": "verification_failure",
+            "message": "msg2",
+            "rule": "test",
+            "repository": "Backend",
+            "dedupe_key": "dkey-beta",
+        },
+    ]
+    n = runner._drain_pending_review_issues(
+        {"pending_review_issues": pending, "operator": "alice"},
+        {"thread": "x"},
+    )
+    assert n == 2
+    assert len(capt.calls) == 2
+    assert capt.calls[0]["event_type"] == "review_issue_raised"
+    # idempotency_key は per-issue で dedupe_key を含む
+    assert capt.calls[0]["idempotency_key"] == "wf-1:review_issue_raised:dkey-alpha"
+    assert capt.calls[1]["idempotency_key"] == "wf-1:review_issue_raised:dkey-beta"
+    # state["operator"] が enrich される
+    assert capt.calls[0]["payload"]["operator"] == "alice"
+    assert capt.calls[1]["payload"]["operator"] == "alice"
+    # drain 後に state を clear
+    assert len(fake_cw.update_state_calls) == 1
+    assert fake_cw.update_state_calls[0][1] == {"pending_review_issues": []}
+
+
+def test_drain_pending_review_issues_prefers_state_operator_over_resolve(monkeypatch):
+    """state["operator"] が set されていれば resolve_operator_name は呼ばない
+
+    PR #37 Copilot 2 回目指摘: workflow_started 時の operator と一貫させる。
+    """
+    runner = _make_runner()
+    capt = _CapturingDispatch(runner)
+    runner.compiled_workflow = _FakeCompiledWorkflow()  # type: ignore[assignment]
+
+    resolve_called = []
+    monkeypatch.setattr(
+        workflow_module,
+        "resolve_operator_name",
+        lambda: resolve_called.append(1) or "should-not-be-used",
+    )
+
+    pending = [{"workflow_id": "wf-1", "dedupe_key": "k", "source": "x", "message": "m"}]
+    runner._drain_pending_review_issues(
+        {"pending_review_issues": pending, "operator": "from-state"},
+        {"thread": "x"},
+    )
+    # resolve_operator_name は呼ばれない
+    assert resolve_called == []
+    # state の operator が enrich される
+    assert capt.calls[0]["payload"]["operator"] == "from-state"
+
+
+def test_drain_pending_review_issues_falls_back_to_resolve_when_state_empty(monkeypatch):
+    """state["operator"] が無く dispatcher 設定済みなら resolve_operator_name で補う"""
+    runner = _make_runner()
+    capt = _CapturingDispatch(runner)
+    runner.compiled_workflow = _FakeCompiledWorkflow()  # type: ignore[assignment]
+    # is_configured を True に
+    runner.notion_dispatcher.is_configured = lambda: True  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        workflow_module, "resolve_operator_name", lambda: "fallback-user"
+    )
+
+    pending = [{"workflow_id": "wf-1", "dedupe_key": "k", "source": "x", "message": "m"}]
+    runner._drain_pending_review_issues(
+        {"pending_review_issues": pending}, {"thread": "x"}
+    )
+    assert capt.calls[0]["payload"]["operator"] == "fallback-user"
+
+
+def test_drain_pending_review_issues_idempotency_key_none_when_missing_dedupe():
+    """dedupe_key が無い payload は idempotency_key=None で dispatch（fallback 安全）"""
+    runner = _make_runner()
+    capt = _CapturingDispatch(runner)
+    runner.compiled_workflow = _FakeCompiledWorkflow()  # type: ignore[assignment]
+
+    pending = [{"workflow_id": "wf-1", "source": "x", "message": "m"}]
+    runner._drain_pending_review_issues(
+        {"pending_review_issues": pending}, {"thread": "x"}
+    )
+    assert capt.calls[0]["idempotency_key"] is None
+
+
+def test_drain_pending_review_issues_swallows_exceptions():
+    """drain 内の例外は best effort で握り潰す"""
+    runner = _make_runner()
+    runner.compiled_workflow = _FakeCompiledWorkflow()  # type: ignore[assignment]
+
+    def raising(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    runner._safe_notion_dispatch = raising  # type: ignore[method-assign]
+
+    # 例外が漏れず 0 を返すこと（n=0 でないかも、内部実装次第。少なくとも raise しない）
+    pending = [{"workflow_id": "wf-1", "dedupe_key": "k", "source": "x", "message": "m"}]
+    runner._drain_pending_review_issues(
+        {"pending_review_issues": pending}, {"thread": "x"}
+    )
 
 
 # ---------------------------------------------------------------------------

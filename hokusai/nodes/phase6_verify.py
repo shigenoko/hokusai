@@ -335,23 +335,30 @@ def _build_verification_review_issue_payloads(
         repo_name = entry.get("repository") or ""
         command = entry.get("command") or ""
         error_output = (entry.get("error_output") or "").strip()
-        # message は error_output の先頭行を採用（dedupe_key が長すぎて衝突しないように）
+        # 表示用 message は error_output の先頭行（タイトルとして可読）。
         if error_output:
             first_line = error_output.splitlines()[0]
-            message = first_line if first_line else f"{repo_name}:{command} failed"
+            display_message = (
+                first_line if first_line else f"{repo_name}:{command} failed"
+            )
         else:
-            message = f"{repo_name}:{command} failed"
+            display_message = f"{repo_name}:{command} failed"
+        # dedupe_key には error_output 全文を使う（PR #37 Copilot 2 回目指摘）。
+        # test runner などが共通バナーを先頭行に出すと、別ケースの失敗が同じ
+        # 先頭行を持って Notion 上で衝突する。全文を hash 入力に与えて、
+        # detail まで含めて判別する。fallback は表示 message と同じ文字列。
+        dedupe_input = error_output or display_message
         dedupe_key = build_dedupe_key(
             source="verification_failure",
             rule=command,
             file=None,
-            message=message,
+            message=dedupe_input,
             repository=repo_name,
         )
         payloads.append({
             "workflow_id": workflow_id,
             "source": "verification_failure",
-            "message": message,
+            "message": display_message,
             "severity": "high",
             "status": "open",
             "rule": command,

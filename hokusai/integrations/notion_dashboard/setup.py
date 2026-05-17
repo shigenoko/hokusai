@@ -79,12 +79,12 @@ _PULL_REQUESTS_DB_DESCRIPTION = (
 _REVIEW_ISSUES_DB_DESCRIPTION = (
     "⚠️ HOKUSAI が自動管理する DB です。レコードは HOKUSAI が Phase 6 verification "
     "failure / Phase 7 final review 等の指摘発生時に自動生成・更新します。dedupe_key "
-    "（rule + file + message の hash）で重複を抑止し、Source / Status / Severity / "
-    "Repository / Workflow / Dedupe Key / Operator / Rule ID / File Path / Message / "
-    "Created At / Last Updated を HOKUSAI が書き込みます。Status を waived / resolved に"
-    "するなどの運用判断は手動で許容しますが、その他プロパティの編集とスキーマ変更は"
-    "行わないでください。詳細は HOKUSAI 運用ガイド（docs/notion-dashboard-operation-guide.md）"
-    "を参照。"
+    "（source + repository + rule + file + message の hash）で重複を抑止し、Source / "
+    "Severity / Repository / Workflow / Dedupe Key / Operator / Rule ID / File Path / "
+    "Message / Created At / Last Updated を HOKUSAI が書き込みます。Status は新規作成"
+    "時のみ HOKUSAI が初期値 open を書き込み、その後の Status 編集（waived / resolved）"
+    "は人手の運用判断として HOKUSAI からの上書きを行いません。詳細は HOKUSAI 運用ガイド"
+    "（docs/notion-dashboard-operation-guide.md の Review Issues DB セクション）を参照。"
 )
 
 

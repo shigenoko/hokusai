@@ -271,15 +271,25 @@ class ReviewIssuesDBClient:
         title: str,
         is_new: bool,
     ) -> dict:
+        # Created At と Last Updated は同一の datetime.now() を使う。
+        # 別々に呼ぶと Created At が Last Updated より遅れて並びが逆転する
+        # 可能性があるため（PR #37 Copilot 2 回目指摘）。
+        now_iso = datetime.now().isoformat()
         props: dict[str, Any] = {
             "Title": _title(title),
             "Source": {"select": {"name": source}},
-            "Status": {"select": {"name": status}},
             "Severity": {"select": {"name": severity}},
             "Dedupe Key": _rich_text(dedupe_key),
             "Message": _rich_text(message),
-            "Last Updated": _date(datetime.now().isoformat()),
+            "Last Updated": _date(now_iso),
         }
+        # Status は新規作成時のみ書き込む。再 dispatch で人手の waived /
+        # resolved を default "open" に巻き戻さないため（PR #37 Copilot 2
+        # 回目指摘）。状態遷移を Agent から行う必要が出てきたら、明示的な
+        # state-transition API を新設する想定。
+        if is_new:
+            props["Status"] = {"select": {"name": status}}
+            props["Created At"] = _date(now_iso)
         if rule:
             props["Rule ID"] = _rich_text(rule)
         if file:
@@ -290,8 +300,6 @@ class ReviewIssuesDBClient:
             props["Workflow"] = {"relation": [{"id": workflow_page_id}]}
         if operator:
             props["Operator"] = _rich_text(operator)
-        if is_new:
-            props["Created At"] = _date(datetime.now().isoformat())
         return props
 
 

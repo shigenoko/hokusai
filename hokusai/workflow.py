@@ -126,6 +126,59 @@ class WorkflowRunner:
         except Exception as e:
             logger.debug(f"Notion 同期で例外を抑制: event={event_type}, error={e}")
 
+    def _drain_pending_review_issues(
+        self, state_values: dict, langgraph_config: dict
+    ) -> int:
+        """Phase 6 / Phase 7 が pending_review_issues に積んだ payload を Notion
+        Review Issues DB へ dispatch し、state からは clear する。
+
+        - operator は state["operator"]（workflow_started 時に確定）を優先採用し、
+          無ければ whoami / env で resolve（互換動作）。`hokusai continue` を別
+          ユーザが叩いた drain でも workflow_started 時の Operator と一貫させる
+          目的（PR #37 Copilot 2 回目指摘）。
+        - idempotency_key は per-issue（workflow_id:review_issue_raised:dedupe_key）。
+          既定キー（workflow_id:event:phase:revision）だと同じ phase の複数指摘が
+          1 つの outbox エントリに集約され、API 失敗時に取り違える問題があるため
+          （PR #37 Copilot 1 回目指摘）。
+        - すべての例外はワークフロー本体に伝播させない（best effort）。
+
+        Returns:
+            dispatch 試行した review_issue 件数（0 = drain なし）
+        """
+        try:
+            pending = state_values.get("pending_review_issues") or []
+            if not pending:
+                return 0
+            operator = state_values.get("operator")
+            if not operator and self.notion_dispatcher.is_configured():
+                operator = resolve_operator_name()
+            for payload in pending:
+                enriched = dict(payload)
+                if operator and "operator" not in enriched:
+                    enriched["operator"] = operator
+                wid = enriched.get("workflow_id") or ""
+                dkey = enriched.get("dedupe_key") or ""
+                idempotency_key = (
+                    f"{wid}:review_issue_raised:{dkey}"
+                    if (wid and dkey)
+                    else None
+                )
+                self._safe_notion_dispatch(
+                    "review_issue_raised",
+                    enriched,
+                    idempotency_key=idempotency_key,
+                )
+            # state から drain（永続化は次のループで行われる）
+            self.compiled_workflow.update_state(
+                langgraph_config, {"pending_review_issues": []}
+            )
+            return len(pending)
+        except Exception as ri_err:
+            logger.debug(
+                f"Review Issues 同期 drain 中のエラーを抑制: {ri_err}"
+            )
+            return 0
+
     def _enrich_state_with_notion_url(self, state: dict) -> dict:
         """Slack 通知向けに Notion ダッシュボードページ URL を state に補う。
 
@@ -332,6 +385,10 @@ class WorkflowRunner:
         # 複数エンジニア共有 profile 運用での「誰が動かしたか」を可視化する。
         # operator 解決は whoami 実行を含むため、Notion 同期が無効な環境では
         # 解決自体を skip して余計な遅延を避ける。
+        # PR #37 Copilot 2 回目: resolve した operator を state にも保存し、
+        # 後段の review_issue_raised drain など別タイミングで同じ workflow を
+        # 触る同期処理が `hokusai continue` を別ユーザが叩いた場合でも
+        # workflow_started 時の Operator と一貫した値を書けるようにする。
         started_overrides: dict[str, object] = {
             "status": "running",
             "current_phase_name": self.PHASE_NAMES.get(
@@ -339,7 +396,11 @@ class WorkflowRunner:
             ),
         }
         if self.notion_dispatcher.is_configured():
-            started_overrides["operator"] = resolve_operator_name()
+            started_operator = resolve_operator_name()
+            started_overrides["operator"] = started_operator
+            state["operator"] = started_operator
+            # operator 反映済み state を再永続化（drain 時に store から読まれる）
+            self.store.save_workflow(workflow_id, state)
         self._safe_notion_dispatch(
             "workflow_started",
             _build_notion_payload(state, **started_overrides),
@@ -838,45 +899,7 @@ class WorkflowRunner:
                     logger.debug(f"Notion 同期中のエラーを抑制: {sync_err}")
 
                 # Review Issues DB 同期キューの drain（#36 / v0.5.0）
-                # Phase 6 / Phase 7 が pending_review_issues に積んだ payload を
-                # dispatch して、state からは取り除く。同一 dedupe_key で重複
-                # enqueue されても Notion 側で upsert されるので問題ない。
-                # operator は dispatch 直前に whoami / env で解決して補う。
-                # idempotency_key は per-issue（workflow_id:event:dedupe_key）で
-                # 構築し、複数指摘を 1 つの outbox エントリに集約してしまう既定
-                # キーの崩壊を防ぐ（PR #37 Copilot 指摘）。
-                try:
-                    pending = current_state.values.get("pending_review_issues") or []
-                    if pending:
-                        operator = (
-                            resolve_operator_name()
-                            if self.notion_dispatcher.is_configured()
-                            else None
-                        )
-                        for payload in pending:
-                            enriched = dict(payload)
-                            if operator and "operator" not in enriched:
-                                enriched["operator"] = operator
-                            wid = enriched.get("workflow_id") or ""
-                            dkey = enriched.get("dedupe_key") or ""
-                            idempotency_key = (
-                                f"{wid}:review_issue_raised:{dkey}"
-                                if (wid and dkey)
-                                else None
-                            )
-                            self._safe_notion_dispatch(
-                                "review_issue_raised",
-                                enriched,
-                                idempotency_key=idempotency_key,
-                            )
-                        # state から drain（永続化は次のループで行われる）
-                        self.compiled_workflow.update_state(
-                            config, {"pending_review_issues": []}
-                        )
-                except Exception as ri_err:
-                    logger.debug(
-                        f"Review Issues 同期 drain 中のエラーを抑制: {ri_err}"
-                    )
+                self._drain_pending_review_issues(current_state.values, config)
 
                 # ループ検出: 同じフェーズが繰り返されているか
                 if current_phase:
