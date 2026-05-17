@@ -49,6 +49,10 @@ PULL_REQUESTS_DB_TITLE = "Pull Requests DB"
 REVIEW_ISSUES_DB_TITLE = "Review Issues DB"
 
 
+# 各 DB スキーマで共通利用するプロパティ名定数（重複文字列を一元化）
+_PROP_LAST_UPDATED = "Last Updated"
+
+
 # ----- DB 説明（手動編集を抑止する警告文） ------------------------------
 # Notion 上で DB を開いた際の上部に常時表示される。スキーマ変更やレコード
 # 改変を防ぐため、許可される編集箇所を明示する。
@@ -138,7 +142,7 @@ _WORKFLOWS_DB_PROPERTIES: dict[str, dict[str, Any]] = {
     "Plan Page": {"url": {}},
     "Started At": {"date": {}},
     "Completed At": {"date": {}},
-    "Last Updated": {"date": {}},
+    _PROP_LAST_UPDATED: {"date": {}},
     "Last Sync": {"date": {}},
     "Sync Errors": {"rich_text": {}},
     "Error Summary": {"rich_text": {}},
@@ -182,7 +186,7 @@ def _pr_db_properties(workflows_db_id: str) -> dict[str, dict[str, Any]]:
         },
         "Reviewer": {"multi_select": {"options": []}},
         "Created At": {"date": {}},
-        "Last Updated": {"date": {}},
+        _PROP_LAST_UPDATED: {"date": {}},
     }
 
 
@@ -248,7 +252,7 @@ def _review_issues_db_properties(workflows_db_id: str) -> dict[str, dict[str, An
         "File Path": {"rich_text": {}},
         "Message": {"rich_text": {}},
         "Created At": {"date": {}},
-        "Last Updated": {"date": {}},
+        _PROP_LAST_UPDATED: {"date": {}},
     }
 
 

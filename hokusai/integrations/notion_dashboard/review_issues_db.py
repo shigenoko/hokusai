@@ -172,38 +172,65 @@ class ReviewIssuesDBClient:
         while True:
             attempts += 1
             try:
-                if existing_page_id is None:
-                    return self._api.create_page({
-                        "parent": {"database_id": self._database_id},
-                        "properties": current_props,
-                    })
-                return self._api.update_page(
-                    existing_page_id, {"properties": current_props}
-                )
+                return self._create_or_update(existing_page_id, current_props)
             except NotionAPIError as exc:
                 if not _is_property_not_found(exc):
                     raise
-                if attempts >= max_attempts:
-                    logger.warning(
-                        "property_not_found リトライ上限に到達: 残プロパティ数=%d",
-                        len(current_props),
-                    )
-                    raise
-                missing = _extract_missing_property(exc.message, current_props)
-                if missing is None:
-                    logger.warning(
-                        "property_not_found 検知だが対象プロパティを特定できず: %s",
-                        exc.message[:200],
-                    )
-                    raise
-                logger.info(
-                    "Review Issues DB に '%s' プロパティが存在しないため除外して再試行",
-                    missing,
+                self._prune_missing_or_raise(
+                    exc, current_props, attempts, max_attempts
                 )
-                current_props.pop(missing, None)
-                if not current_props:
-                    logger.warning("除外後にプロパティが空になったため処理を中断")
-                    raise
+
+    def _create_or_update(
+        self, existing_page_id: str | None, current_props: dict
+    ) -> dict:
+        """既存ページ ID の有無で create / update を切り替える単純な分岐。"""
+        if existing_page_id is None:
+            return self._api.create_page({
+                "parent": {"database_id": self._database_id},
+                "properties": current_props,
+            })
+        return self._api.update_page(
+            existing_page_id, {"properties": current_props}
+        )
+
+    @staticmethod
+    def _prune_missing_or_raise(
+        exc: NotionAPIError,
+        current_props: dict,
+        attempts: int,
+        max_attempts: int,
+    ) -> None:
+        """property_not_found エラーに対応して current_props から該当プロパティを除外。
+
+        以下のいずれかで例外を伝播させる:
+        - リトライ上限に到達
+        - メッセージから対象プロパティを特定できない
+        - 除外後に残プロパティが 0 になった
+
+        いずれでもなければ current_props を mutate して return（呼び出し側ループが
+        次の attempt を実行する）。
+        """
+        if attempts >= max_attempts:
+            logger.warning(
+                "property_not_found リトライ上限に到達: 残プロパティ数=%d",
+                len(current_props),
+            )
+            raise exc
+        missing = _extract_missing_property(exc.message, current_props)
+        if missing is None:
+            logger.warning(
+                "property_not_found 検知だが対象プロパティを特定できず: %s",
+                exc.message[:200],
+            )
+            raise exc
+        logger.info(
+            "Review Issues DB に '%s' プロパティが存在しないため除外して再試行",
+            missing,
+        )
+        current_props.pop(missing, None)
+        if not current_props:
+            logger.warning("除外後にプロパティが空になったため処理を中断")
+            raise exc
 
     @staticmethod
     def _build_properties(
@@ -247,7 +274,9 @@ class ReviewIssuesDBClient:
 
 def _build_title(*, source: str, file: str | None, message: str) -> str:
     """`[source] file — first-line-of-message` 形式の表示タイトルを生成する。"""
-    summary = (message or "").strip().splitlines()[0] if message else ""
+    stripped = (message or "").strip()
+    # `"".splitlines()` は [] を返すので空文字判定後にインデックスする
+    summary = stripped.splitlines()[0] if stripped else ""
     if len(summary) > 120:
         summary = summary[:117] + "..."
     if file:
