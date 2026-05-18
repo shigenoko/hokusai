@@ -15,6 +15,7 @@ from .identification import (
     notion_db_url,
 )
 from .pull_requests_db import PullRequestsDBClient
+from .review_issues_db import ReviewIssuesDBClient, build_dedupe_key
 from .setup import (
     NotionSetupError,
     detect_shell_rc,
@@ -32,7 +33,9 @@ __all__ = [
     "NotionSetupError",
     "NotionSyncDispatcher",
     "PullRequestsDBClient",
+    "ReviewIssuesDBClient",
     "WorkflowsDBClient",
+    "build_dedupe_key",
     "build_notion_identification",
     "clear_bot_info_cache",
     "detect_shell_rc",

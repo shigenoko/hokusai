@@ -39,6 +39,7 @@ notion_dashboard:
   api_token_env: COMPANY_A_NOTION_API_TOKEN
   workflows_db_id_env: COMPANY_A_NOTION_WORKFLOWS_DB_ID
   pull_requests_db_id_env: COMPANY_A_NOTION_PR_DB_ID
+  review_issues_db_id_env: COMPANY_A_NOTION_REVIEW_ISSUES_DB_ID
   sync_outbox:
     enabled: true
     max_retry_attempts: 10

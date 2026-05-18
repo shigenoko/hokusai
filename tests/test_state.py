@@ -102,6 +102,28 @@ class TestCreateInitialState:
         assert "phase_page_status" not in state
         assert "phase_page_last_review_round" not in state
 
+    def test_pending_review_issues_initialized(self):
+        """pending_review_issues が空リストで初期化される（#36 / v0.5.0〜）
+
+        PR #37 Copilot 10 回目指摘: 新規 state に既定値が含まれない regression を
+        防ぐため、明示的に assert。
+        """
+        state = create_initial_state(
+            task_url="https://notion.so/test",
+            task_title="Test",
+        )
+        assert "pending_review_issues" in state
+        assert state["pending_review_issues"] == []
+
+    def test_operator_initialized_as_none(self):
+        """operator が None で初期化される（PR #37 Copilot 2/10 回目指摘）"""
+        state = create_initial_state(
+            task_url="https://notion.so/test",
+            task_title="Test",
+        )
+        assert "operator" in state
+        assert state["operator"] is None
+
 
 class TestRepositoryStatus:
     """repository_status フィールドのテスト"""

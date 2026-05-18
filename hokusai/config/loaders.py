@@ -261,6 +261,7 @@ def _parse_notion_dashboard_config(config_dict: dict) -> NotionDashboardConfig:
           api_token_env: HOKUSAI_NOTION_API_TOKEN
           workflows_db_id_env: HOKUSAI_NOTION_WORKFLOWS_DB_ID
           pull_requests_db_id_env: HOKUSAI_NOTION_PR_DB_ID
+          review_issues_db_id_env: HOKUSAI_NOTION_REVIEW_ISSUES_DB_ID
           sync_outbox:
             enabled: true
             max_retry_attempts: 10
@@ -298,6 +299,9 @@ def _parse_notion_dashboard_config(config_dict: dict) -> NotionDashboardConfig:
     pull_requests_db_id_env = _str_or_default(
         nd_raw.get("pull_requests_db_id_env"), defaults.pull_requests_db_id_env
     )
+    review_issues_db_id_env = _str_or_default(
+        nd_raw.get("review_issues_db_id_env"), defaults.review_issues_db_id_env
+    )
 
     sync_outbox = _parse_sync_outbox(nd_raw.get("sync_outbox"))
     retry = _parse_retry(nd_raw.get("retry"))
@@ -308,6 +312,7 @@ def _parse_notion_dashboard_config(config_dict: dict) -> NotionDashboardConfig:
         api_token_env=api_token_env,
         workflows_db_id_env=workflows_db_id_env,
         pull_requests_db_id_env=pull_requests_db_id_env,
+        review_issues_db_id_env=review_issues_db_id_env,
         sync_outbox=sync_outbox,
         retry=retry,
         rate_limit=rate_limit,

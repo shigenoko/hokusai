@@ -8,7 +8,7 @@ import os
 import uuid
 from datetime import datetime
 from enum import Enum
-from typing import Optional, TypedDict
+from typing import NotRequired, Optional, TypedDict
 
 from .config import get_config
 
@@ -65,6 +65,15 @@ class VerificationErrorEntry(TypedDict):
     command: str  # コマンド種別（"build", "test", "lint"）
     success: bool  # 成功/失敗
     error_output: Optional[str]  # 失敗時のエラー出力（最大500行）
+    # PR #37 / Copilot 7 回目: error_output が 500 行で truncate されるため、
+    # 同じ先頭 500 行を共有する別失敗を区別できないケースがあった。
+    # truncate 前の **full** stdout/stderr から計算した sha256 16 桁 hex を
+    # 載せ、Review Issues DB の dedupe_key 入力として使う。state にも残る
+    # ので Phase 5 retry が同じ識別子を参照することもできる。
+    # Python 3.11+ の NotRequired で **このフィールドのみ optional** に。
+    # 既存の repository / command / success / error_output は必須のまま保持
+    # して、Phase 5 retry 側の契約を弱めない（PR #37 Copilot 8 回目指摘）。
+    full_output_hash: NotRequired[Optional[str]]
 
 
 class RepositoryPhaseStatus(str, Enum):
@@ -186,6 +195,21 @@ class WorkflowState(TypedDict):
     final_review_issues: list
     final_review_rules: dict  # Dict[str, ReviewRuleResult] - ルール別結果
     final_review_by_repo: dict  # リポジトリ別レビュー結果 {"Backend": {"passed": True, "rules": {...}}, ...}
+
+    # === Review Issues DB 同期キュー（#36 / v0.5.0） ===
+    # Phase 6/7 等で発生した指摘を Notion Review Issues DB へ送るためのキュー。
+    # 各要素は dispatcher の review_issue_raised payload と同形式。
+    # workflow.py が各 step 後に drain してから clear する。retry で重複 enqueue
+    # された場合は Notion 側の dedupe_key で抑止する。
+    pending_review_issues: list
+
+    # === 実行者（Issue #21 / v0.4.8〜） ===
+    # workflow_started 時に resolve_operator_name() で確定し、それ以降の
+    # 同期イベント（review_issue_raised 等）は state 上の値を再利用する。
+    # `hokusai continue` を別ユーザが叩いて drain した場合でも、Workflows
+    # DB の Operator と整合させるため。`None` の場合は drain 時にフォール
+    # バックで再解決する（互換動作）。
+    operator: Optional[str]
 
     # === Phase 4: 作業計画 ===
     research_result: Optional[str]  # task-researchの出力（Phase 2）
@@ -353,6 +377,8 @@ def create_initial_state(
         final_review_issues=[],
         final_review_rules={},
         final_review_by_repo={},
+        pending_review_issues=[],
+        operator=None,
         research_result=None,
         design_result=None,
         work_plan=None,

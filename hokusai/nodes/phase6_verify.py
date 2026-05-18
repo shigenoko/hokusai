@@ -207,9 +207,16 @@ def phase6_verify_node(state: WorkflowState) -> WorkflowState:
 
                 # エラー詳細を記録
                 error_output = None
+                full_output_hash: str | None = None
                 if not result.success:
                     # エラー出力を最大500行に制限
                     combined_output = (result.stdout + "\n" + result.stderr).strip()
+                    # PR #37 Copilot 7 回目: dedupe には truncate 前の全文の hash
+                    # を使って、同じ先頭 500 行を共有する別失敗を区別する。
+                    import hashlib
+                    full_output_hash = hashlib.sha256(
+                        combined_output.encode("utf-8")
+                    ).hexdigest()[:16]
                     lines = combined_output.split("\n")
                     if len(lines) > 500:
                         error_output = "\n".join(lines[:500]) + f"\n... ({len(lines) - 500} lines truncated)"
@@ -221,6 +228,7 @@ def phase6_verify_node(state: WorkflowState) -> WorkflowState:
                     command=cmd_type,
                     success=result.success,
                     error_output=error_output,
+                    full_output_hash=full_output_hash,
                 ))
 
                 if not result.success:
@@ -245,6 +253,19 @@ def phase6_verify_node(state: WorkflowState) -> WorkflowState:
         # 結果の保存
         state["verification"] = verification_status
         state["verification_errors"] = verification_errors
+
+        # 失敗エントリを Review Issues DB キューに積む（#36 / v0.5.0）
+        # workflow.py が drain して dispatcher 経由で Notion に同期する。
+        # dedupe_key は workflow_id + source + repository + rule + file +
+        # full_output_hash（先頭 500 行 truncate 前の sha256）で構築され、
+        # 表示用 Message は先頭行のみだが、dedupe 入力は全文 hash を使うため、
+        # 共通バナーで先頭行が同じ別ケースも別レコードに分離される。
+        new_payloads = _build_verification_review_issue_payloads(
+            verification_errors, state
+        )
+        if new_payloads:
+            existing = state.get("pending_review_issues") or []
+            state["pending_review_issues"] = list(existing) + new_payloads
 
         # 結果判定 (どれか一つでも失敗していれば FAIL)
         all_passed = all(v == VerificationResult.PASS.value for v in verification_status.values())
@@ -293,6 +314,81 @@ def phase6_verify_node(state: WorkflowState) -> WorkflowState:
         raise
 
     return state
+
+
+def _build_verification_review_issue_payloads(
+    verification_errors: list, state: dict
+) -> list[dict]:
+    """Phase 6 verification 失敗エントリから Review Issues DB 送信用 payload を作る。
+
+    失敗 1 件につき 1 payload を生成する。重複は Notion 側の dedupe_key で抑止し、
+    **Notion 上の Message プロパティに保存するのは error_output の先頭行のみ** に
+    して、**dedupe_key の hash 入力には Phase 6 node が truncate 前の full
+    stdout+stderr から計算した `full_output_hash` を使う** （PR #37 Copilot 2 回
+    目・7 回目指摘）。共通バナーを先頭行に出す test runner や、500 行 truncate
+    境界を跨いで違いが出るケースでも別ケースとして判別する。
+    後方互換: `full_output_hash` が無い古い VerificationErrorEntry には
+    truncated な error_output、それも空なら display_message を fallback として
+    渡す。dedupe_key 自体は **workflow_id** + source + repository + rule + file +
+    `full_output_hash` の sha256 hex 先頭 16 文字（workflow_id を含めるので
+    別 workflow が同じ failure を発火しても別レコードに分かれる、Copilot 8 回目
+    指摘）。operator は workflow.py の drain ロジックが dispatch 直前に補う。
+
+    dedupe_key を payload に含めることで、workflow.py 側で per-issue な
+    idempotency_key を構築できる（複数指摘の outbox 集約崩壊を防ぐ。PR #37
+    Copilot 1 回目指摘）。
+
+    Args:
+        verification_errors: list[VerificationErrorEntry]
+        state: workflow state
+
+    Returns:
+        dispatcher の review_issue_raised payload list
+    """
+    from ..integrations.notion_dashboard.review_issues_db import build_dedupe_key
+
+    workflow_id = state.get("workflow_id") or ""
+    payloads: list[dict] = []
+    for entry in verification_errors:
+        if entry.get("success"):
+            continue
+        repo_name = entry.get("repository") or ""
+        command = entry.get("command") or ""
+        error_output = (entry.get("error_output") or "").strip()
+        # 表示用 message は error_output の先頭行（タイトルとして可読）。
+        if error_output:
+            first_line = error_output.splitlines()[0]
+            display_message = (
+                first_line if first_line else f"{repo_name}:{command} failed"
+            )
+        else:
+            display_message = f"{repo_name}:{command} failed"
+        # dedupe_key は truncate 前の full output から計算した hash を優先採用
+        # （PR #37 Copilot 7 回目指摘: 500 行 truncate で同じ先頭部分を共有する
+        # 別失敗が衝突する問題を解消）。Phase 6 node 側で計算済の
+        # full_output_hash を載せ、無ければ truncated な error_output で fallback。
+        dedupe_input = (
+            entry.get("full_output_hash") or error_output or display_message
+        )
+        dedupe_key = build_dedupe_key(
+            source="verification_failure",
+            rule=command,
+            file=None,
+            message=dedupe_input,
+            repository=repo_name,
+            workflow_id=workflow_id,
+        )
+        payloads.append({
+            "workflow_id": workflow_id,
+            "source": "verification_failure",
+            "message": display_message,
+            "severity": "high",
+            "status": "open",
+            "rule": command,
+            "repository": repo_name,
+            "dedupe_key": dedupe_key,
+        })
+    return payloads
 
 
 def _run_command_with_output(command: str, cwd: str, timeout: int) -> CommandResult:

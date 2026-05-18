@@ -67,6 +67,7 @@ notion_dashboard:
   api_token_env: "<TODO:Notion API token env 変数名、例 COMPANY_NOTION_API_TOKEN>"
   workflows_db_id_env: "<TODO:Workflows DB id env 変数名、例 COMPANY_NOTION_WORKFLOWS_DB_ID>"
   pull_requests_db_id_env: "<TODO:PR DB id env 変数名、例 COMPANY_NOTION_PR_DB_ID>"
+  review_issues_db_id_env: "<TODO:Review Issues DB id env 変数名、例 COMPANY_NOTION_REVIEW_ISSUES_DB_ID>"
   sync_outbox:
     enabled: true
     max_retry_attempts: 10
