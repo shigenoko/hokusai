@@ -1411,6 +1411,79 @@ def test_dispatcher_review_issue_raised_defers_when_workflow_sync_pending(
     assert store.count_notion_sync_pending() == 2
 
 
+def test_dispatcher_review_issue_raised_does_not_self_defer_during_retry(
+    store: SQLiteStore, monkeypatch
+):
+    """retry_pending() 経由の review_issue_raised 再送で、自己 entry を pending 集計
+    から除外し無限自己 deferral を防ぐ（PR #37 Copilot 5 回目指摘）。
+
+    かつ、`review_issue_raised` 自体は workflow page 関連イベントから除外され、
+    別の review_issue_raised entry が同 workflow で残っていても deferral しない。
+    """
+    monkeypatch.setenv("TEST_TOKEN", "secret")
+    monkeypatch.setenv("TEST_DB", "wf-db")
+    monkeypatch.setenv("TEST_REVIEW_ISSUES_DB", "ri-db")
+
+    cfg = _make_config()
+    cfg.review_issues_db_id_env = "TEST_REVIEW_ISSUES_DB"
+
+    # outbox に: 自己 entry + 別の review_issue_raised + workflow_started 1 件
+    self_key = "wf-x:review_issue_raised:dkey-self"
+    store.enqueue_notion_sync(
+        idempotency_key=self_key,
+        workflow_id="wf-x",
+        event_type="review_issue_raised",
+        payload={
+            "workflow_id": "wf-x",
+            "source": "final_review",
+            "message": "m",
+            "dedupe_key": "dkey-self",
+        },
+    )
+    store.enqueue_notion_sync(
+        idempotency_key="wf-x:review_issue_raised:dkey-other",
+        workflow_id="wf-x",
+        event_type="review_issue_raised",
+        payload={
+            "workflow_id": "wf-x",
+            "source": "final_review",
+            "message": "m2",
+            "dedupe_key": "dkey-other",
+        },
+    )
+    # workflow_started も残っていれば deferral 発動するはずなので、ここでは
+    # 加えずに「review_issue_raised だけが残る」状態にする
+    assert store.count_notion_sync_pending() == 2
+
+    # workflow page もまだ存在しない（=None）
+    api = _RecordingAPI(query_result=[])
+
+    class _Disp(NotionSyncDispatcher):
+        def _get_api(self):
+            return api  # type: ignore[return-value]
+
+    disp = _Disp(store=store, config=cfg)
+    # retry_pending() の経路を模してダイレクトに _send_to_notion(exclude_key=self) を呼ぶ
+    disp._send_to_notion(
+        "review_issue_raised",
+        {
+            "workflow_id": "wf-x",
+            "source": "final_review",
+            "message": "m",
+            "rule": "P01",
+            "repository": "Backend",
+            "dedupe_key": "dkey-self",
+        },
+        exclude_idempotency_key=self_key,
+    )
+    # workflow page event は 0 件（review_issue_raised は集計から除外）なので
+    # deferral せず、relation 無しで create が走る
+    creates = [c for c in api.calls if c[0] == "create"]
+    assert len(creates) == 1
+    props = creates[0][1]["properties"]
+    assert "Workflow" not in props
+
+
 def test_dispatcher_review_issue_raised_proceeds_when_no_pending_workflow_sync(
     store: SQLiteStore, monkeypatch
 ):

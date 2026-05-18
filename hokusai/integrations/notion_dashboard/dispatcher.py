@@ -181,8 +181,12 @@ class NotionSyncDispatcher:
 
         if event_type == EVENT_REVIEW_ISSUE_RAISED:
             # Review Issues DB 系は Workflows DB の Last Sync / Sync Errors とは
-            # 別軸の同期。enrich は不要。
-            self._handle_review_issue_raised(payload)
+            # 別軸の同期。enrich は不要。retry_pending() からの呼び出しでは、
+            # 自己 entry を race 検出から除外するため exclude_idempotency_key
+            # を forward する（PR #37 Copilot 5 回目指摘）。
+            self._handle_review_issue_raised(
+                payload, exclude_idempotency_key=exclude_idempotency_key
+            )
             return
 
         # 後方互換: 旧 Service Status sync が outbox に積んだ
@@ -272,6 +276,40 @@ class NotionSyncDispatcher:
         except Exception:
             return 0
 
+    def _count_pending_workflow_page_events_for(
+        self, workflow_id: str, *, exclude_key: str | None = None
+    ) -> int:
+        """workflow Notion ページの存在に影響する pending イベントだけを数える。
+
+        `review_issue_raised` / 廃止済 `service_status_checked` は workflow page
+        とは独立した同期なので除外する。これがないと、retry_pending() で
+        `review_issue_raised` を再送する時、自己 entry を含む `_count_pending_for`
+        が常に > 0 を返してしまい、`review_issue_raised` が永久に自己 deferral
+        ループに陥り max_attempts 到達まで errors テーブルへ移動できない
+        （PR #37 Copilot 5 回目指摘）。
+
+        exclude_key を渡せば、retry_pending() 経由で「これから削除される」
+        自己 entry をさらに除外できる。
+        """
+        if self._store is None:
+            return 0
+        excluded_types = ("review_issue_raised", "service_status_checked")
+        try:
+            with self._store._connect() as conn:  # type: ignore[attr-defined]
+                placeholders = ",".join(["?"] * len(excluded_types))
+                sql = (
+                    "SELECT COUNT(*) FROM notion_sync_outbox "
+                    f"WHERE workflow_id = ? AND event_type NOT IN ({placeholders})"
+                )
+                params: list[Any] = [workflow_id, *excluded_types]
+                if exclude_key:
+                    sql += " AND idempotency_key != ?"
+                    params.append(exclude_key)
+                row = conn.execute(sql, tuple(params)).fetchone()
+                return int(row[0]) if row else 0
+        except Exception:
+            return 0
+
     def _count_errors_for(self, workflow_id: str) -> int:
         """SQLite errors テーブル上の当該 workflow_id の件数。"""
         if self._store is None:
@@ -342,25 +380,34 @@ class NotionSyncDispatcher:
                 created_at=pr.get("created_at"),
             )
 
-    def _handle_review_issue_raised(self, payload: dict[str, Any]) -> None:
+    def _handle_review_issue_raised(
+        self,
+        payload: dict[str, Any],
+        *,
+        exclude_idempotency_key: str | None = None,
+    ) -> None:
         """Review Issue 発火イベントを Review Issues DB に upsert する。
 
         Review Issues DB の database_id が未設定の場合はスキップ。Workflow relation
-        は workflows_db への lookup で workflow_page_id を取得して張る（取得失敗
-        時は relation 無しで作成。後から手動で結び直せる）。
+        は workflows_db への lookup で workflow_page_id を取得して張る。
+        以下の挙動は意図的:
+        - `_find_page_id` の API エラー（rate limit / network / invalid DB ID 等）
+          は握り潰さず `dispatch()` まで伝播させ、outbox 経由でリトライさせる
+          （Copilot 3 回目指摘）。
+        - 対応 workflow ページが Notion 上に存在せず、かつ outbox に同 workflow_id
+          の workflow page sync イベントが pending（workflow_started 等）の場合は、
+          race condition として deferして NotionAPIError(503) で outbox に積み直す
+          （Copilot 4 回目指摘）。
+        - pending workflow page sync が無く workflow ページも存在しない場合に限り、
+          relation 無しで Review Issue を作成（best effort, genuine miss）。
 
-        payload 構造:
-            workflow_id: str (required)
-            source: str (required) — review_issues_db.SOURCE_* のいずれか
-            message: str (required)
-            severity: str (default "medium")
-            status: str (default "open")
-            rule: str | None
-            file: str | None
-            repository: str | None
-            operator: str | None
-            dedupe_key: str | None — 省略時は build_dedupe_key で生成
-            title: str | None — 省略時は source + file + summary で生成
+        Args:
+            payload: review_issue_raised の payload（workflow_id / source / message /
+                severity / status / rule / file / repository / operator /
+                dedupe_key / title）
+            exclude_idempotency_key: retry_pending() からの再送呼び出し時、自己
+                entry を race 検出の pending 集計から除外するためのキー
+                （Copilot 5 回目指摘）。
         """
         review_db_id = os.environ.get(self._config.review_issues_db_id_env, "").strip()
         if not review_db_id:
@@ -380,33 +427,26 @@ class NotionSyncDispatcher:
         workflow_id = payload.get("workflow_id")
         workflow_page_id: str | None = None
         if workflow_id:
-            # _find_page_id は「対応ページなし」の場合 None を返し、
-            # API エラー（rate limit / network / invalid DB ID 等）は raise する。
-            # 後者を握り潰すと、Workflow relation 無しの Review Issue が outbox
-            # 上は成功として記録され、relation が後から付かない問題が生じる
-            # （PR #37 Copilot 3 回目指摘）。よって例外は dispatch() まで伝播
-            # させ、outbox 経由でリトライ可能にする。
             workflow_page_id = self._get_workflows_client()._find_page_id(
                 workflow_id
             )
-            # workflow page が見つからない場合、workflow_started の同期が
-            # outbox に残っている可能性がある（race condition）。残って
-            # いれば、この Review Issue も relation 無しで silent に作らず
-            # 後でリトライさせる（PR #37 Copilot 4 回目指摘）。
-            # 残っていない＝本当に対応 workflow が存在しないケースは relation
-            # 無しで作成（best effort）。
             if workflow_page_id is None:
-                pending_count = 0
-                try:
-                    pending_count = self._count_pending_for(workflow_id)
-                except Exception:
-                    pending_count = 0
+                # workflow page が見つからない場合、workflow page sync イベント
+                # （workflow_started / phase_changed / pr_created /
+                # phase_artifact_linked / terminal_status_changed）が outbox に
+                # 残っているかで動作を分ける。`review_issue_raised` / 廃止済の
+                # `service_status_checked` は workflow page と無関係なので集計
+                # から除外する（Copilot 5 回目指摘の循環参照対応）。
+                # retry_pending() 経由なら自己 entry もキーで除外。
+                pending_count = self._count_pending_workflow_page_events_for(
+                    workflow_id, exclude_key=exclude_idempotency_key
+                )
                 if pending_count > 0:
                     raise NotionAPIError(
                         503,
                         f"workflow page not yet synced for workflow_id="
                         f"{workflow_id}; deferring review_issue_raised dispatch "
-                        f"({pending_count} pending workflow events)",
+                        f"({pending_count} pending workflow page events)",
                         code="workflow_page_pending",
                     )
 

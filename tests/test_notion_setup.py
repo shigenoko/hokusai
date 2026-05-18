@@ -1101,6 +1101,7 @@ def _make_notion_dashboard_config(
     api_token_env: str | None = None,
     workflows_db_id_env: str | None = None,
     pull_requests_db_id_env: str | None = None,
+    review_issues_db_id_env: str | None = None,
 ):
     """テスト用に notion_dashboard config を持つダミー config オブジェクト"""
     from types import SimpleNamespace
@@ -1112,6 +1113,8 @@ def _make_notion_dashboard_config(
         nd.workflows_db_id_env = workflows_db_id_env
     if pull_requests_db_id_env is not None:
         nd.pull_requests_db_id_env = pull_requests_db_id_env
+    if review_issues_db_id_env is not None:
+        nd.review_issues_db_id_env = review_issues_db_id_env
     return SimpleNamespace(notion_dashboard=nd)
 
 
@@ -1144,7 +1147,11 @@ def test_cli_handler_uses_profile_config_api_token_env(
     monkeypatch.setenv("HOKUSAI_NOTION_API_TOKEN_FOO", "secret-foo")
 
     def _fake_setup(api_token, parent_page_id, **kwargs):
-        return {"workflows_db_id": "wf", "pull_requests_db_id": "pr"}
+        return {
+            "workflows_db_id": "wf",
+            "pull_requests_db_id": "pr",
+            "review_issues_db_id": "ri",
+        }
 
     monkeypatch.setattr(
         "hokusai.integrations.notion_dashboard.setup_notion_workspace",
@@ -1155,6 +1162,7 @@ def test_cli_handler_uses_profile_config_api_token_env(
         api_token_env="HOKUSAI_NOTION_API_TOKEN_FOO",
         workflows_db_id_env="HOKUSAI_NOTION_WORKFLOWS_DB_ID_FOO",
         pull_requests_db_id_env="HOKUSAI_NOTION_PR_DB_ID_FOO",
+        review_issues_db_id_env="HOKUSAI_NOTION_REVIEW_ISSUES_DB_ID_FOO",
     )
 
     class _Args:
@@ -1172,9 +1180,63 @@ def test_cli_handler_uses_profile_config_api_token_env(
     assert "HOKUSAI_NOTION_API_TOKEN_FOO" in out
     assert 'export HOKUSAI_NOTION_WORKFLOWS_DB_ID_FOO="wf"' in out
     assert 'export HOKUSAI_NOTION_PR_DB_ID_FOO="pr"' in out
+    # Review Issues DB の env も config 由来でカスタム名に
+    # (PR #37 Copilot 5 回目指摘: profile-specific 分岐の test 漏れを補う)
+    assert 'export HOKUSAI_NOTION_REVIEW_ISSUES_DB_ID_FOO="ri"' in out
     # 既定 env 名は使われない
     assert 'export HOKUSAI_NOTION_WORKFLOWS_DB_ID="' not in out
     assert 'export HOKUSAI_NOTION_PR_DB_ID="' not in out
+    assert 'export HOKUSAI_NOTION_REVIEW_ISSUES_DB_ID="' not in out
+
+
+def test_cli_handler_uses_profile_review_issues_env_for_persist(
+    capsys, monkeypatch, tmp_path
+):
+    """profile config の review_issues_db_id_env が --persist 経由で rc に書かれる
+
+    PR #37 Copilot 5 回目指摘: profile-specific 分岐が --persist の出力に
+    確実に反映されることをテストで保証する。
+    """
+    from hokusai import cli_main
+
+    monkeypatch.setenv("HOKUSAI_NOTION_API_TOKEN_FOO", "secret-foo")
+
+    def _fake_setup(api_token, parent_page_id, **kwargs):
+        return {
+            "workflows_db_id": "wfNEW",
+            "pull_requests_db_id": "prNEW",
+            "review_issues_db_id": "riNEW",
+        }
+
+    monkeypatch.setattr(
+        "hokusai.integrations.notion_dashboard.setup_notion_workspace",
+        _fake_setup,
+    )
+
+    config = _make_notion_dashboard_config(
+        api_token_env="HOKUSAI_NOTION_API_TOKEN_FOO",
+        workflows_db_id_env="HOKUSAI_NOTION_WORKFLOWS_DB_ID_FOO",
+        pull_requests_db_id_env="HOKUSAI_NOTION_PR_DB_ID_FOO",
+        review_issues_db_id_env="HOKUSAI_NOTION_REVIEW_ISSUES_DB_ID_FOO",
+    )
+
+    rc_file = tmp_path / "rc"
+
+    class _Args:
+        api_token_env = None
+        parent_page_id = "p"
+        profile = "foo"
+        persist = True
+        shell_rc = str(rc_file)
+        no_backup = True
+
+    rc = cli_main._handle_notion_setup(_Args(), config=config)
+    assert rc == 0
+    content = rc_file.read_text()
+    # profile-specific env 名で rc に書き込まれる
+    assert 'HOKUSAI_NOTION_REVIEW_ISSUES_DB_ID_FOO="riNEW"' in content
+    # 既定 env 名は書かれない
+    assert 'HOKUSAI_NOTION_REVIEW_ISSUES_DB_ID="' not in content
 
 
 def test_cli_handler_explicit_api_token_env_wins_over_profile_config(
