@@ -1311,6 +1311,60 @@ def test_dispatcher_review_issue_raised_requires_source_and_message(
     assert api.calls == []
 
 
+def test_dispatcher_review_issue_raised_propagates_workflow_lookup_errors(
+    store: SQLiteStore, monkeypatch
+):
+    """workflow lookup の transient エラー（API failure 等）は outbox にキューイングし、
+    relation 無しのレコードを silent に作らない（PR #37 Copilot 3 回目指摘）。"""
+    monkeypatch.setenv("TEST_TOKEN", "secret")
+    monkeypatch.setenv("TEST_DB", "wf-db")
+    monkeypatch.setenv("TEST_REVIEW_ISSUES_DB", "ri-db")
+
+    cfg = _make_config()
+    cfg.review_issues_db_id_env = "TEST_REVIEW_ISSUES_DB"
+
+    class _ErrorOnFirstQuery:
+        """workflows_db._find_page_id が API エラーで raise するシナリオ"""
+
+        def __init__(self):
+            self.calls: list[tuple[str, dict]] = []
+
+        def query_database(self, database_id: str, *, filter_: dict | None = None) -> dict:
+            self.calls.append(("query", {"database_id": database_id, "filter": filter_}))
+            raise NotionAPIError(503, "service unavailable", code="rate_limited")
+
+        def create_page(self, payload: dict) -> dict:
+            self.calls.append(("create", payload))
+            return {"id": "page-new"}
+
+        def update_page(self, page_id: str, payload: dict) -> dict:
+            self.calls.append(("update", {"page_id": page_id, **payload}))
+            return {"id": page_id}
+
+    api = _ErrorOnFirstQuery()
+
+    class _Disp(NotionSyncDispatcher):
+        def _get_api(self):
+            return api  # type: ignore[return-value]
+
+    disp = _Disp(store=store, config=cfg)
+    result = disp.dispatch("review_issue_raised", {
+        "workflow_id": "wf-1",
+        "source": "final_review",
+        "message": "Missing validation",
+        "rule": "P01",
+        "repository": "Backend",
+        "dedupe_key": "k1",
+    })
+    # outbox に積まれ False を返す（成功扱いにしない）
+    assert result is False
+    # Review Issue create_page は呼ばれていない（relation なしで silent 作成しない）
+    creates = [c for c in api.calls if c[0] == "create"]
+    assert creates == []
+    # outbox にエントリがある
+    assert store.count_notion_sync_pending() == 1
+
+
 def test_dispatcher_review_issue_raised_resolves_workflow_relation(
     store: SQLiteStore, monkeypatch
 ):

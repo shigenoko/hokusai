@@ -5,6 +5,7 @@ Notion 上に HOKUSAI 用の DB / ページを一括作成する。
 作成されるリソース:
 - Workflows DB
 - Pull Requests DB（Workflow → Workflows DB の relation 付き）
+- Review Issues DB（Workflow → Workflows DB の relation 付き、v0.5.0〜 / #36）
 
 前提:
 - 親ページ（parent_page_id）が事前に Notion 上に存在し、HOKUSAI integration が
@@ -13,8 +14,9 @@ Notion 上に HOKUSAI 用の DB / ページを一括作成する。
 
 設計判断:
 - 冪等性は **DB 作成と scaffold ページで分ける**:
-    - DB 作成（Workflows / Pull Requests）: 冪等ではない。再実行すると新しい DB が
-      作られる。失敗時は Notion 側で archived/削除してから再実行することを想定。
+    - DB 作成（Workflows / Pull Requests / Review Issues）: 冪等ではない。
+      再実行すると新しい DB が作られる。失敗時は Notion 側で archived/削除
+      してから再実行することを想定。
     - `--scaffold` で作るドキュメントツリー: ハブ `Documentation`（icon 📚）と配下
       3 サブページ `議論`（💬）/ `運用ガイド`（📖）/ `要件定義`（📋）。idempotent で
       配置先パスごとに既存検出（pagination 全走査）。v0.4.3（絵文字 prefix 付き）
@@ -79,12 +81,17 @@ _PULL_REQUESTS_DB_DESCRIPTION = (
 _REVIEW_ISSUES_DB_DESCRIPTION = (
     "⚠️ HOKUSAI が自動管理する DB です。レコードは HOKUSAI が Phase 6 verification "
     "failure / Phase 7 final review 等の指摘発生時に自動生成・更新します。dedupe_key "
-    "（source + repository + rule + file + message の hash）で重複を抑止し、Source / "
-    "Severity / Repository / Workflow / Dedupe Key / Operator / Rule ID / File Path / "
-    "Message / Created At / Last Updated を HOKUSAI が書き込みます。Status は新規作成"
-    "時のみ HOKUSAI が初期値 open を書き込み、その後の Status 編集（waived / resolved）"
-    "は人手の運用判断として HOKUSAI からの上書きを行いません。詳細は HOKUSAI 運用ガイド"
-    "（docs/notion-dashboard-operation-guide.md の Review Issues DB セクション）を参照。"
+    "は source + repository + rule + file + message の sha256 hash で重複を抑止します。"
+    "Phase 6 verification failure に限り、Message プロパティは error_output の先頭行のみ"
+    "ですが、dedupe_key の hash 入力には error_output 全文を使います（test runner が"
+    "共通バナーを先頭行に出すケースで別失敗を区別するため、Message が同じでも別レコードに"
+    "なり得ます）。Source / Severity / Repository / Workflow / Dedupe Key / Operator / "
+    "Rule ID / File Path / Message / Last Updated を HOKUSAI が書き込みます。Status は"
+    "新規作成時のみ HOKUSAI が初期値 open を書き込み、その後の Status 編集"
+    "（waived / resolved）は人手の運用判断として HOKUSAI からの上書きを行いません。"
+    "Created At も新規作成時のみ書き込み、Notion 側で初回作成時刻を温存します。詳細は "
+    "HOKUSAI 運用ガイド（docs/notion-dashboard-operation-guide.md の Review Issues DB "
+    "セクション）を参照。"
 )
 
 

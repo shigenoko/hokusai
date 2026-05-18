@@ -380,16 +380,15 @@ class NotionSyncDispatcher:
         workflow_id = payload.get("workflow_id")
         workflow_page_id: str | None = None
         if workflow_id:
-            try:
-                workflow_page_id = self._get_workflows_client()._find_page_id(
-                    workflow_id
-                )
-            except Exception as e:
-                logger.debug(
-                    f"workflow page_id 解決失敗（relation なしで作成）: "
-                    f"workflow_id={workflow_id}, error={e}"
-                )
-                workflow_page_id = None
+            # _find_page_id は「対応ページなし」の場合 None を返し、
+            # API エラー（rate limit / network / invalid DB ID 等）は raise する。
+            # 後者を握り潰すと、Workflow relation 無しの Review Issue が outbox
+            # 上は成功として記録され、relation が後から付かない問題が生じる
+            # （PR #37 Copilot 3 回目指摘）。よって例外は dispatch() まで伝播
+            # させ、outbox 経由でリトライ可能にする。
+            workflow_page_id = self._get_workflows_client()._find_page_id(
+                workflow_id
+            )
 
         client = self._get_review_issues_client(review_db_id)
         client.upsert_record(
