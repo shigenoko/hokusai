@@ -207,9 +207,16 @@ def phase6_verify_node(state: WorkflowState) -> WorkflowState:
 
                 # エラー詳細を記録
                 error_output = None
+                full_output_hash: str | None = None
                 if not result.success:
                     # エラー出力を最大500行に制限
                     combined_output = (result.stdout + "\n" + result.stderr).strip()
+                    # PR #37 Copilot 7 回目: dedupe には truncate 前の全文の hash
+                    # を使って、同じ先頭 500 行を共有する別失敗を区別する。
+                    import hashlib
+                    full_output_hash = hashlib.sha256(
+                        combined_output.encode("utf-8")
+                    ).hexdigest()[:16]
                     lines = combined_output.split("\n")
                     if len(lines) > 500:
                         error_output = "\n".join(lines[:500]) + f"\n... ({len(lines) - 500} lines truncated)"
@@ -221,6 +228,7 @@ def phase6_verify_node(state: WorkflowState) -> WorkflowState:
                     command=cmd_type,
                     success=result.success,
                     error_output=error_output,
+                    full_output_hash=full_output_hash,
                 ))
 
                 if not result.success:
@@ -311,12 +319,16 @@ def _build_verification_review_issue_payloads(
     """Phase 6 verification 失敗エントリから Review Issues DB 送信用 payload を作る。
 
     失敗 1 件につき 1 payload を生成する。重複は Notion 側の dedupe_key で抑止し、
-    **dedupe_key の hash 入力には error_output 全文を使う一方、Notion 上の
-    Message プロパティに保存するのは先頭行のみ** とする（PR #37 Copilot 2 回目
-    指摘）。test runner が共通バナーを先頭行に出すケースで、同じ表示 message
-    でも detail まで含めると別ケースとして判別したいため。dedupe_key は
-    source + repository + rule + file + (full error_output) の sha256。
-    operator は workflow.py の drain ロジックが dispatch 直前に補う。
+    **Notion 上の Message プロパティに保存するのは error_output の先頭行のみ** に
+    して、**dedupe_key の hash 入力には Phase 6 node が truncate 前の full
+    stdout+stderr から計算した `full_output_hash` を使う** （PR #37 Copilot 2 回
+    目・7 回目指摘）。共通バナーを先頭行に出す test runner や、500 行 truncate
+    境界を跨いで違いが出るケースでも別ケースとして判別する。
+    後方互換: `full_output_hash` が無い古い VerificationErrorEntry には
+    truncated な error_output、それも空なら display_message を fallback として
+    渡す。dedupe_key 自体は source + repository + rule + file +
+    `full_output_hash` の sha256。operator は workflow.py の drain ロジックが
+    dispatch 直前に補う。
 
     dedupe_key を payload に含めることで、workflow.py 側で per-issue な
     idempotency_key を構築できる（複数指摘の outbox 集約崩壊を防ぐ。PR #37
@@ -347,11 +359,13 @@ def _build_verification_review_issue_payloads(
             )
         else:
             display_message = f"{repo_name}:{command} failed"
-        # dedupe_key には error_output 全文を使う（PR #37 Copilot 2 回目指摘）。
-        # test runner などが共通バナーを先頭行に出すと、別ケースの失敗が同じ
-        # 先頭行を持って Notion 上で衝突する。全文を hash 入力に与えて、
-        # detail まで含めて判別する。fallback は表示 message と同じ文字列。
-        dedupe_input = error_output or display_message
+        # dedupe_key は truncate 前の full output から計算した hash を優先採用
+        # （PR #37 Copilot 7 回目指摘: 500 行 truncate で同じ先頭部分を共有する
+        # 別失敗が衝突する問題を解消）。Phase 6 node 側で計算済の
+        # full_output_hash を載せ、無ければ truncated な error_output で fallback。
+        dedupe_input = (
+            entry.get("full_output_hash") or error_output or display_message
+        )
         dedupe_key = build_dedupe_key(
             source="verification_failure",
             rule=command,

@@ -45,6 +45,13 @@ class NotionSyncDispatcher:
         self._workflows_db: WorkflowsDBClient | None = None
         self._pull_requests_db: PullRequestsDBClient | None = None
         self._review_issues_db: ReviewIssuesDBClient | None = None
+        # workflow_id → page_id の positive-cache（PR #37 Copilot 7 回目指摘）。
+        # Phase 6/7 drain で同一 workflow の review_issue を複数 dispatch する際、
+        # 各 dispatch で Workflows DB に lookup query を投げないよう抑止する。
+        # 「ページが存在しない」negative 結果はキャッシュしない（workflow_started
+        # 再送で後から作成される可能性があるため）。新たな workflow_started イベント
+        # を扱う際は対応エントリを invalidate する。
+        self._workflow_page_id_cache: dict[str, str] = {}
 
     def is_configured(self) -> bool:
         """設定が enabled で、必要な環境変数が揃っているかを返す。"""
@@ -172,6 +179,13 @@ class NotionSyncDispatcher:
                 retry_pending() からの呼び出しでは、当該 outbox エントリを「これから削除する」
                 状態にあるため、サマリ計算では除外する必要がある。
         """
+        # workflow_started を扱う前に対応 workflow の page id cache を invalidate
+        # （Copilot 7 回目指摘の正確性確保。新規 page が作られた可能性があるため）。
+        if event_type == "workflow_started":
+            wid_invalidate = payload.get("workflow_id")
+            if wid_invalidate:
+                self._workflow_page_id_cache.pop(wid_invalidate, None)
+
         if event_type == "pr_created":
             payload = self._enrich_with_sync_status(
                 payload, exclude_idempotency_key=exclude_idempotency_key
@@ -427,9 +441,7 @@ class NotionSyncDispatcher:
         workflow_id = payload.get("workflow_id")
         workflow_page_id: str | None = None
         if workflow_id:
-            workflow_page_id = self._get_workflows_client()._find_page_id(
-                workflow_id
-            )
+            workflow_page_id = self._lookup_workflow_page_id(workflow_id)
             if workflow_page_id is None:
                 # workflow page が見つからない場合、workflow page sync イベント
                 # （workflow_started / phase_changed / pr_created /
@@ -534,6 +546,26 @@ class NotionSyncDispatcher:
                 database_id=database_id,
             )
         return self._pull_requests_db
+
+    def _lookup_workflow_page_id(self, workflow_id: str) -> str | None:
+        """workflow_id → page_id 解決。positive 結果のみキャッシュする
+        （PR #37 Copilot 7 回目指摘で per-issue 重複 query を抑止）。
+
+        - 既に positive キャッシュにあれば即返す（API call 無し）。
+        - キャッシュに無い／negative の場合は Workflows DB に lookup し、
+          positive 結果のみキャッシュに保存。
+        - workflow_started イベントを `_send_to_notion` が扱う際にエントリを
+          invalidate するため、新規 page 作成後の stale キャッシュは発生しない。
+        - lookup API エラーは raise してそのまま `dispatch()` まで伝播
+          （outbox 経由でリトライ可能、Copilot 3 回目指摘の挙動を維持）。
+        """
+        cached = self._workflow_page_id_cache.get(workflow_id)
+        if cached is not None:
+            return cached
+        page_id = self._get_workflows_client()._find_page_id(workflow_id)
+        if page_id is not None:
+            self._workflow_page_id_cache[workflow_id] = page_id
+        return page_id
 
     def _get_review_issues_client(self, database_id: str) -> ReviewIssuesDBClient:
         if self._review_issues_db is None:

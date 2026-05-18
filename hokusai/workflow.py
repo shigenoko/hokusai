@@ -152,16 +152,34 @@ class WorkflowRunner:
             operator = state_values.get("operator")
             if not operator and self.notion_dispatcher.is_configured():
                 operator = resolve_operator_name()
+            # build_dedupe_key を import（dedupe_key 欠落時の stable fallback 用）
+            from .integrations.notion_dashboard.review_issues_db import (
+                build_dedupe_key,
+            )
+
             for payload in pending:
                 enriched = dict(payload)
                 if operator and "operator" not in enriched:
                     enriched["operator"] = operator
                 wid = enriched.get("workflow_id") or ""
-                dkey = enriched.get("dedupe_key") or ""
+                dkey = enriched.get("dedupe_key")
+                if not dkey:
+                    # dedupe_key 欠落時は dispatcher 既定キー
+                    # `workflow_id:event:phase:revision` にフォールバックすると、
+                    # 同一 phase 内の複数指摘が共有キーになり outbox の uniqueness
+                    # 制約で後続 payload が drop される（PR #37 Copilot 7 回目指摘）。
+                    # payload フィールドから stable hash を導出して per-issue を保つ。
+                    dkey = build_dedupe_key(
+                        source=str(enriched.get("source") or ""),
+                        rule=enriched.get("rule"),
+                        file=enriched.get("file"),
+                        message=str(enriched.get("message") or ""),
+                        repository=enriched.get("repository"),
+                    )
                 idempotency_key = (
                     f"{wid}:review_issue_raised:{dkey}"
-                    if (wid and dkey)
-                    else None
+                    if wid
+                    else f"review_issue_raised:{dkey}"
                 )
                 self._safe_notion_dispatch(
                     "review_issue_raised",

@@ -59,12 +59,18 @@ class ReviewRuleResult(TypedDict):
     note: str  # 備考（例: "SpaceBackgroundIdが未使用"）
 
 
-class VerificationErrorEntry(TypedDict):
+class VerificationErrorEntry(TypedDict, total=False):
     """検証エラー詳細（Phase 6 → Phase 5 リトライ時の情報伝達用）"""
     repository: str  # リポジトリ名（例: "Backend", "API"）
     command: str  # コマンド種別（"build", "test", "lint"）
     success: bool  # 成功/失敗
     error_output: Optional[str]  # 失敗時のエラー出力（最大500行）
+    # PR #37 / Copilot 7 回目: error_output が 500 行で truncate されるため、
+    # 同じ先頭 500 行を共有する別失敗を区別できないケースがあった。
+    # truncate 前の **full** stdout/stderr から計算した sha256 16 桁 hex を
+    # 載せ、Review Issues DB の dedupe_key 入力として使う。state にも残る
+    # ので Phase 5 retry が同じ識別子を参照することもできる。
+    full_output_hash: Optional[str]
 
 
 class RepositoryPhaseStatus(str, Enum):

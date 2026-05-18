@@ -1896,17 +1896,35 @@ def test_drain_pending_review_issues_falls_back_to_resolve_when_state_empty(monk
     assert capt.calls[0]["payload"]["operator"] == "fallback-user"
 
 
-def test_drain_pending_review_issues_idempotency_key_none_when_missing_dedupe():
-    """dedupe_key が無い payload は idempotency_key=None で dispatch（fallback 安全）"""
+def test_drain_pending_review_issues_falls_back_to_payload_hash_when_dedupe_missing():
+    """dedupe_key が無い payload は workflow.py 側で payload フィールドから
+    stable hash を導出して idempotency_key を組み立てる（PR #37 Copilot 7 回目
+    指摘: dispatcher 既定キー `workflow_id:event:phase:revision` への fallback
+    だと同一 phase の複数指摘が outbox uniqueness 制約で衝突する）。
+    """
     runner = _make_runner()
     capt = _CapturingDispatch(runner)
     runner.compiled_workflow = _FakeCompiledWorkflow()  # type: ignore[assignment]
 
-    pending = [{"workflow_id": "wf-1", "source": "x", "message": "m"}]
+    pending = [
+        {"workflow_id": "wf-1", "source": "final_review", "message": "issue A", "rule": "R1"},
+        {"workflow_id": "wf-1", "source": "final_review", "message": "issue B", "rule": "R2"},
+    ]
     runner._drain_pending_review_issues(
         {"pending_review_issues": pending}, {"thread": "x"}
     )
-    assert capt.calls[0]["idempotency_key"] is None
+    assert len(capt.calls) == 2
+    # 各 idempotency_key は None ではなく stable 文字列
+    keys = [c["idempotency_key"] for c in capt.calls]
+    assert all(k is not None for k in keys)
+    # 別 payload は別 key（uniqueness 制約衝突を回避）
+    assert keys[0] != keys[1]
+    # 同 payload を再計算すると同じ key（deterministic）
+    capt2 = _CapturingDispatch(runner)
+    runner._drain_pending_review_issues(
+        {"pending_review_issues": [pending[0]]}, {"thread": "x"}
+    )
+    assert capt2.calls[0]["idempotency_key"] == keys[0]
 
 
 def test_drain_pending_review_issues_swallows_exceptions():
