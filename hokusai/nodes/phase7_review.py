@@ -365,6 +365,7 @@ def _build_review_issue_payloads(
                 file=None,
                 message=message,
                 repository=repo_name,
+                workflow_id=workflow_id,
             )
             payloads.append({
                 "workflow_id": workflow_id,

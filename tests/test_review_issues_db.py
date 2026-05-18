@@ -124,6 +124,32 @@ def test_build_dedupe_key_differs_for_different_repository():
     assert k_backend != k_frontend
 
 
+def test_build_dedupe_key_differs_for_different_workflow_id():
+    """同じ source / repo / rule / file / message でも workflow_id が違えば別キー
+
+    PR #37 Copilot 8 回目指摘: workflow_id を含めないと、別 workflow が同じ
+    rule/file/message を発火した時に同じ Notion ページに集約され、Workflow
+    relation が最新の workflow page id で上書きされて先発の関連が失われる。
+    """
+    k_wf1 = build_dedupe_key(
+        source="final_review",
+        rule="P01",
+        file="x.py",
+        message="same",
+        repository="Backend",
+        workflow_id="wf-001",
+    )
+    k_wf2 = build_dedupe_key(
+        source="final_review",
+        rule="P01",
+        file="x.py",
+        message="same",
+        repository="Backend",
+        workflow_id="wf-002",
+    )
+    assert k_wf1 != k_wf2
+
+
 def test_build_dedupe_key_handles_none_inputs():
     k = build_dedupe_key(source="ci_failure", rule=None, file=None, message="boom")
     assert len(k) == 16

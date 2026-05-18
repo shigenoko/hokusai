@@ -471,6 +471,7 @@ class NotionSyncDispatcher:
             rule=payload.get("rule"),
             file=payload.get("file"),
             repository=payload.get("repository"),
+            workflow_id=workflow_id,
             workflow_page_id=workflow_page_id,
             operator=payload.get("operator"),
             dedupe_key=payload.get("dedupe_key"),

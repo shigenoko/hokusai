@@ -108,7 +108,7 @@ hokusai notion-setup \
 成功時に各リソースの ID と環境変数の export コマンド例が出力される。それを
 `~/.zshrc` などに追記する。
 
-冪等性の適用範囲は scaffold ページのみで、**DB 作成（Workflows / Pull Requests）は冪等ではない**: `notion-setup` を再実行すると新しい DB が毎回作成される。DB 作成をやり直したい場合は Notion 側で旧 DB を archive/削除してから再実行すること。
+冪等性の適用範囲は scaffold ページのみで、**DB 作成（Workflows / Pull Requests / Review Issues）は冪等ではない**: `notion-setup` を再実行すると新しい DB が毎回作成される。DB 作成をやり直したい場合は Notion 側で旧 DB を archive/削除してから再実行すること。
 
 #### 手動で作成する場合
 
@@ -194,7 +194,7 @@ Phase 6 verification failure / Phase 7 final review NG ルール等の指摘を�
 | Severity | Select | `critical` / `high` / `medium` / `low` / `info` |
 | Repository | Select | リポジトリ表示名（PR DB と揃える） |
 | Workflow | Relation（→ Workflows DB） | 関連 workflow へのリンク（dispatcher が自動解決） |
-| Dedupe Key | rich_text | `source + repository + rule + file + message` の sha256 16 桁 hex。同一指摘の重複作成を抑止。Phase 6 verification failure では `message` の代わりに **`error_output` 全文** を hash 入力に使う（test runner 共通バナーで先頭行が同じ別ケースを区別するため。`Message` プロパティは先頭行のみ） |
+| Dedupe Key | rich_text | `workflow_id + source + repository + rule + file + message` の sha256 hex **先頭 16 文字**（16 hex chars）。同一指摘の重複作成を抑止。Phase 6 verification failure では `message` の代わりに **`error_output` 全文の sha256 hash** を入力に使う（test runner 共通バナーで先頭行が同じ別ケースを区別するため。`Message` プロパティは先頭行のみ）。workflow_id を含めるので、同 source/repo/rule/file/message が **別 workflow** で発火しても別レコードに分離される |
 | Operator | rich_text | workflow を起動した実行者（Issue #21 と整合） |
 | Rule ID | rich_text | linter rule / レビュー観点 ID |
 | File Path | rich_text | 該当ファイル（payload が file を持つ場合） |

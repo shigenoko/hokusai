@@ -372,6 +372,7 @@ def _build_verification_review_issue_payloads(
             file=None,
             message=dedupe_input,
             repository=repo_name,
+            workflow_id=workflow_id,
         )
         payloads.append({
             "workflow_id": workflow_id,

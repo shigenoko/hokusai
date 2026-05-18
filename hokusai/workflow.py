@@ -152,34 +152,9 @@ class WorkflowRunner:
             operator = state_values.get("operator")
             if not operator and self.notion_dispatcher.is_configured():
                 operator = resolve_operator_name()
-            # build_dedupe_key を import（dedupe_key 欠落時の stable fallback 用）
-            from .integrations.notion_dashboard.review_issues_db import (
-                build_dedupe_key,
-            )
-
             for payload in pending:
-                enriched = dict(payload)
-                if operator and "operator" not in enriched:
-                    enriched["operator"] = operator
-                wid = enriched.get("workflow_id") or ""
-                dkey = enriched.get("dedupe_key")
-                if not dkey:
-                    # dedupe_key 欠落時は dispatcher 既定キー
-                    # `workflow_id:event:phase:revision` にフォールバックすると、
-                    # 同一 phase 内の複数指摘が共有キーになり outbox の uniqueness
-                    # 制約で後続 payload が drop される（PR #37 Copilot 7 回目指摘）。
-                    # payload フィールドから stable hash を導出して per-issue を保つ。
-                    dkey = build_dedupe_key(
-                        source=str(enriched.get("source") or ""),
-                        rule=enriched.get("rule"),
-                        file=enriched.get("file"),
-                        message=str(enriched.get("message") or ""),
-                        repository=enriched.get("repository"),
-                    )
-                idempotency_key = (
-                    f"{wid}:review_issue_raised:{dkey}"
-                    if wid
-                    else f"review_issue_raised:{dkey}"
+                enriched, idempotency_key = self._prepare_review_issue_dispatch(
+                    payload, operator
                 )
                 self._safe_notion_dispatch(
                     "review_issue_raised",
@@ -196,6 +171,42 @@ class WorkflowRunner:
                 f"Review Issues 同期 drain 中のエラーを抑制: {ri_err}"
             )
             return 0
+
+    @staticmethod
+    def _prepare_review_issue_dispatch(
+        payload: dict, operator: str | None
+    ) -> tuple[dict, str]:
+        """review_issue_raised の payload を enrich し、idempotency_key を組み立てる。
+
+        - operator が指定されており payload に未含なら enrich
+        - dedupe_key 欠落時は build_dedupe_key で stable hash を生成
+          （dispatcher 既定キー `workflow_id:event:phase:revision` への fallback
+          だと同 phase 内の複数指摘が outbox uniqueness 制約で衝突するため、
+          PR #37 Copilot 7 回目指摘）
+        - idempotency_key は `workflow_id:review_issue_raised:dedupe_key` 形式
+        """
+        from .integrations.notion_dashboard.review_issues_db import build_dedupe_key
+
+        enriched = dict(payload)
+        if operator and "operator" not in enriched:
+            enriched["operator"] = operator
+        wid = enriched.get("workflow_id") or ""
+        dkey = enriched.get("dedupe_key")
+        if not dkey:
+            dkey = build_dedupe_key(
+                source=str(enriched.get("source") or ""),
+                rule=enriched.get("rule"),
+                file=enriched.get("file"),
+                message=str(enriched.get("message") or ""),
+                repository=enriched.get("repository"),
+                workflow_id=wid or None,
+            )
+        idempotency_key = (
+            f"{wid}:review_issue_raised:{dkey}"
+            if wid
+            else f"review_issue_raised:{dkey}"
+        )
+        return enriched, idempotency_key
 
     def _enrich_state_with_notion_url(self, state: dict) -> dict:
         """Slack 通知向けに Notion ダッシュボードページ URL を state に補う。

@@ -179,7 +179,7 @@ def test_phase6_payloads_skips_successful_entries():
     assert payloads == []
 
 
-def test_phase7_node_appends_payloads_to_pending_review_issues(monkeypatch):
+def test_phase7_node_appends_payloads_to_pending_review_issues(monkeypatch, tmp_path):
     """phase7_review_node 自体が helper の戻り値を state["pending_review_issues"]
     に append することを検証（PR #37 Copilot 7 回目指摘: helper 単体テストだけだと
     node が helper を呼び忘れ／append 漏れの regression を検出できない）。"""
@@ -190,7 +190,7 @@ def test_phase7_node_appends_payloads_to_pending_review_issues(monkeypatch):
     monkeypatch.setattr(
         phase7_review,
         "resolve_runtime_repositories",
-        lambda state, config: [type("Repo", (), {"name": "Backend", "path": __import__("pathlib").Path("/tmp")})()],
+        lambda state, config: [type("Repo", (), {"name": "Backend", "path": tmp_path})()],
     )
     monkeypatch.setattr(
         phase7_review,
@@ -249,12 +249,11 @@ def test_phase7_node_appends_payloads_to_pending_review_issues(monkeypatch):
     assert "dedupe_key" in pending[0]
 
 
-def test_phase6_node_appends_payloads_to_pending_review_issues(monkeypatch):
+def test_phase6_node_appends_payloads_to_pending_review_issues(monkeypatch, tmp_path):
     """phase6_verify_node 自体が verification 失敗時に
     state["pending_review_issues"] を populate することを検証（PR #37 Copilot
     7 回目指摘）。"""
     from hokusai.nodes import phase6_verify
-    from pathlib import Path
     from types import SimpleNamespace
 
     monkeypatch.setattr(phase6_verify, "should_skip_phase", lambda s, p: False)
@@ -264,8 +263,8 @@ def test_phase6_node_appends_payloads_to_pending_review_issues(monkeypatch):
         lambda state, config: [
             SimpleNamespace(
                 name="Backend",
-                path=Path("/tmp"),
-                source_path=Path("/tmp"),
+                path=tmp_path,
+                source_path=tmp_path,
                 base_branch="main",
                 worktree_created=False,
                 build_command="echo build",

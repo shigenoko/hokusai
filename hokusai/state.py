@@ -8,7 +8,7 @@ import os
 import uuid
 from datetime import datetime
 from enum import Enum
-from typing import Optional, TypedDict
+from typing import NotRequired, Optional, TypedDict
 
 from .config import get_config
 
@@ -59,7 +59,7 @@ class ReviewRuleResult(TypedDict):
     note: str  # 備考（例: "SpaceBackgroundIdが未使用"）
 
 
-class VerificationErrorEntry(TypedDict, total=False):
+class VerificationErrorEntry(TypedDict):
     """検証エラー詳細（Phase 6 → Phase 5 リトライ時の情報伝達用）"""
     repository: str  # リポジトリ名（例: "Backend", "API"）
     command: str  # コマンド種別（"build", "test", "lint"）
@@ -70,7 +70,10 @@ class VerificationErrorEntry(TypedDict, total=False):
     # truncate 前の **full** stdout/stderr から計算した sha256 16 桁 hex を
     # 載せ、Review Issues DB の dedupe_key 入力として使う。state にも残る
     # ので Phase 5 retry が同じ識別子を参照することもできる。
-    full_output_hash: Optional[str]
+    # Python 3.11+ の NotRequired で **このフィールドのみ optional** に。
+    # 既存の repository / command / success / error_output は必須のまま保持
+    # して、Phase 5 retry 側の契約を弱めない（PR #37 Copilot 8 回目指摘）。
+    full_output_hash: NotRequired[Optional[str]]
 
 
 class RepositoryPhaseStatus(str, Enum):

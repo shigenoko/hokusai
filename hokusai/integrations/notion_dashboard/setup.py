@@ -81,7 +81,8 @@ _PULL_REQUESTS_DB_DESCRIPTION = (
 _REVIEW_ISSUES_DB_DESCRIPTION = (
     "⚠️ HOKUSAI が自動管理する DB です。レコードは HOKUSAI が Phase 6 verification "
     "failure / Phase 7 final review 等の指摘発生時に自動生成・更新します。dedupe_key "
-    "は source + repository + rule + file + message の sha256 hash で重複を抑止します。"
+    "は workflow_id + source + repository + rule + file + message の sha256 hash の "
+    "**先頭 16 文字（16 hex chars）** で重複を抑止します。"
     "Phase 6 verification failure に限り、Message プロパティは error_output の先頭行のみ"
     "ですが、dedupe_key の hash 入力には error_output 全文を使います（test runner が"
     "共通バナーを先頭行に出すケースで別失敗を区別するため、Message が同じでも別レコードに"

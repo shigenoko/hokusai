@@ -71,19 +71,30 @@ def build_dedupe_key(
     file: str | None,
     message: str,
     repository: str | None = None,
+    workflow_id: str | None = None,
 ) -> str:
-    """source + repository + rule + file + message から決定的な dedupe_key を生成する。
+    """workflow_id + source + repository + rule + file + message から決定的な
+    dedupe_key を生成する。sha256 を計算し、その hex digest の **先頭 16 文字
+    （16 hex chars）** を切り出して返す。
 
-    source / repository も hash 入力に含めることで、別 source / 別リポジトリが
-    偶然同じ rule/file/message を生成しても別レコードとして扱う。Phase 6/7 の
-    payload は file が None になるケースが多いため、repository を含めないと
-    同一 rule + 同一 message を出す別リポジトリの指摘が同じ Notion ページに
-    集約され、Repository フィールドが上書きで失われる問題が生じる
-    （PR #37 Copilot 指摘）。`None` は空文字に正規化し、message は前後空白を
-    取り除いた上で全長を使う（先頭だけだと別箇所の同種指摘が衝突する）。
+    各フィールドを hash 入力に含める根拠:
+    - source / repository: 別 source（final_review / verification_failure 等）/
+      別リポジトリの偶然一致を別レコード扱いするため
+    - workflow_id: 同じ source/repo/rule/file/message が **別 workflow** で
+      発生した場合、別レコードとして残すため。workflow_id を含めないと、
+      後発 workflow の dispatch で Workflow relation が上書きされ、先発
+      workflow との関連が失われる（PR #37 Copilot 8 回目指摘）
+    - file: 同じ rule/message でも別ファイルなら別ケース
+    - message: rule/file が無い payload でも内容差で識別する
+
+    Phase 6/7 の payload は file が None になるケースが多いが、workflow_id
+    と repository は必ず入るので最低限の識別性を確保できる。`None` は空文字
+    に正規化し、message は前後空白を取り除いた上で全長を使う（先頭だけだと
+    別箇所の同種指摘が衝突する）。
     """
     parts = "\x1f".join(
         (
+            workflow_id or "",
             source or "",
             repository or "",
             rule or "",
@@ -113,6 +124,7 @@ class ReviewIssuesDBClient:
         rule: str | None = None,
         file: str | None = None,
         repository: str | None = None,
+        workflow_id: str | None = None,
         workflow_page_id: str | None = None,
         operator: str | None = None,
         dedupe_key: str | None = None,
@@ -128,6 +140,8 @@ class ReviewIssuesDBClient:
             rule: linter rule / レビュー観点（任意）
             file: 該当ファイルパス（任意）
             repository: リポジトリ表示名（PR DB と揃える: Backend / Frontend 等）
+            workflow_id: HOKUSAI workflow_id（dedupe_key の hash 入力に含める。
+                同じ rule/file/message でも別 workflow なら別レコードに分けるため）
             workflow_page_id: 関連 workflow の Notion page id（relation 用）
             operator: workflow を起動した実行者
             dedupe_key: 重複判定キー。省略時は build_dedupe_key で生成
@@ -143,6 +157,7 @@ class ReviewIssuesDBClient:
                 file=file,
                 message=message,
                 repository=repository,
+                workflow_id=workflow_id,
             )
         if title is None:
             title = _build_title(source=source, file=file, message=message)
