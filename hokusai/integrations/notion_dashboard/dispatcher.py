@@ -389,6 +389,26 @@ class NotionSyncDispatcher:
             workflow_page_id = self._get_workflows_client()._find_page_id(
                 workflow_id
             )
+            # workflow page が見つからない場合、workflow_started の同期が
+            # outbox に残っている可能性がある（race condition）。残って
+            # いれば、この Review Issue も relation 無しで silent に作らず
+            # 後でリトライさせる（PR #37 Copilot 4 回目指摘）。
+            # 残っていない＝本当に対応 workflow が存在しないケースは relation
+            # 無しで作成（best effort）。
+            if workflow_page_id is None:
+                pending_count = 0
+                try:
+                    pending_count = self._count_pending_for(workflow_id)
+                except Exception:
+                    pending_count = 0
+                if pending_count > 0:
+                    raise NotionAPIError(
+                        503,
+                        f"workflow page not yet synced for workflow_id="
+                        f"{workflow_id}; deferring review_issue_raised dispatch "
+                        f"({pending_count} pending workflow events)",
+                        code="workflow_page_pending",
+                    )
 
         client = self._get_review_issues_client(review_db_id)
         client.upsert_record(

@@ -227,6 +227,13 @@ def test_profile_config_template_parses_via_hokusai_loaders():
     nd = _parse_notion_dashboard_config(data)
     assert nd.enabled is True
     assert nd.api_token_env == "DEMO_NOTION_API_TOKEN"
+    # PR #37 Copilot 4 回目指摘: template の placeholder key にタイポがあると
+    # 既定値（HOKUSAI_NOTION_REVIEW_ISSUES_DB_ID）にサイレントにフォール
+    # バックしてもこのテストが pass してしまう。実 parser が期待値で
+    # consume したことを明示的に検証する。
+    assert nd.workflows_db_id_env == "DEMO_NOTION_WORKFLOWS_DB_ID"
+    assert nd.pull_requests_db_id_env == "DEMO_NOTION_PR_DB_ID"
+    assert nd.review_issues_db_id_env == "DEMO_NOTION_REVIEW_ISSUES_DB_ID"
 
     cr = _parse_cross_review_config(data)
     assert cr.provider == "codex"  # template の default

@@ -427,8 +427,8 @@ _DOCUMENTATION_HUB_TITLE = "Documentation"
 _DOCUMENTATION_HUB_ICON = "📚"
 _DOCUMENTATION_HUB_PLACEHOLDER = (
     "HOKUSAI の Notion governance layer 上で人間が管理するドキュメントのハブ。"
-    "HOKUSAI が自動同期する DB（Workflows / Pull Requests）とは別領域で、"
-    "議論・運用・要件などをツリーで整理する。"
+    "HOKUSAI が自動同期する DB（Workflows / Pull Requests / Review Issues）"
+    "とは別領域で、議論・運用・要件などをツリーで整理する。"
 )
 # 旧タイトル（idempotent 検出時に後方互換で skip 対象）。新→旧の順で 2 世代分:
 # - v0.4.4: "HOKUSAI Documentation"

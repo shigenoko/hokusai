@@ -1365,6 +1365,89 @@ def test_dispatcher_review_issue_raised_propagates_workflow_lookup_errors(
     assert store.count_notion_sync_pending() == 1
 
 
+def test_dispatcher_review_issue_raised_defers_when_workflow_sync_pending(
+    store: SQLiteStore, monkeypatch
+):
+    """workflow page が見つからず、かつ outbox に pending な workflow sync
+    エントリが残っている場合は、Review Issue 作成を deferして outbox に積む
+    （race condition 対応 / PR #37 Copilot 4 回目指摘）。"""
+    monkeypatch.setenv("TEST_TOKEN", "secret")
+    monkeypatch.setenv("TEST_DB", "wf-db")
+    monkeypatch.setenv("TEST_REVIEW_ISSUES_DB", "ri-db")
+
+    cfg = _make_config()
+    cfg.review_issues_db_id_env = "TEST_REVIEW_ISSUES_DB"
+
+    # workflow_started が outbox に残っている状況を再現
+    store.enqueue_notion_sync(
+        idempotency_key="wf-race:workflow_started:1:0",
+        workflow_id="wf-race",
+        event_type="workflow_started",
+        payload={"workflow_id": "wf-race", "status": "running"},
+    )
+    assert store.count_notion_sync_pending() == 1
+
+    # workflow page lookup は空（=ページ未作成）
+    api = _RecordingAPI(query_result=[])
+
+    class _Disp(NotionSyncDispatcher):
+        def _get_api(self):
+            return api  # type: ignore[return-value]
+
+    disp = _Disp(store=store, config=cfg)
+    result = disp.dispatch("review_issue_raised", {
+        "workflow_id": "wf-race",
+        "source": "final_review",
+        "message": "Missing validation",
+        "rule": "P01",
+        "repository": "Backend",
+        "dedupe_key": "k1",
+    })
+    # outbox に積まれ False（relation 無しで silent に作らない）
+    assert result is False
+    creates = [c for c in api.calls if c[0] == "create"]
+    assert creates == []
+    # outbox に workflow_started + review_issue_raised の 2 件
+    assert store.count_notion_sync_pending() == 2
+
+
+def test_dispatcher_review_issue_raised_proceeds_when_no_pending_workflow_sync(
+    store: SQLiteStore, monkeypatch
+):
+    """workflow page が無く、outbox にも pending workflow sync が無い場合は
+    relation 無しで Review Issue を作成する（genuine miss として best effort 動作）"""
+    monkeypatch.setenv("TEST_TOKEN", "secret")
+    monkeypatch.setenv("TEST_DB", "wf-db")
+    monkeypatch.setenv("TEST_REVIEW_ISSUES_DB", "ri-db")
+
+    cfg = _make_config()
+    cfg.review_issues_db_id_env = "TEST_REVIEW_ISSUES_DB"
+
+    # outbox は空
+    assert store.count_notion_sync_pending() == 0
+
+    api = _RecordingAPI(query_result=[])  # workflow page も Review Issue dedupe も miss
+
+    class _Disp(NotionSyncDispatcher):
+        def _get_api(self):
+            return api  # type: ignore[return-value]
+
+    disp = _Disp(store=store, config=cfg)
+    result = disp.dispatch("review_issue_raised", {
+        "workflow_id": "wf-1",
+        "source": "final_review",
+        "message": "Missing validation",
+        "rule": "P01",
+        "repository": "Backend",
+    })
+    assert result is True
+    # relation 無しで create_page が走る
+    creates = [c for c in api.calls if c[0] == "create"]
+    assert len(creates) == 1
+    props = creates[0][1]["properties"]
+    assert "Workflow" not in props
+
+
 def test_dispatcher_review_issue_raised_resolves_workflow_relation(
     store: SQLiteStore, monkeypatch
 ):
