@@ -722,7 +722,7 @@ def _handle_notion_setup(args, config=None) -> int:
     env 名解決の優先順位（v0.4.1〜）:
       1. `--api-token-env` 等で CLI 明示指定された値
       2. config（profile 解決済み）の notion_dashboard.{api_token_env,
-         workflows_db_id_env, pull_requests_db_id_env}
+         workflows_db_id_env, pull_requests_db_id_env, review_issues_db_id_env}
       3. 既定値（HOKUSAI_NOTION_API_TOKEN 等）
 
     Args:
@@ -771,6 +771,7 @@ def _handle_notion_setup(args, config=None) -> int:
         return 1
     workflows_env = "HOKUSAI_NOTION_WORKFLOWS_DB_ID"
     pull_requests_env = "HOKUSAI_NOTION_PR_DB_ID"
+    review_issues_env = "HOKUSAI_NOTION_REVIEW_ISSUES_DB_ID"
 
     profile_name = getattr(args, "profile", None)
     if config is not None:
@@ -791,6 +792,11 @@ def _handle_notion_setup(args, config=None) -> int:
                 getattr(nd_cfg, "pull_requests_db_id_env", None),
                 pull_requests_env,
                 "notion_dashboard.pull_requests_db_id_env",
+            )
+            review_issues_env = _pick_env_name(
+                getattr(nd_cfg, "review_issues_db_id_env", None),
+                review_issues_env,
+                "notion_dashboard.review_issues_db_id_env",
             )
 
     if api_token_env is None:
@@ -835,6 +841,8 @@ def _handle_notion_setup(args, config=None) -> int:
     print("作成されたリソース:")
     print(f"  Workflows DB:          {result['workflows_db_id']}")
     print(f"  Pull Requests DB:      {result['pull_requests_db_id']}")
+    if result.get("review_issues_db_id"):
+        print(f"  Review Issues DB:      {result['review_issues_db_id']}")
 
     # scaffold 結果（--scaffold 指定時のみ含まれる）
     scaffold_result = result.get("scaffold")
@@ -866,6 +874,8 @@ def _handle_notion_setup(args, config=None) -> int:
     print()
     print(f'  export {workflows_env}="{result["workflows_db_id"]}"')
     print(f'  export {pull_requests_env}="{result["pull_requests_db_id"]}"')
+    if result.get("review_issues_db_id"):
+        print(f'  export {review_issues_env}="{result["review_issues_db_id"]}"')
 
     # --persist 指定時は rc ファイルへ書き込む
     if getattr(args, "persist", False):
@@ -880,6 +890,7 @@ def _handle_notion_setup(args, config=None) -> int:
                 result,
                 workflows_env_name=workflows_env,
                 pull_requests_env_name=pull_requests_env,
+                review_issues_env_name=review_issues_env,
                 profile_name=profile_name,
                 backup=not getattr(args, "no_backup", False),
             )

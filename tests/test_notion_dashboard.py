@@ -55,6 +55,8 @@ def test_parse_notion_dashboard_full_config():
             "enabled": True,
             "api_token_env": "MY_TOKEN",
             "workflows_db_id_env": "MY_DB",
+            "pull_requests_db_id_env": "MY_PR_DB",
+            "review_issues_db_id_env": "MY_RI_DB",
             "sync_outbox": {"enabled": True, "max_retry_attempts": 5},
             "retry": {"max_attempts": 5, "backoff_seconds": 10},
             "rate_limit": {"requests_per_second": 3, "debounce_ms": 2000},
@@ -63,11 +65,21 @@ def test_parse_notion_dashboard_full_config():
     assert cfg.enabled is True
     assert cfg.api_token_env == "MY_TOKEN"
     assert cfg.workflows_db_id_env == "MY_DB"
+    assert cfg.pull_requests_db_id_env == "MY_PR_DB"
+    assert cfg.review_issues_db_id_env == "MY_RI_DB"
     assert cfg.sync_outbox.max_retry_attempts == 5
     assert cfg.retry.max_attempts == 5
     assert cfg.retry.backoff_seconds == 10.0
     assert cfg.rate_limit.requests_per_second == 3.0
     assert cfg.rate_limit.debounce_ms == 2000
+
+
+def test_parse_notion_dashboard_review_issues_env_falls_back_to_default():
+    """review_issues_db_id_env が空文字の場合は既定値にフォールバック（#36）"""
+    cfg = _parse_notion_dashboard_config({
+        "notion_dashboard": {"review_issues_db_id_env": ""}
+    })
+    assert cfg.review_issues_db_id_env == "HOKUSAI_NOTION_REVIEW_ISSUES_DB_ID"
 
 
 def test_parse_notion_dashboard_clamps_extreme_values():
@@ -1202,6 +1214,357 @@ def test_dispatcher_pr_created_skips_existing_prs(store: SQLiteStore, monkeypatc
 
 
 # ---------------------------------------------------------------------------
+# review_issue_raised イベントのルーティング（#36 / v0.5.0）
+# ---------------------------------------------------------------------------
+
+
+def test_dispatcher_review_issue_raised_skips_when_db_id_unset(
+    store: SQLiteStore, monkeypatch
+):
+    """Review Issues DB ID が未設定なら no-op で成功扱い"""
+    monkeypatch.setenv("TEST_TOKEN", "secret")
+    monkeypatch.setenv("TEST_DB", "wf-db")
+    monkeypatch.delenv("TEST_REVIEW_ISSUES_DB", raising=False)
+
+    cfg = _make_config()
+    cfg.review_issues_db_id_env = "TEST_REVIEW_ISSUES_DB"
+
+    api = _RecordingAPI()
+
+    class _Disp(NotionSyncDispatcher):
+        def _get_api(self):
+            return api  # type: ignore[return-value]
+
+    disp = _Disp(store=store, config=cfg)
+    result = disp.dispatch("review_issue_raised", {
+        "workflow_id": "wf-1",
+        "source": "final_review",
+        "message": "x",
+    })
+    assert result is True
+    # API は呼ばれない
+    assert api.calls == []
+
+
+def test_dispatcher_review_issue_raised_creates_record_via_review_issues_db(
+    store: SQLiteStore, monkeypatch
+):
+    """設定済みなら Review Issues DB に create_page される"""
+    monkeypatch.setenv("TEST_TOKEN", "secret")
+    monkeypatch.setenv("TEST_DB", "wf-db")
+    monkeypatch.setenv("TEST_REVIEW_ISSUES_DB", "ri-db")
+
+    cfg = _make_config()
+    cfg.review_issues_db_id_env = "TEST_REVIEW_ISSUES_DB"
+
+    # workflows_db._find_page_id が返す既存ページ + Review Issues DB の
+    # find_by_dedupe_key が返す空結果（新規作成パス）を兼ねる query_result
+    api = _RecordingAPI(query_result=None)
+
+    class _Disp(NotionSyncDispatcher):
+        def _get_api(self):
+            return api  # type: ignore[return-value]
+
+    disp = _Disp(store=store, config=cfg)
+    result = disp.dispatch("review_issue_raised", {
+        "workflow_id": "wf-1",
+        "source": "final_review",
+        "message": "Missing validation",
+        "severity": "high",
+        "rule": "P01",
+        "repository": "Backend",
+    })
+    assert result is True
+
+    creates = [c for c in api.calls if c[0] == "create"]
+    assert len(creates) == 1
+    props = creates[0][1]["properties"]
+    assert props["Source"]["select"]["name"] == "final_review"
+    assert props["Repository"]["select"]["name"] == "Backend"
+    assert props["Rule ID"]["rich_text"][0]["text"]["content"] == "P01"
+
+
+def test_dispatcher_review_issue_raised_requires_source_and_message(
+    store: SQLiteStore, monkeypatch
+):
+    """source / message 欠落時は API を呼ばずに no-op"""
+    monkeypatch.setenv("TEST_TOKEN", "secret")
+    monkeypatch.setenv("TEST_DB", "wf-db")
+    monkeypatch.setenv("TEST_REVIEW_ISSUES_DB", "ri-db")
+
+    cfg = _make_config()
+    cfg.review_issues_db_id_env = "TEST_REVIEW_ISSUES_DB"
+
+    api = _RecordingAPI()
+
+    class _Disp(NotionSyncDispatcher):
+        def _get_api(self):
+            return api  # type: ignore[return-value]
+
+    disp = _Disp(store=store, config=cfg)
+    # message 欠落
+    result = disp.dispatch("review_issue_raised", {
+        "workflow_id": "wf-1",
+        "source": "final_review",
+    })
+    assert result is True
+    assert api.calls == []
+
+
+def test_dispatcher_review_issue_raised_propagates_workflow_lookup_errors(
+    store: SQLiteStore, monkeypatch
+):
+    """workflow lookup の transient エラー（API failure 等）は outbox にキューイングし、
+    relation 無しのレコードを silent に作らない（PR #37 Copilot 3 回目指摘）。"""
+    monkeypatch.setenv("TEST_TOKEN", "secret")
+    monkeypatch.setenv("TEST_DB", "wf-db")
+    monkeypatch.setenv("TEST_REVIEW_ISSUES_DB", "ri-db")
+
+    cfg = _make_config()
+    cfg.review_issues_db_id_env = "TEST_REVIEW_ISSUES_DB"
+
+    class _ErrorOnFirstQuery:
+        """workflows_db._find_page_id が API エラーで raise するシナリオ"""
+
+        def __init__(self):
+            self.calls: list[tuple[str, dict]] = []
+
+        def query_database(self, database_id: str, *, filter_: dict | None = None) -> dict:
+            self.calls.append(("query", {"database_id": database_id, "filter": filter_}))
+            raise NotionAPIError(503, "service unavailable", code="rate_limited")
+
+        def create_page(self, payload: dict) -> dict:
+            self.calls.append(("create", payload))
+            return {"id": "page-new"}
+
+        def update_page(self, page_id: str, payload: dict) -> dict:
+            self.calls.append(("update", {"page_id": page_id, **payload}))
+            return {"id": page_id}
+
+    api = _ErrorOnFirstQuery()
+
+    class _Disp(NotionSyncDispatcher):
+        def _get_api(self):
+            return api  # type: ignore[return-value]
+
+    disp = _Disp(store=store, config=cfg)
+    result = disp.dispatch("review_issue_raised", {
+        "workflow_id": "wf-1",
+        "source": "final_review",
+        "message": "Missing validation",
+        "rule": "P01",
+        "repository": "Backend",
+        "dedupe_key": "k1",
+    })
+    # outbox に積まれ False を返す（成功扱いにしない）
+    assert result is False
+    # Review Issue create_page は呼ばれていない（relation なしで silent 作成しない）
+    creates = [c for c in api.calls if c[0] == "create"]
+    assert creates == []
+    # outbox にエントリがある
+    assert store.count_notion_sync_pending() == 1
+
+
+def test_dispatcher_review_issue_raised_defers_when_workflow_sync_pending(
+    store: SQLiteStore, monkeypatch
+):
+    """workflow page が見つからず、かつ outbox に pending な workflow sync
+    エントリが残っている場合は、Review Issue 作成を deferして outbox に積む
+    （race condition 対応 / PR #37 Copilot 4 回目指摘）。"""
+    monkeypatch.setenv("TEST_TOKEN", "secret")
+    monkeypatch.setenv("TEST_DB", "wf-db")
+    monkeypatch.setenv("TEST_REVIEW_ISSUES_DB", "ri-db")
+
+    cfg = _make_config()
+    cfg.review_issues_db_id_env = "TEST_REVIEW_ISSUES_DB"
+
+    # workflow_started が outbox に残っている状況を再現
+    store.enqueue_notion_sync(
+        idempotency_key="wf-race:workflow_started:1:0",
+        workflow_id="wf-race",
+        event_type="workflow_started",
+        payload={"workflow_id": "wf-race", "status": "running"},
+    )
+    assert store.count_notion_sync_pending() == 1
+
+    # workflow page lookup は空（=ページ未作成）
+    api = _RecordingAPI(query_result=[])
+
+    class _Disp(NotionSyncDispatcher):
+        def _get_api(self):
+            return api  # type: ignore[return-value]
+
+    disp = _Disp(store=store, config=cfg)
+    result = disp.dispatch("review_issue_raised", {
+        "workflow_id": "wf-race",
+        "source": "final_review",
+        "message": "Missing validation",
+        "rule": "P01",
+        "repository": "Backend",
+        "dedupe_key": "k1",
+    })
+    # outbox に積まれ False（relation 無しで silent に作らない）
+    assert result is False
+    creates = [c for c in api.calls if c[0] == "create"]
+    assert creates == []
+    # outbox に workflow_started + review_issue_raised の 2 件
+    assert store.count_notion_sync_pending() == 2
+
+
+def test_dispatcher_review_issue_raised_does_not_self_defer_during_retry(
+    store: SQLiteStore, monkeypatch
+):
+    """retry_pending() 経由の review_issue_raised 再送で、自己 entry を pending 集計
+    から除外し無限自己 deferral を防ぐ（PR #37 Copilot 5 回目指摘）。
+
+    かつ、`review_issue_raised` 自体は workflow page 関連イベントから除外され、
+    別の review_issue_raised entry が同 workflow で残っていても deferral しない。
+    """
+    monkeypatch.setenv("TEST_TOKEN", "secret")
+    monkeypatch.setenv("TEST_DB", "wf-db")
+    monkeypatch.setenv("TEST_REVIEW_ISSUES_DB", "ri-db")
+
+    cfg = _make_config()
+    cfg.review_issues_db_id_env = "TEST_REVIEW_ISSUES_DB"
+
+    # outbox には review_issue_raised が 2 件のみ（自己 entry + 別 entry）。
+    # workflow_started は意図的に追加しない: 追加すると race deferral が
+    # 発動してしまい、本テストの「review_issue_raised 同士は workflow page
+    # event ではないので self-deferral しない」という主旨を検証できない。
+    self_key = "wf-x:review_issue_raised:dkey-self"
+    store.enqueue_notion_sync(
+        idempotency_key=self_key,
+        workflow_id="wf-x",
+        event_type="review_issue_raised",
+        payload={
+            "workflow_id": "wf-x",
+            "source": "final_review",
+            "message": "m",
+            "dedupe_key": "dkey-self",
+        },
+    )
+    store.enqueue_notion_sync(
+        idempotency_key="wf-x:review_issue_raised:dkey-other",
+        workflow_id="wf-x",
+        event_type="review_issue_raised",
+        payload={
+            "workflow_id": "wf-x",
+            "source": "final_review",
+            "message": "m2",
+            "dedupe_key": "dkey-other",
+        },
+    )
+    assert store.count_notion_sync_pending() == 2
+
+    # workflow page もまだ存在しない（=None）
+    api = _RecordingAPI(query_result=[])
+
+    class _Disp(NotionSyncDispatcher):
+        def _get_api(self):
+            return api  # type: ignore[return-value]
+
+    disp = _Disp(store=store, config=cfg)
+    # retry_pending() の経路を模してダイレクトに _send_to_notion(exclude_key=self) を呼ぶ
+    disp._send_to_notion(
+        "review_issue_raised",
+        {
+            "workflow_id": "wf-x",
+            "source": "final_review",
+            "message": "m",
+            "rule": "P01",
+            "repository": "Backend",
+            "dedupe_key": "dkey-self",
+        },
+        exclude_idempotency_key=self_key,
+    )
+    # workflow page event は 0 件（review_issue_raised は集計から除外）なので
+    # deferral せず、relation 無しで create が走る
+    creates = [c for c in api.calls if c[0] == "create"]
+    assert len(creates) == 1
+    props = creates[0][1]["properties"]
+    assert "Workflow" not in props
+
+
+def test_dispatcher_review_issue_raised_proceeds_when_no_pending_workflow_sync(
+    store: SQLiteStore, monkeypatch
+):
+    """workflow page が無く、outbox にも pending workflow sync が無い場合は
+    relation 無しで Review Issue を作成する（genuine miss として best effort 動作）"""
+    monkeypatch.setenv("TEST_TOKEN", "secret")
+    monkeypatch.setenv("TEST_DB", "wf-db")
+    monkeypatch.setenv("TEST_REVIEW_ISSUES_DB", "ri-db")
+
+    cfg = _make_config()
+    cfg.review_issues_db_id_env = "TEST_REVIEW_ISSUES_DB"
+
+    # outbox は空
+    assert store.count_notion_sync_pending() == 0
+
+    api = _RecordingAPI(query_result=[])  # workflow page も Review Issue dedupe も miss
+
+    class _Disp(NotionSyncDispatcher):
+        def _get_api(self):
+            return api  # type: ignore[return-value]
+
+    disp = _Disp(store=store, config=cfg)
+    result = disp.dispatch("review_issue_raised", {
+        "workflow_id": "wf-1",
+        "source": "final_review",
+        "message": "Missing validation",
+        "rule": "P01",
+        "repository": "Backend",
+    })
+    assert result is True
+    # relation 無しで create_page が走る
+    creates = [c for c in api.calls if c[0] == "create"]
+    assert len(creates) == 1
+    props = creates[0][1]["properties"]
+    assert "Workflow" not in props
+
+
+def test_dispatcher_review_issue_raised_resolves_workflow_relation(
+    store: SQLiteStore, monkeypatch
+):
+    """workflow_id が Workflows DB に存在する場合、Workflow relation を張る（#36 / PR #37）"""
+    monkeypatch.setenv("TEST_TOKEN", "secret")
+    monkeypatch.setenv("TEST_DB", "wf-db")
+    monkeypatch.setenv("TEST_REVIEW_ISSUES_DB", "ri-db")
+
+    cfg = _make_config()
+    cfg.review_issues_db_id_env = "TEST_REVIEW_ISSUES_DB"
+
+    # workflows_db._find_page_id がヒットを返す + Review Issues DB の dedupe
+    # 検索は空（新規作成パス）。_RecordingAPI は単一の query_result を使い回す
+    # ため、workflows_db への lookup と review_issues_db への lookup の両方が
+    # 同じ結果を返してしまうが、Review Issues 側は dedupe_key で検索するため
+    # 「既存ページがある」と解釈されて update_page にルートする。テストの
+    # 目的は Workflow relation の resolution なので update でも payload を
+    # 検証可能。
+    api = _RecordingAPI(query_result=[{"id": "wf-existing-page"}])
+
+    class _Disp(NotionSyncDispatcher):
+        def _get_api(self):
+            return api  # type: ignore[return-value]
+
+    disp = _Disp(store=store, config=cfg)
+    result = disp.dispatch("review_issue_raised", {
+        "workflow_id": "wf-1",
+        "source": "final_review",
+        "message": "Missing validation",
+        "rule": "P01",
+        "repository": "Backend",
+    })
+    assert result is True
+
+    # update / create のどちらかに Workflow relation が含まれる
+    write_calls = [c for c in api.calls if c[0] in ("create", "update")]
+    assert len(write_calls) == 1
+    payload = write_calls[0][1]
+    props = payload["properties"]
+    assert props["Workflow"] == {"relation": [{"id": "wf-existing-page"}]}
+
+
+# ---------------------------------------------------------------------------
 # WorkflowRunner: Notion sync hooks (top-level helpers)
 # ---------------------------------------------------------------------------
 
@@ -1393,12 +1756,174 @@ def test_safe_notion_dispatch_swallows_exceptions():
     """WorkflowRunner._safe_notion_dispatch は dispatcher の例外を握り潰す"""
     runner = _make_runner()
 
-    def raising(event_type, payload):
+    def raising(event_type, payload, **kwargs):
         raise RuntimeError("boom")
 
     runner.notion_dispatcher.dispatch = raising  # type: ignore[assignment]
     # 例外が漏れないこと
     runner._safe_notion_dispatch("phase_changed", {"workflow_id": "x"})
+
+
+# ---------------------------------------------------------------------------
+# WorkflowRunner._drain_pending_review_issues（#36 / PR #37 Copilot 2 回目）
+# ---------------------------------------------------------------------------
+
+
+class _CapturingDispatch:
+    """_safe_notion_dispatch を差し替えて event / payload / idempotency_key を記録"""
+
+    def __init__(self, runner):
+        self.calls: list[dict] = []
+
+        def fake(event_type, payload, *, idempotency_key=None):
+            self.calls.append({
+                "event_type": event_type,
+                "payload": payload,
+                "idempotency_key": idempotency_key,
+            })
+
+        runner._safe_notion_dispatch = fake  # type: ignore[method-assign]
+
+
+class _FakeCompiledWorkflow:
+    """compiled_workflow の update_state を記録するスタブ"""
+
+    def __init__(self):
+        self.update_state_calls: list[tuple[dict, dict]] = []
+
+    def update_state(self, config: dict, values: dict) -> None:
+        self.update_state_calls.append((config, values))
+
+
+def test_drain_pending_review_issues_no_op_when_empty():
+    runner = _make_runner()
+    capt = _CapturingDispatch(runner)
+    runner.compiled_workflow = _FakeCompiledWorkflow()  # type: ignore[assignment]
+
+    n = runner._drain_pending_review_issues(
+        {"pending_review_issues": []}, {"thread": "x"}
+    )
+    assert n == 0
+    assert capt.calls == []
+    assert runner.compiled_workflow.update_state_calls == []
+
+
+def test_drain_pending_review_issues_dispatches_each_with_per_issue_idempotency_key():
+    """複数の pending 指摘を per-issue idempotency_key で dispatch する"""
+    runner = _make_runner()
+    capt = _CapturingDispatch(runner)
+    fake_cw = _FakeCompiledWorkflow()
+    runner.compiled_workflow = fake_cw  # type: ignore[assignment]
+
+    pending = [
+        {
+            "workflow_id": "wf-1",
+            "source": "final_review",
+            "message": "msg1",
+            "rule": "P01",
+            "repository": "Backend",
+            "dedupe_key": "dkey-alpha",
+        },
+        {
+            "workflow_id": "wf-1",
+            "source": "verification_failure",
+            "message": "msg2",
+            "rule": "test",
+            "repository": "Backend",
+            "dedupe_key": "dkey-beta",
+        },
+    ]
+    n = runner._drain_pending_review_issues(
+        {"pending_review_issues": pending, "operator": "alice"},
+        {"thread": "x"},
+    )
+    assert n == 2
+    assert len(capt.calls) == 2
+    assert capt.calls[0]["event_type"] == "review_issue_raised"
+    # idempotency_key は per-issue で dedupe_key を含む
+    assert capt.calls[0]["idempotency_key"] == "wf-1:review_issue_raised:dkey-alpha"
+    assert capt.calls[1]["idempotency_key"] == "wf-1:review_issue_raised:dkey-beta"
+    # state["operator"] が enrich される
+    assert capt.calls[0]["payload"]["operator"] == "alice"
+    assert capt.calls[1]["payload"]["operator"] == "alice"
+    # drain 後に state を clear
+    assert len(fake_cw.update_state_calls) == 1
+    assert fake_cw.update_state_calls[0][1] == {"pending_review_issues": []}
+
+
+def test_drain_pending_review_issues_prefers_state_operator_over_resolve(monkeypatch):
+    """state["operator"] が set されていれば resolve_operator_name は呼ばない
+
+    PR #37 Copilot 2 回目指摘: workflow_started 時の operator と一貫させる。
+    """
+    runner = _make_runner()
+    capt = _CapturingDispatch(runner)
+    runner.compiled_workflow = _FakeCompiledWorkflow()  # type: ignore[assignment]
+
+    resolve_called = []
+    monkeypatch.setattr(
+        workflow_module,
+        "resolve_operator_name",
+        lambda: resolve_called.append(1) or "should-not-be-used",
+    )
+
+    pending = [{"workflow_id": "wf-1", "dedupe_key": "k", "source": "x", "message": "m"}]
+    runner._drain_pending_review_issues(
+        {"pending_review_issues": pending, "operator": "from-state"},
+        {"thread": "x"},
+    )
+    # resolve_operator_name は呼ばれない
+    assert resolve_called == []
+    # state の operator が enrich される
+    assert capt.calls[0]["payload"]["operator"] == "from-state"
+
+
+def test_drain_pending_review_issues_falls_back_to_resolve_when_state_empty(monkeypatch):
+    """state["operator"] が無く dispatcher 設定済みなら resolve_operator_name で補う"""
+    runner = _make_runner()
+    capt = _CapturingDispatch(runner)
+    runner.compiled_workflow = _FakeCompiledWorkflow()  # type: ignore[assignment]
+    # is_configured を True に
+    runner.notion_dispatcher.is_configured = lambda: True  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        workflow_module, "resolve_operator_name", lambda: "fallback-user"
+    )
+
+    pending = [{"workflow_id": "wf-1", "dedupe_key": "k", "source": "x", "message": "m"}]
+    runner._drain_pending_review_issues(
+        {"pending_review_issues": pending}, {"thread": "x"}
+    )
+    assert capt.calls[0]["payload"]["operator"] == "fallback-user"
+
+
+def test_drain_pending_review_issues_idempotency_key_none_when_missing_dedupe():
+    """dedupe_key が無い payload は idempotency_key=None で dispatch（fallback 安全）"""
+    runner = _make_runner()
+    capt = _CapturingDispatch(runner)
+    runner.compiled_workflow = _FakeCompiledWorkflow()  # type: ignore[assignment]
+
+    pending = [{"workflow_id": "wf-1", "source": "x", "message": "m"}]
+    runner._drain_pending_review_issues(
+        {"pending_review_issues": pending}, {"thread": "x"}
+    )
+    assert capt.calls[0]["idempotency_key"] is None
+
+
+def test_drain_pending_review_issues_swallows_exceptions():
+    """drain 内の例外は best effort で握り潰す"""
+    runner = _make_runner()
+    runner.compiled_workflow = _FakeCompiledWorkflow()  # type: ignore[assignment]
+
+    def raising(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    runner._safe_notion_dispatch = raising  # type: ignore[method-assign]
+
+    # 例外が漏れず 0 を返すこと（n=0 でないかも、内部実装次第。少なくとも raise しない）
+    pending = [{"workflow_id": "wf-1", "dedupe_key": "k", "source": "x", "message": "m"}]
+    runner._drain_pending_review_issues(
+        {"pending_review_issues": pending}, {"thread": "x"}
+    )
 
 
 # ---------------------------------------------------------------------------

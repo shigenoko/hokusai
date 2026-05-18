@@ -187,6 +187,21 @@ class WorkflowState(TypedDict):
     final_review_rules: dict  # Dict[str, ReviewRuleResult] - ルール別結果
     final_review_by_repo: dict  # リポジトリ別レビュー結果 {"Backend": {"passed": True, "rules": {...}}, ...}
 
+    # === Review Issues DB 同期キュー（#36 / v0.5.0） ===
+    # Phase 6/7 等で発生した指摘を Notion Review Issues DB へ送るためのキュー。
+    # 各要素は dispatcher の review_issue_raised payload と同形式。
+    # workflow.py が各 step 後に drain してから clear する。retry で重複 enqueue
+    # された場合は Notion 側の dedupe_key で抑止する。
+    pending_review_issues: list
+
+    # === 実行者（Issue #21 / v0.4.8〜） ===
+    # workflow_started 時に resolve_operator_name() で確定し、それ以降の
+    # 同期イベント（review_issue_raised 等）は state 上の値を再利用する。
+    # `hokusai continue` を別ユーザが叩いて drain した場合でも、Workflows
+    # DB の Operator と整合させるため。`None` の場合は drain 時にフォール
+    # バックで再解決する（互換動作）。
+    operator: Optional[str]
+
     # === Phase 4: 作業計画 ===
     research_result: Optional[str]  # task-researchの出力（Phase 2）
     design_result: Optional[str]  # Phase 3 設計チェック結果
@@ -353,6 +368,8 @@ def create_initial_state(
         final_review_issues=[],
         final_review_rules={},
         final_review_by_repo={},
+        pending_review_issues=[],
+        operator=None,
         research_result=None,
         design_result=None,
         work_plan=None,

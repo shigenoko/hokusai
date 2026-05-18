@@ -5,6 +5,7 @@ Notion 上に HOKUSAI 用の DB / ページを一括作成する。
 作成されるリソース:
 - Workflows DB
 - Pull Requests DB（Workflow → Workflows DB の relation 付き）
+- Review Issues DB（Workflow → Workflows DB の relation 付き、v0.5.0〜 / #36）
 
 前提:
 - 親ページ（parent_page_id）が事前に Notion 上に存在し、HOKUSAI integration が
@@ -13,8 +14,9 @@ Notion 上に HOKUSAI 用の DB / ページを一括作成する。
 
 設計判断:
 - 冪等性は **DB 作成と scaffold ページで分ける**:
-    - DB 作成（Workflows / Pull Requests）: 冪等ではない。再実行すると新しい DB が
-      作られる。失敗時は Notion 側で archived/削除してから再実行することを想定。
+    - DB 作成（Workflows / Pull Requests / Review Issues）: 冪等ではない。
+      再実行すると新しい DB が作られる。失敗時は Notion 側で archived/削除
+      してから再実行することを想定。
     - `--scaffold` で作るドキュメントツリー: ハブ `Documentation`（icon 📚）と配下
       3 サブページ `議論`（💬）/ `運用ガイド`（📖）/ `要件定義`（📋）。idempotent で
       配置先パスごとに既存検出（pagination 全走査）。v0.4.3（絵文字 prefix 付き）
@@ -46,6 +48,11 @@ logger = get_logger("integrations.notion_dashboard.setup")
 # 警告文と親ページ名で確保する。
 WORKFLOWS_DB_TITLE = "Workflows DB"
 PULL_REQUESTS_DB_TITLE = "Pull Requests DB"
+REVIEW_ISSUES_DB_TITLE = "Review Issues DB"
+
+
+# 各 DB スキーマで共通利用するプロパティ名定数（重複文字列を一元化）
+_PROP_LAST_UPDATED = "Last Updated"
 
 
 # ----- DB 説明（手動編集を抑止する警告文） ------------------------------
@@ -69,6 +76,22 @@ _PULL_REQUESTS_DB_DESCRIPTION = (
     "Created At / Last Updated）への編集は行わないでください。Reviewer プロパティ"
     "のみ運用上の入力可能枠として用意しています。詳細は HOKUSAI 運用ガイド"
     "（docs/notion-dashboard-operation-guide.md）を参照。"
+)
+
+_REVIEW_ISSUES_DB_DESCRIPTION = (
+    "⚠️ HOKUSAI が自動管理する DB です。レコードは HOKUSAI が Phase 6 verification "
+    "failure / Phase 7 final review 等の指摘発生時に自動生成・更新します。dedupe_key "
+    "は source + repository + rule + file + message の sha256 hash で重複を抑止します。"
+    "Phase 6 verification failure に限り、Message プロパティは error_output の先頭行のみ"
+    "ですが、dedupe_key の hash 入力には error_output 全文を使います（test runner が"
+    "共通バナーを先頭行に出すケースで別失敗を区別するため、Message が同じでも別レコードに"
+    "なり得ます）。Source / Severity / Repository / Workflow / Dedupe Key / Operator / "
+    "Rule ID / File Path / Message / Last Updated を HOKUSAI が書き込みます。Status は"
+    "新規作成時のみ HOKUSAI が初期値 open を書き込み、その後の Status 編集"
+    "（waived / resolved）は人手の運用判断として HOKUSAI からの上書きを行いません。"
+    "Created At も新規作成時のみ書き込み、Notion 側で初回作成時刻を温存します。詳細は "
+    "HOKUSAI 運用ガイド（docs/notion-dashboard-operation-guide.md の Review Issues DB "
+    "セクション）を参照。"
 )
 
 
@@ -126,7 +149,7 @@ _WORKFLOWS_DB_PROPERTIES: dict[str, dict[str, Any]] = {
     "Plan Page": {"url": {}},
     "Started At": {"date": {}},
     "Completed At": {"date": {}},
-    "Last Updated": {"date": {}},
+    _PROP_LAST_UPDATED: {"date": {}},
     "Last Sync": {"date": {}},
     "Sync Errors": {"rich_text": {}},
     "Error Summary": {"rich_text": {}},
@@ -170,7 +193,73 @@ def _pr_db_properties(workflows_db_id: str) -> dict[str, dict[str, Any]]:
         },
         "Reviewer": {"multi_select": {"options": []}},
         "Created At": {"date": {}},
-        "Last Updated": {"date": {}},
+        _PROP_LAST_UPDATED: {"date": {}},
+    }
+
+
+# ----- Review Issues DB プロパティ定義 -----------------------------------
+# Source enum: 前 4 つが MVP で発行する種別、後 3 つは後続機能（Policy Governance /
+# LLM Gateway / Dependency Governance）用の先行確保枠。schema を後から拡張する
+# migration コストを避けるため最初から含めて作成する。review_issues_db.py の
+# SOURCE_* 定数と完全一致させること。
+def _review_issues_db_properties(workflows_db_id: str) -> dict[str, dict[str, Any]]:
+    return {
+        "Title": {"title": {}},
+        "Source": {
+            "select": {
+                "options": [
+                    {"name": "final_review", "color": "orange"},
+                    {"name": "verification_failure", "color": "red"},
+                    {"name": "copilot_review", "color": "blue"},
+                    {"name": "ci_failure", "color": "pink"},
+                    {"name": "policy_violation", "color": "purple"},
+                    {"name": "llm_gateway_block", "color": "yellow"},
+                    {"name": "dependency_vuln", "color": "brown"},
+                ]
+            }
+        },
+        "Status": {
+            "select": {
+                "options": [
+                    {"name": "open", "color": "red"},
+                    {"name": "resolved", "color": "green"},
+                    {"name": "waived", "color": "gray"},
+                    {"name": "duplicate", "color": "default"},
+                ]
+            }
+        },
+        "Severity": {
+            "select": {
+                "options": [
+                    {"name": "critical", "color": "red"},
+                    {"name": "high", "color": "orange"},
+                    {"name": "medium", "color": "yellow"},
+                    {"name": "low", "color": "blue"},
+                    {"name": "info", "color": "default"},
+                ]
+            }
+        },
+        "Repository": {
+            "select": {
+                "options": [
+                    {"name": "Backend", "color": "blue"},
+                    {"name": "Frontend", "color": "green"},
+                ]
+            }
+        },
+        "Workflow": {
+            "relation": {
+                "database_id": workflows_db_id,
+                "single_property": {},
+            }
+        },
+        "Dedupe Key": {"rich_text": {}},
+        "Operator": {"rich_text": {}},
+        "Rule ID": {"rich_text": {}},
+        "File Path": {"rich_text": {}},
+        "Message": {"rich_text": {}},
+        "Created At": {"date": {}},
+        _PROP_LAST_UPDATED: {"date": {}},
     }
 
 
@@ -202,6 +291,7 @@ def setup_notion_workspace(
         {
             "workflows_db_id": "...",
             "pull_requests_db_id": "...",
+            "review_issues_db_id": "...",
             "scaffold": {                # scaffold=True のときのみ
                 "created": [{"title": str, "id": str}, ...],
                 "skipped": [{"title": str, "id": str}, ...],
@@ -268,12 +358,37 @@ def setup_notion_workspace(
             "Pull Requests DB の作成レスポンスに id が含まれません"
         )
 
+    # 3. Review Issues DB を作る（Workflow → Workflows DB の relation を含める）
+    logger.info("Review Issues DB を作成中...")
+    try:
+        ri_db = api.create_database({
+            "parent": {"type": "page_id", "page_id": parent_page_id},
+            "title": [
+                {"type": "text", "text": {"content": REVIEW_ISSUES_DB_TITLE}}
+            ],
+            "description": [
+                {"type": "text", "text": {"content": _REVIEW_ISSUES_DB_DESCRIPTION}}
+            ],
+            "properties": _review_issues_db_properties(workflows_db_id),
+        })
+    except Exception as e:
+        raise NotionSetupError(
+            f"Review Issues DB の作成に失敗: {type(e).__name__}: {e}"
+        ) from e
+
+    review_issues_db_id = ri_db.get("id")
+    if not review_issues_db_id:
+        raise NotionSetupError(
+            "Review Issues DB の作成レスポンスに id が含まれません"
+        )
+
     result: dict[str, Any] = {
         "workflows_db_id": workflows_db_id,
         "pull_requests_db_id": pull_requests_db_id,
+        "review_issues_db_id": review_issues_db_id,
     }
 
-    # 3. scaffold（オプトイン）: 標準ドキュメントツリーを作成
+    # 4. scaffold（オプトイン）: 標準ドキュメントツリーを作成
     # DB 作成と異なり、scaffold 失敗は致命扱いしない（DB は既に作成済みのため）。
     # scaffold_notion_workspace は入力検証以外は raise せず、partial state を
     # 返り値に含めるため、ここでは error 用の fallback dict 構築は不要。
@@ -312,8 +427,8 @@ _DOCUMENTATION_HUB_TITLE = "Documentation"
 _DOCUMENTATION_HUB_ICON = "📚"
 _DOCUMENTATION_HUB_PLACEHOLDER = (
     "HOKUSAI の Notion governance layer 上で人間が管理するドキュメントのハブ。"
-    "HOKUSAI が自動同期する DB（Workflows / Pull Requests）とは別領域で、"
-    "議論・運用・要件などをツリーで整理する。"
+    "HOKUSAI が自動同期する DB（Workflows / Pull Requests / Review Issues）"
+    "とは別領域で、議論・運用・要件などをツリーで整理する。"
 )
 # 旧タイトル（idempotent 検出時に後方互換で skip 対象）。新→旧の順で 2 世代分:
 # - v0.4.4: "HOKUSAI Documentation"
@@ -700,6 +815,7 @@ def persist_env_vars(
     *,
     workflows_env_name: str = "HOKUSAI_NOTION_WORKFLOWS_DB_ID",
     pull_requests_env_name: str = "HOKUSAI_NOTION_PR_DB_ID",
+    review_issues_env_name: str = "HOKUSAI_NOTION_REVIEW_ISSUES_DB_ID",
     profile_name: str | None = None,
     backup: bool = True,
 ) -> dict[str, Any]:
@@ -713,6 +829,9 @@ def persist_env_vars(
         ids: setup_notion_workspace の戻り値（workflows_db_id 等）
         workflows_env_name: workflows DB ID を保持する env 変数名
         pull_requests_env_name: PR DB ID を保持する env 変数名
+        review_issues_env_name: Review Issues DB ID を保持する env 変数名。
+            ids に review_issues_db_id が含まれない旧呼び出しでも安全に動くよう、
+            その場合はこの行を省略する（後方互換）。
         profile_name: profile 名（指定時は profile 別マーカーを使う）。
             `None` の場合は v0.4.0 以前の従来マーカーを使い、後方互換を維持する。
         backup: True なら書き込み前に <rc_path>.hokusai.bak を作成
@@ -730,6 +849,7 @@ def persist_env_vars(
     # シェル変数名の最終ガード（コマンド注入 / rc 破損の防止）
     _validate_env_var_name(workflows_env_name, role="workflows_env_name")
     _validate_env_var_name(pull_requests_env_name, role="pull_requests_env_name")
+    _validate_env_var_name(review_issues_env_name, role="review_issues_env_name")
 
     # profile 名指定時は profile 別マーカー、未指定時は従来マーカー
     if profile_name is not None:
@@ -751,8 +871,15 @@ def persist_env_vars(
         f"# Last updated: {datetime.now().isoformat()}",
         f'export {workflows_env_name}="{ids["workflows_db_id"]}"',
         f'export {pull_requests_env_name}="{ids["pull_requests_db_id"]}"',
-        end_marker,
     ]
+    # Review Issues DB ID は v0.5.x で追加。古い呼び出し（ids に未含）でも
+    # KeyError を出さず、その行だけスキップする（後方互換）。
+    review_issues_db_id = ids.get("review_issues_db_id")
+    if review_issues_db_id:
+        block_lines.append(
+            f'export {review_issues_env_name}="{review_issues_db_id}"'
+        )
+    block_lines.append(end_marker)
     new_block = "\n".join(block_lines) + "\n"
 
     existing = rc_path.read_text() if rc_path.exists() else ""

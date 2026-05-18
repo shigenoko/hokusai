@@ -246,6 +246,16 @@ def phase6_verify_node(state: WorkflowState) -> WorkflowState:
         state["verification"] = verification_status
         state["verification_errors"] = verification_errors
 
+        # 失敗エントリを Review Issues DB キューに積む（#36 / v0.5.0）
+        # workflow.py が drain して dispatcher 経由で Notion に同期する。
+        # 同一 repo+command+message は dedupe_key で抑止される。
+        new_payloads = _build_verification_review_issue_payloads(
+            verification_errors, state
+        )
+        if new_payloads:
+            existing = state.get("pending_review_issues") or []
+            state["pending_review_issues"] = list(existing) + new_payloads
+
         # 結果判定 (どれか一つでも失敗していれば FAIL)
         all_passed = all(v == VerificationResult.PASS.value for v in verification_status.values())
 
@@ -293,6 +303,73 @@ def phase6_verify_node(state: WorkflowState) -> WorkflowState:
         raise
 
     return state
+
+
+def _build_verification_review_issue_payloads(
+    verification_errors: list, state: dict
+) -> list[dict]:
+    """Phase 6 verification 失敗エントリから Review Issues DB 送信用 payload を作る。
+
+    失敗 1 件につき 1 payload を生成する。重複は Notion 側の dedupe_key で抑止し、
+    **dedupe_key の hash 入力には error_output 全文を使う一方、Notion 上の
+    Message プロパティに保存するのは先頭行のみ** とする（PR #37 Copilot 2 回目
+    指摘）。test runner が共通バナーを先頭行に出すケースで、同じ表示 message
+    でも detail まで含めると別ケースとして判別したいため。dedupe_key は
+    source + repository + rule + file + (full error_output) の sha256。
+    operator は workflow.py の drain ロジックが dispatch 直前に補う。
+
+    dedupe_key を payload に含めることで、workflow.py 側で per-issue な
+    idempotency_key を構築できる（複数指摘の outbox 集約崩壊を防ぐ。PR #37
+    Copilot 1 回目指摘）。
+
+    Args:
+        verification_errors: list[VerificationErrorEntry]
+        state: workflow state
+
+    Returns:
+        dispatcher の review_issue_raised payload list
+    """
+    from ..integrations.notion_dashboard.review_issues_db import build_dedupe_key
+
+    workflow_id = state.get("workflow_id") or ""
+    payloads: list[dict] = []
+    for entry in verification_errors:
+        if entry.get("success"):
+            continue
+        repo_name = entry.get("repository") or ""
+        command = entry.get("command") or ""
+        error_output = (entry.get("error_output") or "").strip()
+        # 表示用 message は error_output の先頭行（タイトルとして可読）。
+        if error_output:
+            first_line = error_output.splitlines()[0]
+            display_message = (
+                first_line if first_line else f"{repo_name}:{command} failed"
+            )
+        else:
+            display_message = f"{repo_name}:{command} failed"
+        # dedupe_key には error_output 全文を使う（PR #37 Copilot 2 回目指摘）。
+        # test runner などが共通バナーを先頭行に出すと、別ケースの失敗が同じ
+        # 先頭行を持って Notion 上で衝突する。全文を hash 入力に与えて、
+        # detail まで含めて判別する。fallback は表示 message と同じ文字列。
+        dedupe_input = error_output or display_message
+        dedupe_key = build_dedupe_key(
+            source="verification_failure",
+            rule=command,
+            file=None,
+            message=dedupe_input,
+            repository=repo_name,
+        )
+        payloads.append({
+            "workflow_id": workflow_id,
+            "source": "verification_failure",
+            "message": display_message,
+            "severity": "high",
+            "status": "open",
+            "rule": command,
+            "repository": repo_name,
+            "dedupe_key": dedupe_key,
+        })
+    return payloads
 
 
 def _run_command_with_output(command: str, cwd: str, timeout: int) -> CommandResult:

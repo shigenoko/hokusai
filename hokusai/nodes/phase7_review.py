@@ -322,6 +322,63 @@ def _review_all_repositories(
     return review_by_repo
 
 
+def _build_review_issue_payloads(
+    review_by_repo: dict[str, dict], state: dict
+) -> list[dict]:
+    """Phase 7 のレビュー結果から Review Issues DB 送信用 payload を構築する。
+
+    NG ルール 1 件につき 1 payload を生成する。重複は Notion 側 dedupe_key
+    （source + repository + rule + file + message の hash）で抑止されるため、
+    retry で同じ payload が再 enqueue されても問題ない。free-form の警告
+    （必須ルール欠落 等）は Phase 5 retry に閉じる扱いとして payload 化しない
+    （MVP スコープ）。
+
+    dedupe_key を payload 内に含めることで、workflow.py の drain ロジックが
+    review_issue_raised event の idempotency_key を per-issue で構築できる
+    （複数指摘を 1 つの outbox エントリへ集約する崩壊を防ぐ。PR #37 Copilot
+    指摘）。
+
+    Args:
+        review_by_repo: _review_all_repositories の結果
+        state: workflow state（workflow_id を引く）
+
+    Returns:
+        dispatcher の review_issue_raised payload list。operator は
+        workflow.py の drain ロジックが dispatch 直前に補う（resolve_operator_name
+        の whoami 呼び出しを node 内で行わないため）。
+    """
+    from ..integrations.notion_dashboard.review_issues_db import build_dedupe_key
+
+    workflow_id = state.get("workflow_id") or ""
+    payloads: list[dict] = []
+    for repo_name, repo_result in review_by_repo.items():
+        rules = repo_result.get("rules") or {}
+        for rule_id, rule_data in rules.items():
+            if rule_data.get("result") != "NG":
+                continue
+            name = rule_data.get("name") or rule_id
+            note = (rule_data.get("note") or "").strip()
+            message = f"{name}: {note}" if note else name
+            dedupe_key = build_dedupe_key(
+                source="final_review",
+                rule=rule_id,
+                file=None,
+                message=message,
+                repository=repo_name,
+            )
+            payloads.append({
+                "workflow_id": workflow_id,
+                "source": "final_review",
+                "message": message,
+                "severity": "high",
+                "status": "open",
+                "rule": rule_id,
+                "repository": repo_name,
+                "dedupe_key": dedupe_key,
+            })
+    return payloads
+
+
 def _aggregate_review_results(
     review_by_repo: dict[str, dict],
 ) -> dict:
@@ -447,6 +504,14 @@ def phase7_review_node(state: WorkflowState) -> WorkflowState:
         state["final_review_issues"] = all_issues
         state["final_review_rules"] = all_rules
         state["final_review_by_repo"] = review_by_repo
+
+        # NG ルールを Review Issues DB へ送るキューに積む（#36 / v0.5.0）
+        # workflow.py が drain して dispatcher 経由で同期する。失敗は best effort。
+        if not all_passed:
+            new_payloads = _build_review_issue_payloads(review_by_repo, state)
+            if new_payloads:
+                existing = state.get("pending_review_issues") or []
+                state["pending_review_issues"] = list(existing) + new_payloads
 
         # 全体のサマリーを計算
         total_rules = len(all_rules)
