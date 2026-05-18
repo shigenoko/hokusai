@@ -256,7 +256,10 @@ def phase6_verify_node(state: WorkflowState) -> WorkflowState:
 
         # 失敗エントリを Review Issues DB キューに積む（#36 / v0.5.0）
         # workflow.py が drain して dispatcher 経由で Notion に同期する。
-        # 同一 repo+command+message は dedupe_key で抑止される。
+        # dedupe_key は workflow_id + source + repository + rule + file +
+        # full_output_hash（先頭 500 行 truncate 前の sha256）で構築され、
+        # 表示用 Message は先頭行のみだが、dedupe 入力は全文 hash を使うため、
+        # 共通バナーで先頭行が同じ別ケースも別レコードに分離される。
         new_payloads = _build_verification_review_issue_payloads(
             verification_errors, state
         )

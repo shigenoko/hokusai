@@ -1928,6 +1928,48 @@ def test_drain_pending_review_issues_dispatches_each_with_per_issue_idempotency_
     assert fake_cw.update_state_calls[0][1] == {"pending_review_issues": []}
 
 
+def test_drain_pending_review_issues_persists_cleared_state_to_store():
+    """drain は LangGraph state だけでなく `self.store` にも clear 後の state を
+    保存する（PR #37 Copilot 10 回目指摘: drain 直後に loop が止まると
+    永続 store に dispatched 済 pending が残り、`continue_workflow` で再
+    dispatch される問題を防ぐ）。
+    """
+    runner = _make_runner()
+    _CapturingDispatch(runner)
+    runner.compiled_workflow = _FakeCompiledWorkflow()  # type: ignore[assignment]
+
+    # store.save_workflow を spy
+    save_calls: list[tuple[str, dict]] = []
+    original_save = runner.store.save_workflow
+
+    def _spy_save(wid, st):
+        save_calls.append((wid, dict(st)))
+        return original_save(wid, st)
+
+    runner.store.save_workflow = _spy_save  # type: ignore[assignment]
+
+    state_values = {
+        "workflow_id": "wf-persist",
+        "pending_review_issues": [
+            {
+                "workflow_id": "wf-persist",
+                "source": "final_review",
+                "message": "m",
+                "dedupe_key": "k",
+            }
+        ],
+    }
+    runner._drain_pending_review_issues(state_values, {"thread": "x"})
+
+    # state_values も in-place で clear されている
+    assert state_values["pending_review_issues"] == []
+    # store にも clear 後の state が保存されている
+    assert len(save_calls) >= 1
+    saved_wid, saved_state = save_calls[-1]
+    assert saved_wid == "wf-persist"
+    assert saved_state["pending_review_issues"] == []
+
+
 def test_drain_pending_review_issues_prefers_state_operator_over_resolve(monkeypatch):
     """state["operator"] が set されていれば resolve_operator_name は呼ばない
 

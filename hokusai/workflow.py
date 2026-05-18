@@ -140,6 +140,12 @@ class WorkflowRunner:
           既定キー（workflow_id:event:phase:revision）だと同じ phase の複数指摘が
           1 つの outbox エントリに集約され、API 失敗時に取り違える問題があるため
           （PR #37 Copilot 1 回目指摘）。
+        - drain 後は LangGraph state だけでなく **self.store にも clear 後の
+          state を保存** する（PR #37 Copilot 10 回目指摘）。`_run_stream_loop`
+          は drain **前** に `self.store.save_workflow` を呼ぶため、drain 直後に
+          loop が止まる（waiting_for_human / step mode / 例外）と、永続 store
+          には dispatched 済みの pending が残り、`continue_workflow` で再 dispatch
+          されてしまう。
         - すべての例外はワークフロー本体に伝播させない（best effort）。
 
         Returns:
@@ -161,10 +167,22 @@ class WorkflowRunner:
                     enriched,
                     idempotency_key=idempotency_key,
                 )
-            # state から drain（永続化は次のループで行われる）
+            # LangGraph state を clear
             self.compiled_workflow.update_state(
                 langgraph_config, {"pending_review_issues": []}
             )
+            # state_values も in-place で clear し、続けて self.store も更新する
+            # ことで、drain 直後に loop が止まっても `continue_workflow` 経路で
+            # 同じ Review Issue が再 dispatch されないようにする
+            state_values["pending_review_issues"] = []
+            workflow_id = state_values.get("workflow_id")
+            if workflow_id:
+                try:
+                    self.store.save_workflow(workflow_id, state_values)
+                except Exception as save_err:
+                    logger.debug(
+                        f"drain 後の store 保存で例外を抑制: {save_err}"
+                    )
             return len(pending)
         except Exception as ri_err:
             logger.debug(
