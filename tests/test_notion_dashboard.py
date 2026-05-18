@@ -1427,7 +1427,10 @@ def test_dispatcher_review_issue_raised_does_not_self_defer_during_retry(
     cfg = _make_config()
     cfg.review_issues_db_id_env = "TEST_REVIEW_ISSUES_DB"
 
-    # outbox に: 自己 entry + 別の review_issue_raised + workflow_started 1 件
+    # outbox には review_issue_raised が 2 件のみ（自己 entry + 別 entry）。
+    # workflow_started は意図的に追加しない: 追加すると race deferral が
+    # 発動してしまい、本テストの「review_issue_raised 同士は workflow page
+    # event ではないので self-deferral しない」という主旨を検証できない。
     self_key = "wf-x:review_issue_raised:dkey-self"
     store.enqueue_notion_sync(
         idempotency_key=self_key,
@@ -1451,8 +1454,6 @@ def test_dispatcher_review_issue_raised_does_not_self_defer_during_retry(
             "dedupe_key": "dkey-other",
         },
     )
-    # workflow_started も残っていれば deferral 発動するはずなので、ここでは
-    # 加えずに「review_issue_raised だけが残る」状態にする
     assert store.count_notion_sync_pending() == 2
 
     # workflow page もまだ存在しない（=None）

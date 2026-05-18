@@ -195,8 +195,14 @@ class ReviewIssuesDBClient:
         """create / update を試行し、property_not_found なら原因プロパティを除去して再試行。
 
         workflows_db._submit_with_property_pruning と同じ仕組み。Review Issues DB
-        の schema が古い環境（後続機能用の Source enum が未追加など）でも、
-        存在するプロパティだけで同期が進む。
+        の schema が古い環境（例: 後追加された `Operator` プロパティが存在しない
+        DB、新規追加された rich_text 列を持たない DB など）でも、存在するプロパ
+        ティだけで同期が進む。
+
+        対象は Notion 側に **プロパティ自体が存在しない** ケース（property_not_found
+        エラー）。`Source` / `Status` / `Severity` などの Select で **値（option）
+        が存在しない** ケースはこの retry の対象外で、Notion API は自動的に新規
+        option を作成するため別ハンドリングは不要（PR #37 Copilot 6 回目指摘）。
         """
         attempts = 0
         current_props = dict(properties)

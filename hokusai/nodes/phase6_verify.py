@@ -310,13 +310,17 @@ def _build_verification_review_issue_payloads(
 ) -> list[dict]:
     """Phase 6 verification 失敗エントリから Review Issues DB 送信用 payload を作る。
 
-    失敗 1 件につき 1 payload を生成する。重複は Notion 側 dedupe_key
-    （source + repository + rule + file + message の hash）で抑止される。
+    失敗 1 件につき 1 payload を生成する。重複は Notion 側の dedupe_key で抑止し、
+    **dedupe_key の hash 入力には error_output 全文を使う一方、Notion 上の
+    Message プロパティに保存するのは先頭行のみ** とする（PR #37 Copilot 2 回目
+    指摘）。test runner が共通バナーを先頭行に出すケースで、同じ表示 message
+    でも detail まで含めると別ケースとして判別したいため。dedupe_key は
+    source + repository + rule + file + (full error_output) の sha256。
     operator は workflow.py の drain ロジックが dispatch 直前に補う。
 
     dedupe_key を payload に含めることで、workflow.py 側で per-issue な
     idempotency_key を構築できる（複数指摘の outbox 集約崩壊を防ぐ。PR #37
-    Copilot 指摘）。
+    Copilot 1 回目指摘）。
 
     Args:
         verification_errors: list[VerificationErrorEntry]
