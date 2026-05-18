@@ -372,3 +372,100 @@ def test_phase6_dedupe_uses_full_error_output_not_just_first_line():
     assert payloads[1]["message"] == banner
     # dedupe_key は detail 込みで違う（衝突回避）
     assert payloads[0]["dedupe_key"] != payloads[1]["dedupe_key"]
+
+
+def test_phase6_node_populates_full_output_hash_on_failure(monkeypatch, tmp_path):
+    """phase6_verify_node が verification_errors の各失敗エントリに
+    `full_output_hash` を 16 hex chars で populate することを検証
+    （PR #37 Copilot 9 回目指摘）。
+    """
+    from hokusai.nodes import phase6_verify
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(phase6_verify, "should_skip_phase", lambda s, p: False)
+    monkeypatch.setattr(
+        phase6_verify,
+        "resolve_runtime_repositories",
+        lambda state, config: [
+            SimpleNamespace(
+                name="Backend",
+                path=tmp_path,
+                source_path=tmp_path,
+                base_branch="main",
+                worktree_created=False,
+                build_command="echo build",
+                test_command=None,
+                lint_command=None,
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        phase6_verify, "_run_command_with_output",
+        lambda *a, **kw: SimpleNamespace(
+            success=False, stdout="boom\nline2\n", stderr="trace",
+            return_code=1, timed_out=False,
+        ),
+    )
+    monkeypatch.setattr(phase6_verify, "_analyze_failures", lambda *a, **kw: None)
+    monkeypatch.setattr(phase6_verify, "get_config", lambda: SimpleNamespace(
+        command_timeout=60, max_retry_count=3,
+        build_command=None, test_command=None, lint_command=None,
+    ))
+    monkeypatch.setattr(phase6_verify, "get_repository_state", lambda s, n: None)
+    monkeypatch.setattr(phase6_verify, "init_repository_state", lambda **kw: {})
+    monkeypatch.setattr(phase6_verify, "add_audit_log", lambda s, *a, **kw: s)
+    monkeypatch.setattr(phase6_verify, "update_phase_status", lambda s, *a, **kw: s)
+    monkeypatch.setattr(
+        phase6_verify, "update_repository_phase_status", lambda s, *a, **kw: s
+    )
+
+    state = {
+        "workflow_id": "wf-test",
+        "phases": {6: {"retry_count": 0}, 7: {"status": "pending"}, 8: {"status": "pending"}},
+        "branch_name": "feature/x",
+        "total_retry_count": 0,
+    }
+    new_state = phase6_verify.phase6_verify_node(state)  # type: ignore[arg-type]
+
+    errors = new_state.get("verification_errors") or []
+    # build のみ enabled なので 1 件
+    assert len(errors) == 1
+    assert errors[0].get("full_output_hash")
+    assert len(errors[0]["full_output_hash"]) == 16
+
+
+def test_phase6_dedupe_distinguishes_failures_after_500_line_boundary():
+    """先頭 500 行が共通で 501 行目以降が違う 2 つの失敗が別 dedupe_key になる
+    （PR #37 Copilot 9 回目指摘: truncate 境界を跨いだ違いの検出）。
+
+    helper は entry["full_output_hash"] を優先採用するため、Phase 6 node 側で
+    full output から計算した hash が異なれば、helper も別 dedupe_key を出す。
+    """
+    # Phase 6 node が full output (= 共通 500 行 + 異なる末尾) から計算する hash
+    # を simulate（実装と同じ logic）
+    import hashlib
+    common_prefix = "\n".join(f"common line {i}" for i in range(500))
+    full_a = common_prefix + "\nalpha-specific-tail"
+    full_b = common_prefix + "\nbeta-specific-tail"
+    hash_a = hashlib.sha256(full_a.encode("utf-8")).hexdigest()[:16]
+    hash_b = hashlib.sha256(full_b.encode("utf-8")).hexdigest()[:16]
+    # truncated error_output（先頭 500 行で打ち切られた表示用）は両方同じ
+    truncated = "\n".join(full_a.split("\n")[:500]) + "\n... (1 lines truncated)"
+    errors = [
+        {
+            "repository": "Backend",
+            "command": "test",
+            "success": False,
+            "error_output": truncated,
+            "full_output_hash": hash_a,
+        },
+        {
+            "repository": "Backend",
+            "command": "test",
+            "success": False,
+            "error_output": truncated,
+            "full_output_hash": hash_b,
+        },
+    ]
+    payloads = _build_verification_review_issue_payloads(errors, {"workflow_id": "wf"})
+    assert payloads[0]["dedupe_key"] != payloads[1]["dedupe_key"]

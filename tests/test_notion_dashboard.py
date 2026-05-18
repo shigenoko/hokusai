@@ -1485,6 +1485,83 @@ def test_dispatcher_review_issue_raised_does_not_self_defer_during_retry(
     assert "Workflow" not in props
 
 
+def test_dispatcher_review_issue_raised_caches_workflow_page_id_across_dispatches(
+    store: SQLiteStore, monkeypatch
+):
+    """同一 workflow_id への複数 review_issue dispatch で workflows_db lookup が
+    1 回しか走らないことを検証（PR #37 Copilot 9 回目指摘: positive cache の
+    regression 防止）。"""
+    monkeypatch.setenv("TEST_TOKEN", "secret")
+    monkeypatch.setenv("TEST_DB", "wf-db")
+    monkeypatch.setenv("TEST_REVIEW_ISSUES_DB", "ri-db")
+
+    cfg = _make_config()
+    cfg.review_issues_db_id_env = "TEST_REVIEW_ISSUES_DB"
+
+    api = _RecordingAPI(query_result=[{"id": "wf-page"}])
+
+    class _Disp(NotionSyncDispatcher):
+        def _get_api(self):
+            return api  # type: ignore[return-value]
+
+    disp = _Disp(store=store, config=cfg)
+    for i in range(5):
+        disp.dispatch("review_issue_raised", {
+            "workflow_id": "wf-cached",
+            "source": "final_review",
+            "message": f"issue {i}",
+            "rule": f"R{i}",
+            "repository": "Backend",
+            "dedupe_key": f"k{i}",
+        })
+
+    # query は workflow page lookup (1 回) + dedupe lookup × 5 = 6 回
+    # （正確なカウントよりも「workflow page lookup が複数回繰り返されない」が要点）
+    queries = [c for c in api.calls if c[0] == "query"]
+    # workflows DB を引いた query は 1 回のみ（database_id == "wf-db"）
+    wf_queries = [q for q in queries if q[1]["database_id"] == "wf-db"]
+    assert len(wf_queries) == 1, (
+        f"workflow page lookup は cache されるべき。実 query 数: {len(wf_queries)}"
+    )
+
+
+def test_dispatcher_invalidates_workflow_page_cache_on_workflow_started(
+    store: SQLiteStore, monkeypatch
+):
+    """`_send_to_notion` の先頭で workflow_started 対象 workflow_id の
+    workflow page cache が invalidate されることを検証
+    （PR #37 Copilot 9 回目指摘の stale 防止）。
+    """
+    monkeypatch.setenv("TEST_TOKEN", "secret")
+    monkeypatch.setenv("TEST_DB", "wf-db")
+
+    cfg = _make_config()
+    api = _RecordingAPI(query_result=[{"id": "wf-page-x"}])
+
+    class _Disp(NotionSyncDispatcher):
+        def _get_api(self):
+            return api  # type: ignore[return-value]
+
+    disp = _Disp(store=store, config=cfg)
+    # 事前にキャッシュへ positive エントリを入れる
+    disp._workflow_page_id_cache["wf-x"] = "wf-page-old"
+
+    # workflow_started を `_send_to_notion` 経由で発火（API 呼び出しは workflows_db
+    # apply_event 内で query + update が走るが、_RecordingAPI が返す既存 page で
+    # update を選択するので副作用は最小限）
+    disp._send_to_notion(
+        "workflow_started",
+        {
+            "workflow_id": "wf-x",
+            "status": "running",
+            "current_phase": 1,
+        },
+    )
+
+    # キャッシュから wf-x が pop されている
+    assert "wf-x" not in disp._workflow_page_id_cache
+
+
 def test_dispatcher_review_issue_raised_proceeds_when_no_pending_workflow_sync(
     store: SQLiteStore, monkeypatch
 ):

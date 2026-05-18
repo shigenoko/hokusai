@@ -73,6 +73,7 @@ hokusai notion-setup \
 <親ページ>
 ├── Workflows DB
 ├── Pull Requests DB
+├── Review Issues DB        ← v0.5.0〜 / #36
 └── 📚 Documentation       ← icon 📚、title は英語
     ├── 💬 議論              ← 議論・設計判断（icon 💬）
     ├── 📖 運用ガイド        ← 運用手順（icon 📖）

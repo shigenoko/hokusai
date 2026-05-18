@@ -326,9 +326,10 @@ def _build_verification_review_issue_payloads(
     境界を跨いで違いが出るケースでも別ケースとして判別する。
     後方互換: `full_output_hash` が無い古い VerificationErrorEntry には
     truncated な error_output、それも空なら display_message を fallback として
-    渡す。dedupe_key 自体は source + repository + rule + file +
-    `full_output_hash` の sha256。operator は workflow.py の drain ロジックが
-    dispatch 直前に補う。
+    渡す。dedupe_key 自体は **workflow_id** + source + repository + rule + file +
+    `full_output_hash` の sha256 hex 先頭 16 文字（workflow_id を含めるので
+    別 workflow が同じ failure を発火しても別レコードに分かれる、Copilot 8 回目
+    指摘）。operator は workflow.py の drain ロジックが dispatch 直前に補う。
 
     dedupe_key を payload に含めることで、workflow.py 側で per-issue な
     idempotency_key を構築できる（複数指摘の outbox 集約崩壊を防ぐ。PR #37

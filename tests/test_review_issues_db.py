@@ -322,6 +322,28 @@ def test_upsert_record_uses_explicit_dedupe_key():
     )
 
 
+def test_upsert_record_normalizes_empty_dedupe_key_to_generated():
+    """空文字 dedupe_key は「未指定」と同義として generated value にフォールバック
+
+    PR #37 Copilot 9 回目指摘: `dedupe_key is None` だけを未指定と判定すると
+    empty string `""` がそのまま `find_by_dedupe_key("")` に渡り、early-return
+    で lookup スキップ → 空 Dedupe Key の Notion レコードが毎回新規作成される。
+    """
+    api = _FakeAPI(existing_id=None)
+    client = ReviewIssuesDBClient(api=api, database_id="db-id")
+    client.upsert_record(
+        source="ci_failure",
+        message="boom",
+        rule="R1",
+        dedupe_key="",  # 空文字
+    )
+    props = api.create_calls[0]["properties"]
+    stored = props["Dedupe Key"]["rich_text"][0]["text"]["content"]
+    # 空のまま保存されない、自動生成された 16 hex に置き換わる
+    assert stored != ""
+    assert len(stored) == 16
+
+
 def test_upsert_record_prunes_missing_property_on_create():
     """schema 未追加のプロパティが property_not_found で返るとき、除外して再試行"""
     api = _FakeAPI(existing_id=None, missing_property="Severity")

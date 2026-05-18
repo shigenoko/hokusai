@@ -328,10 +328,12 @@ def _build_review_issue_payloads(
     """Phase 7 のレビュー結果から Review Issues DB 送信用 payload を構築する。
 
     NG ルール 1 件につき 1 payload を生成する。重複は Notion 側 dedupe_key
-    （source + repository + rule + file + message の hash）で抑止されるため、
-    retry で同じ payload が再 enqueue されても問題ない。free-form の警告
-    （必須ルール欠落 等）は Phase 5 retry に閉じる扱いとして payload 化しない
-    （MVP スコープ）。
+    （**workflow_id** + source + repository + rule + file + message の sha256
+    hex 先頭 16 文字）で抑止されるため、retry で同じ payload が再 enqueue
+    されても問題ない。workflow_id を hash 入力に含めるので、別 workflow が
+    同じ rule/message を発火しても別レコードに分かれる（Copilot 8 回目指摘）。
+    free-form の警告（必須ルール欠落 等）は Phase 5 retry に閉じる扱いとして
+    payload 化しない（MVP スコープ）。
 
     dedupe_key を payload 内に含めることで、workflow.py の drain ロジックが
     review_issue_raised event の idempotency_key を per-issue で構築できる

@@ -6,9 +6,11 @@ DB に構造化レコードとして同期する。後続の Policy Governance �
 枠を最初から確保する。
 
 設計方針:
-- dedupe_key（source + repository + rule + file + message の hash）で重複を抑止し、
-  既存レコードがあれば **Status / Created At を除く全プロパティ** を上書き更新
-  する upsert を提供する。
+- dedupe_key（**workflow_id** + source + repository + rule + file + message の
+  sha256 hex の先頭 16 文字）で重複を抑止し、既存レコードがあれば **Status /
+  Created At を除く全プロパティ** を上書き更新する upsert を提供する。
+  workflow_id を入力に含めるので、同じ rule/file/message でも別 workflow なら
+  別レコードに分かれる（Workflow relation 上書き問題の回避、Copilot 8 回目指摘）。
     - Created At: create 時のみ書き込み、Notion 側で初回作成時刻を温存
     - Status: create 時のみ初期値 open を書き込み、update 時は payload に含めない。
       人間が Notion 上で `waived` / `resolved` に書き換えた状態を、HOKUSAI 側の
@@ -150,7 +152,11 @@ class ReviewIssuesDBClient:
         Returns:
             Notion から返された page オブジェクト
         """
-        if dedupe_key is None:
+        # 空文字 dedupe_key は「未指定」と同義として正規化する（Copilot 9 回目指摘）。
+        # None だけを「未指定」と判定すると、empty string が素通りし
+        # `find_by_dedupe_key("")` が早期 None リターンで lookup を skip した結果、
+        # 空 Dedupe Key のページが毎回新規作成される事故が起きる。
+        if not dedupe_key:
             dedupe_key = build_dedupe_key(
                 source=source,
                 rule=rule,
