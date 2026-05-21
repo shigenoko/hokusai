@@ -16,6 +16,7 @@ from .models import (
     DesignRetryConfig,
     FigmaIntegrationConfig,
     GitHostingConfig,
+    LLMGatewayConfig,
     MiroIntegrationConfig,
     NotificationConfig,
     NotionDashboardConfig,
@@ -316,6 +317,40 @@ def _parse_notion_dashboard_config(config_dict: dict) -> NotionDashboardConfig:
         sync_outbox=sync_outbox,
         retry=retry,
         rate_limit=rate_limit,
+    )
+
+
+def _parse_llm_gateway_config(config_dict: dict) -> LLMGatewayConfig:
+    """llm_gateway 設定をパース（#39 / v0.6.0〜）
+
+    設定例:
+        llm_gateway:
+          enabled: true
+          dry_run: false
+          log_only: true
+          audit_log_enabled: true
+
+    バリデーション方針:
+    - llm_gateway が dict でなければデフォルト
+    - 各フラグは bool のみ採用、それ以外はデフォルトに戻す
+    """
+    raw = config_dict.get("llm_gateway")
+    if not isinstance(raw, dict):
+        return LLMGatewayConfig()
+
+    defaults = LLMGatewayConfig()
+
+    def _bool_or_default(key: str, default: bool) -> bool:
+        value = raw.get(key, default)
+        return value if isinstance(value, bool) else default
+
+    return LLMGatewayConfig(
+        enabled=_bool_or_default("enabled", defaults.enabled),
+        dry_run=_bool_or_default("dry_run", defaults.dry_run),
+        log_only=_bool_or_default("log_only", defaults.log_only),
+        audit_log_enabled=_bool_or_default(
+            "audit_log_enabled", defaults.audit_log_enabled
+        ),
     )
 
 

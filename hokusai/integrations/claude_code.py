@@ -85,6 +85,7 @@ class ClaudeCodeClient:
                 permission_mode=permission_mode,
                 disallowed_tools=disallowed_tools,
                 append_system_prompt=append_system_prompt,
+                gateway_purpose=f"skill_execution:{skill}",
             )
             return self._parse_skill_result(skill, result)
         except subprocess.TimeoutExpired:
@@ -123,6 +124,7 @@ class ClaudeCodeClient:
                 prompt, timeout,
                 permission_mode=permission_mode,
                 disallowed_tools=disallowed_tools,
+                gateway_purpose="execute_prompt",
             )
         except subprocess.TimeoutExpired:
             raise TimeoutError("プロンプトの実行がタイムアウトしました")
@@ -170,6 +172,7 @@ class ClaudeCodeClient:
         permission_mode: str = "dontAsk",
         disallowed_tools: list[str] | None = None,
         append_system_prompt: str | None = None,
+        gateway_purpose: str = "claude_code_invoke",
     ) -> str:
         """
         Claude Codeをサブプロセスとして実行
@@ -180,10 +183,17 @@ class ClaudeCodeClient:
             permission_mode: パーミッションモード
             disallowed_tools: 使用を禁止するツール名のリスト
             append_system_prompt: システムプロンプトに追記するテキスト
+            gateway_purpose: LLM Gateway interceptor に渡す purpose 識別子
+                （"skill_execution" / "execute_prompt" 等）。Phase 1 は log のみ
 
         Returns:
             実行結果の標準出力
         """
+        # LLM Gateway interceptor (#39 / Phase 1: log-only)
+        # Gateway が無効化されている、または例外が出た場合でも既存フローには
+        # 一切影響を与えないため、ここで try/except する。
+        self._invoke_llm_gateway_interceptor(prompt, gateway_purpose)
+
         cmd = [
             self.claude_path,
             "-p", prompt,
@@ -215,6 +225,34 @@ class ClaudeCodeClient:
             )
 
         return result.stdout
+
+    @staticmethod
+    def _invoke_llm_gateway_interceptor(prompt: str, purpose: str) -> None:
+        """LLM Gateway interceptor を呼んで decision を log する（#39 / Phase 1）。
+
+        - Gateway が無効化（enabled=False）なら interceptor 内部で no-op
+        - audit_log_enabled なら構造化 log entry が logger に流れる
+        - decision は Phase 1 では常に "log" / "skipped" で、本メソッドは
+          値を使わず単に副作用（log 出力）のみを期待する
+        - **既存フローへの影響をゼロにするため、interceptor 由来の例外は
+          完全に握り潰す**。Phase 5+ で block decision を返す時にはこの
+          挙動を見直す必要がある。
+        """
+        try:
+            from ..config import get_config
+            from ..llm_gateway import LLMGatewayContext, LLMGatewayInterceptor
+
+            config = get_config()
+            gateway_config = getattr(config, "llm_gateway", None)
+            if gateway_config is None:
+                return
+            context = LLMGatewayContext(
+                provider="claude_code",
+                purpose=purpose,
+            )
+            LLMGatewayInterceptor(gateway_config).intercept(context, prompt)
+        except Exception as e:
+            logger.debug(f"LLM Gateway interceptor 内例外を抑制: {e}")
 
     def _parse_skill_result(self, skill: str, output: str) -> dict[str, Any]:
         """

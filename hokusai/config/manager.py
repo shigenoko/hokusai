@@ -11,6 +11,7 @@ from .loaders import (
     _parse_cross_review_config,
     _parse_figma_config,
     _parse_git_hosting_config,
+    _parse_llm_gateway_config,
     _parse_miro_config,
     _parse_notifications_config,
     _parse_notion_dashboard_config,
@@ -160,6 +161,9 @@ def create_config_from_env_and_file(
     # notion_dashboard をパース
     notion_dashboard = _parse_notion_dashboard_config(config_dict)
 
+    # llm_gateway をパース（#39 / v0.6.0〜）
+    llm_gateway = _parse_llm_gateway_config(config_dict)
+
     # web_dashboard をパース（Operations Console アクセス制限）
     web_dashboard = _parse_web_dashboard_config(config_dict)
 
@@ -178,6 +182,7 @@ def create_config_from_env_and_file(
         "repositories",
         "notifications",
         "notion_dashboard",
+        "llm_gateway",
         "web_dashboard",
         "figma",
         "miro",
@@ -194,6 +199,7 @@ def create_config_from_env_and_file(
         repositories=repositories,
         notifications=notifications,
         notion_dashboard=notion_dashboard,
+        llm_gateway=llm_gateway,
         web_dashboard=web_dashboard,
         figma=figma,
         miro=miro,
