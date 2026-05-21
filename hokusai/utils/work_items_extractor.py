@@ -46,9 +46,6 @@ _NUMBERED_PATTERN = re.compile(
     r"\s{1,8}(.+)$"
 )
 
-# inline emphasis を剥がすための文字
-_INLINE_EMPHASIS_CHARS = "*_`"
-
 # 抽出対象から除外する短すぎる / 意味の無いタイトル
 _MIN_TITLE_LENGTH = 2
 
@@ -118,10 +115,10 @@ def _normalize_title(text: str) -> str:
     - `_` は word boundary（前後が英数字でない）と組み合わせて、`snake_case_id`
       のような識別子内の `_` を残しつつ `_italic_` のような wrapping だけ剥がす
     """
-    # `.strip(_INLINE_EMPHASIS_CHARS)` は使わない: 片側の wrapping だけ消えて
-    # regex の `\*+...\*+` などのペア検出が成立しなくなるため
-    # （PR #41 Copilot 3 回目指摘の修正で気付いた）。代わりに、regex で
-    # wrapping を剥がした後に通常の `.strip()` で前後空白を整える。
+    # emphasis 文字（`*`, `_`, `` ` ``）の eager な `.strip()` は使わない:
+    # 片側の wrapping だけ消えて regex の `\*+...\*+` などのペア検出が成立
+    # しなくなるため（PR #41 Copilot 3 回目指摘の修正で気付いた）。代わりに、
+    # regex で wrapping を剥がした後に通常の `.strip()` で前後空白を整える。
     stripped = (text or "").strip()
     # ReDoS 対策（SonarCloud python:S5852）: ネスト量指定子を避け、
     # `\*+` / `_+` の代わりに `\*{1,3}` / `_{1,3}` で上限を明示し、
