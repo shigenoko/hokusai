@@ -839,9 +839,41 @@ class NotionSyncDispatcher:
                     payload.get("phase"),
                 )
                 return None, None
+            # **workflow_id / phase の型検証**（PR #43 Copilot 3 回目指摘）:
+            # payload 由来の不正型（int の workflow_id / 非数値 phase 等）が
+            # build_dedupe_key の join で TypeError を投げると、dispatch() の
+            # catch-all 経由で outbox に poison message として残るため、
+            # dispatcher 層で先回り正規化 / 検証する。
+            raw_wid = payload.get("workflow_id")
+            workflow_id_for_key: str | None
+            if raw_wid is None:
+                workflow_id_for_key = None
+            elif isinstance(raw_wid, (str, int)):
+                # str はそのまま、int は文字列化（HOKUSAI ID は str 想定だが
+                # numeric な test fixture も許容する寛容な正規化）
+                workflow_id_for_key = str(raw_wid) or None
+            else:
+                logger.warning(
+                    "%s で workflow_id が str/int でないためスキップ: %r",
+                    event_label, raw_wid,
+                )
+                return None, None
+            raw_phase = payload.get("phase")
+            phase_for_key: int | None
+            if raw_phase is None:
+                phase_for_key = None
+            else:
+                try:
+                    phase_for_key = int(raw_phase)
+                except (TypeError, ValueError):
+                    logger.warning(
+                        "%s で phase を int に変換できないためスキップ: %r",
+                        event_label, raw_phase,
+                    )
+                    return None, None
             dedupe_key = build_dedupe_key(
-                workflow_id=payload.get("workflow_id"),
-                phase=payload.get("phase"),
+                workflow_id=workflow_id_for_key,
+                phase=phase_for_key,
                 title=str(title),
             )
 

@@ -647,3 +647,74 @@ def test_dispatcher_work_item_claim_skips_when_claim_type_invalid(
     assert result is True
     updates = [c for c in api.calls if c[0] == "update"]
     assert updates == []
+
+
+def test_dispatcher_work_item_claim_skips_when_workflow_id_invalid_type(
+    store: SQLiteStore, monkeypatch
+):
+    """workflow_id が str/int 以外（list 等）なら warning + skip
+    （PR #43 Copilot 3 回目指摘の poison message 防止）"""
+    monkeypatch.setenv("TEST_TOKEN", "secret")
+    monkeypatch.setenv("TEST_DB", "wf-db")
+    monkeypatch.setenv("TEST_WORK_ITEMS_DB", "wi-db")
+
+    cfg = _make_config()
+    cfg.work_items_db_id_env = "TEST_WORK_ITEMS_DB"
+    api = _RecordingAPI(query_result=[])  # 未存在
+
+    class _Disp(NotionSyncDispatcher):
+        def _get_api(self):
+            return api  # type: ignore[return-value]
+
+    disp = _Disp(store=store, config=cfg)
+    result = disp.dispatch("work_item_claim", {
+        "workflow_id": ["bad", "type"],  # list は str/int でないので skip
+        "title": "X",
+        "phase": 4,
+        "claimed_by": "claude_code",
+    })
+    # poison message にならず success（no-op）
+    assert result is True
+
+
+def test_dispatcher_work_item_claim_accepts_int_workflow_id(
+    store: SQLiteStore, monkeypatch
+):
+    """workflow_id が int でも str に正規化されて build_dedupe_key 経由で動く"""
+    disp, api = _build_lease_dispatcher_with_existing_page(store, monkeypatch)
+    result = disp.dispatch("work_item_claim", {
+        "workflow_id": 12345,  # numeric ID
+        "title": "X",
+        "phase": 4,
+        "claimed_by": "claude_code",
+    })
+    # int は str() で正規化されて build_dedupe_key を通る
+    assert result is True
+    updates = [c for c in api.calls if c[0] == "update"]
+    assert len(updates) == 1
+
+
+def test_dispatcher_work_item_claim_skips_when_phase_invalid_type(
+    store: SQLiteStore, monkeypatch
+):
+    """phase が int に変換できない（非数値 str / dict 等）なら warning + skip"""
+    monkeypatch.setenv("TEST_TOKEN", "secret")
+    monkeypatch.setenv("TEST_DB", "wf-db")
+    monkeypatch.setenv("TEST_WORK_ITEMS_DB", "wi-db")
+
+    cfg = _make_config()
+    cfg.work_items_db_id_env = "TEST_WORK_ITEMS_DB"
+    api = _RecordingAPI(query_result=[])
+
+    class _Disp(NotionSyncDispatcher):
+        def _get_api(self):
+            return api  # type: ignore[return-value]
+
+    disp = _Disp(store=store, config=cfg)
+    result = disp.dispatch("work_item_claim", {
+        "workflow_id": "wf-1",
+        "title": "X",
+        "phase": {"bad": "type"},  # int 変換不能
+        "claimed_by": "claude_code",
+    })
+    assert result is True

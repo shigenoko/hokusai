@@ -53,13 +53,31 @@ class StreamResult:
 
 # Work Item drain layer で `_event` marker から dispatcher event 名へ
 # マッピングする helper（Workgraph Phase 2 / #38 で導入、Phase 3 / #42 で
-# claim / lease_release を追加）。dispatcher.py の EVENT_WORK_ITEM_* 定数と
-# 完全一致させる。
-_WORK_ITEM_EVENT_NAME_BY_MARKER: dict[str, str] = {
-    "status_change": "work_item_status_change",
-    "claim": "work_item_claim",
-    "lease_release": "work_item_lease_release",
-}
+# claim / lease_release を追加）。
+# dispatcher.py の EVENT_WORK_ITEM_* 定数を **直接 import** して string
+# literal の重複定義を避ける（PR #43 Copilot 3 回目指摘で drift 防止）。
+def _build_work_item_event_marker_map() -> dict[str, str]:
+    """dispatcher の event 定数から marker → event 名 mapping を構築する。
+
+    関数化することで import の循環依存リスクを避け、定数の lazy 参照を
+    保つ（workflow.py が dispatcher の class を直接使わない設計を維持）。
+    """
+    from .integrations.notion_dashboard.dispatcher import (
+        EVENT_WORK_ITEM_CLAIM,
+        EVENT_WORK_ITEM_LEASE_RELEASE,
+        EVENT_WORK_ITEM_STATUS_CHANGE,
+    )
+
+    return {
+        "status_change": EVENT_WORK_ITEM_STATUS_CHANGE,
+        "claim": EVENT_WORK_ITEM_CLAIM,
+        "lease_release": EVENT_WORK_ITEM_LEASE_RELEASE,
+    }
+
+
+# モジュールロード時に一度だけ構築（dispatcher は別 commit でも定数値を
+# 変えない限りこの map は安定）。
+_WORK_ITEM_EVENT_NAME_BY_MARKER: dict[str, str] = _build_work_item_event_marker_map()
 
 
 def _resolve_work_item_event_name(marker: object) -> str:
@@ -71,7 +89,9 @@ def _resolve_work_item_event_name(marker: object) -> str:
         mapped = _WORK_ITEM_EVENT_NAME_BY_MARKER.get(marker)
         if mapped is not None:
             return mapped
-    return "work_item_upsert"
+    # 既定値も dispatcher 定数を参照（drift 防止）
+    from .integrations.notion_dashboard.dispatcher import EVENT_WORK_ITEM_UPSERT
+    return EVENT_WORK_ITEM_UPSERT
 
 
 class WorkflowRunner:
