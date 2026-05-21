@@ -648,21 +648,23 @@ class NotionSyncDispatcher:
             # （`workflow_started` ↔ `review_issue_raised` と同じ deferred 戦略。
             # PR #41 Copilot 7 回目指摘で silent drop を防止）。
             workflow_id = payload.get("workflow_id")
-            # outbox に同 workflow の work_item_upsert が pending かを inline で
-            # 確認する。専用 helper にすると既存の count 系メソッド群と
-            # boilerplate 重複が増えて SonarCloud 重複行密度を押し上げるため
-            # （PR #41 SonarCloud 5 回目対応）、本処理は 1 箇所からしか呼ばれない
-            # ので inline で済ませる。失敗時は `0` として扱い defer をスキップ
-            # （安全側に倒すと「常に defer」になるが、本質は race 検出なので
-            # 検出不能なら genuine miss 側に倒す）。
+            # outbox に **同じ dedupe_key の** work_item_upsert が pending かを
+            # inline で確認する（PR #41 Copilot 8 回目指摘で範囲を絞り込み）。
+            # 旧版は `workflow_id × event_type` で集計していたため、対象 Work
+            # Item と無関係な別 item の upsert が残っているだけで status_change
+            # が永久 defer されるリスクがあった。idempotency_key は
+            # `{wid}:work_item_upsert:{dedupe_key}` 形式なので exact match で
+            # 同定する（drain 層 `_prepare_work_item_dispatch` の生成則と一致）。
+            # 失敗時は `0` 扱いで defer をスキップし、genuine miss 側に倒す。
             pending_upsert = 0
             if workflow_id and self._store is not None:
+                expected_key = f"{workflow_id}:work_item_upsert:{dedupe_key}"
                 try:
                     with self._store._connect() as conn:  # type: ignore[attr-defined]
                         row = conn.execute(
                             "SELECT COUNT(*) FROM notion_sync_outbox "
-                            "WHERE workflow_id = ? AND event_type = ?",
-                            (workflow_id, "work_item_upsert"),
+                            "WHERE idempotency_key = ?",
+                            (expected_key,),
                         ).fetchone()
                         pending_upsert = int(row[0]) if row else 0
                 except Exception:

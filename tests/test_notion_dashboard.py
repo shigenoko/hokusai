@@ -361,24 +361,9 @@ def test_notion_api_client_429_eventually_raises(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-class _RecordingAPI:
-    """API クライアントの動作を記録するスタブ"""
-
-    def __init__(self, *, query_result: list | None = None):
-        self.calls: list[tuple[str, dict]] = []
-        self._query_result = query_result or []
-
-    def query_database(self, database_id: str, *, filter_: dict | None = None) -> dict:
-        self.calls.append(("query", {"database_id": database_id, "filter": filter_}))
-        return {"results": self._query_result}
-
-    def create_page(self, payload: dict) -> dict:
-        self.calls.append(("create", payload))
-        return {"id": "page-new"}
-
-    def update_page(self, page_id: str, payload: dict) -> dict:
-        self.calls.append(("update", {"page_id": page_id, **payload}))
-        return {"id": page_id}
+# API スタブは tests/_notion_test_helpers.py に集約（PR #41 Round 9 で
+# test_work_items_dispatcher.py との重複行検知を解消するため移行）。
+from tests._notion_test_helpers import NotionRecordingAPI as _RecordingAPI  # noqa: E402
 
 
 def test_workflows_db_creates_when_not_exists():

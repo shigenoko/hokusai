@@ -27,30 +27,11 @@ from hokusai.integrations.notion_dashboard.dispatcher import (
     NotionSyncDispatcher,
 )
 from hokusai.persistence.sqlite_store import SQLiteStore
+from tests._notion_test_helpers import NotionRecordingAPI as _RecordingAPI
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-class _RecordingAPI:
-    """API クライアントの動作を記録するスタブ"""
-
-    def __init__(self, *, query_result: list | None = None):
-        self.calls: list[tuple[str, dict]] = []
-        self._query_result = query_result or []
-
-    def query_database(self, database_id: str, *, filter_: dict | None = None) -> dict:
-        self.calls.append(("query", {"database_id": database_id, "filter": filter_}))
-        return {"results": self._query_result}
-
-    def create_page(self, payload: dict) -> dict:
-        self.calls.append(("create", payload))
-        return {"id": "page-new"}
-
-    def update_page(self, page_id: str, payload: dict) -> dict:
-        self.calls.append(("update", {"page_id": page_id, **payload}))
-        return {"id": page_id}
 
 
 def _make_config(enabled: bool = True) -> NotionDashboardConfig:
@@ -368,12 +349,13 @@ def test_dispatcher_work_item_status_change_skips_when_dedupe_key_and_title_both
     assert queries == []
 
 
-def test_dispatcher_work_item_status_change_defers_when_upsert_pending(
+def _build_status_change_dispatcher_with_missing_page(
     store: SQLiteStore, monkeypatch
-):
-    """status_change で page が見つからず、同 workflow の work_item_upsert が
-    outbox に pending なら NotionAPIError(503) で defer する
-    （PR #41 Copilot 7 回目指摘: silent drop 防止）。"""
+) -> tuple[NotionSyncDispatcher, _RecordingAPI]:
+    """status_change テスト用の共通 setup（page 未存在シナリオ）。
+
+    PR #41 SonarCloud 6 回目対応で 2 テストの boilerplate 重複を集約。
+    """
     monkeypatch.setenv("TEST_TOKEN", "secret")
     monkeypatch.setenv("TEST_DB", "wf-db")
     monkeypatch.setenv("TEST_WORK_ITEMS_DB", "wi-db")
@@ -381,27 +363,44 @@ def test_dispatcher_work_item_status_change_defers_when_upsert_pending(
     cfg = _make_config()
     cfg.work_items_db_id_env = "TEST_WORK_ITEMS_DB"
 
-    # find_by_dedupe_key → 空（page 未存在）
-    api = _RecordingAPI(query_result=[])
-    # 同じ workflow_id の work_item_upsert が outbox に pending
-    store.enqueue_notion_sync(
-        idempotency_key="wf-1:work_item_upsert:abc123",
-        workflow_id="wf-1",
-        event_type="work_item_upsert",
-        payload={"workflow_id": "wf-1", "title": "X", "phase": 4},
-    )
+    api = _RecordingAPI(query_result=[])  # find_by_dedupe_key → 空
 
     class _Disp(NotionSyncDispatcher):
         def _get_api(self):
             return api  # type: ignore[return-value]
 
-    disp = _Disp(store=store, config=cfg)
-    result = disp.dispatch(EVENT_WORK_ITEM_STATUS_CHANGE, {
+    return _Disp(store=store, config=cfg), api
+
+
+def _dispatch_status_change_for_test(disp: NotionSyncDispatcher) -> bool:
+    """共通の status_change dispatch ペイロードで dispatch を呼ぶ。"""
+    return disp.dispatch(EVENT_WORK_ITEM_STATUS_CHANGE, {
         "workflow_id": "wf-1",
         "title": "X",
         "phase": 4,
         "status": "done",
     })
+
+
+def test_dispatcher_work_item_status_change_defers_when_upsert_pending(
+    store: SQLiteStore, monkeypatch
+):
+    """status_change で page が見つからず、**同じ dedupe_key の** work_item_upsert
+    が outbox に pending なら NotionAPIError(503) で defer する
+    （PR #41 Copilot 7/8 回目指摘: silent drop 防止 + dedupe_key 単位での絞り込み）。
+    """
+    from hokusai.integrations.notion_dashboard.work_items_db import build_dedupe_key
+
+    disp, api = _build_status_change_dispatcher_with_missing_page(store, monkeypatch)
+    # dispatcher と同じ dedupe_key を outbox に積む（exact match で defer 発火）
+    dkey = build_dedupe_key(workflow_id="wf-1", phase=4, title="X")
+    store.enqueue_notion_sync(
+        idempotency_key=f"wf-1:work_item_upsert:{dkey}",
+        workflow_id="wf-1",
+        event_type="work_item_upsert",
+        payload={"workflow_id": "wf-1", "title": "X", "phase": 4},
+    )
+    result = _dispatch_status_change_for_test(disp)
     # dispatch は False（outbox にキューイング）。update_status は呼ばれない。
     assert result is False
     updates = [c for c in api.calls if c[0] == "update"]
@@ -413,27 +412,29 @@ def test_dispatcher_work_item_status_change_genuine_miss_skips_with_warning(
 ):
     """status_change で page が見つからず、pending upsert も無いケースは
     genuine miss として warning + skip（後続には影響しない）。"""
-    monkeypatch.setenv("TEST_TOKEN", "secret")
-    monkeypatch.setenv("TEST_DB", "wf-db")
-    monkeypatch.setenv("TEST_WORK_ITEMS_DB", "wi-db")
-
-    cfg = _make_config()
-    cfg.work_items_db_id_env = "TEST_WORK_ITEMS_DB"
-
-    api = _RecordingAPI(query_result=[])  # page 未存在
-
-    class _Disp(NotionSyncDispatcher):
-        def _get_api(self):
-            return api  # type: ignore[return-value]
-
-    disp = _Disp(store=store, config=cfg)
-    result = disp.dispatch(EVENT_WORK_ITEM_STATUS_CHANGE, {
-        "workflow_id": "wf-1",
-        "title": "X",
-        "phase": 4,
-        "status": "done",
-    })
+    disp, api = _build_status_change_dispatcher_with_missing_page(store, monkeypatch)
+    result = _dispatch_status_change_for_test(disp)
     # pending upsert が無いので defer はせず、warning + skip で成功扱い
     assert result is True
     updates = [c for c in api.calls if c[0] == "update"]
     assert updates == []
+
+
+def test_dispatcher_work_item_status_change_does_not_defer_on_unrelated_pending_upsert(
+    store: SQLiteStore, monkeypatch
+):
+    """別の Work Item の upsert が pending でも、対象の dedupe_key と一致
+    しない限り status_change は genuine miss として skip する
+    （PR #41 Copilot 8 回目指摘: workflow_id 単位の broad defer を避ける）。
+    """
+    disp, _api = _build_status_change_dispatcher_with_missing_page(store, monkeypatch)
+    # 全く別の dedupe_key を持つ upsert を outbox に積む
+    store.enqueue_notion_sync(
+        idempotency_key="wf-1:work_item_upsert:unrelated_dedupe_key",
+        workflow_id="wf-1",
+        event_type="work_item_upsert",
+        payload={"workflow_id": "wf-1", "title": "OTHER", "phase": 4},
+    )
+    result = _dispatch_status_change_for_test(disp)
+    # 対象 dedupe_key と一致しないので defer は発生しない（success skip）
+    assert result is True
