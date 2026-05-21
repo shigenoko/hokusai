@@ -218,9 +218,13 @@ def test_interceptor_audit_handles_non_json_serializable_metadata(caplog):
     （PR #40 Copilot 1 回目指摘）"""
     config = LLMGatewayConfig(enabled=True, audit_log_enabled=True)
     interceptor = LLMGatewayInterceptor(config)
+    # Path リテラルは「型が JSON-serializable でないこと」だけを表現したい。
+    # SonarCloud S5443 を踏まないよう /tmp 直下や /var/tmp は避け、書き込み
+    # しない読み取り専用相当の架空パスを使う（実 I/O は発生しない）。
+    sample_path = Path("/example/llm-gateway/audit-fixture")
     with caplog.at_level(logging.INFO, logger="hokusai.llm_gateway"):
         decision = interceptor.intercept(
-            LLMGatewayContext(provider="x", metadata={"path": Path("/tmp/foo")}),
+            LLMGatewayContext(provider="x", metadata={"path": sample_path}),
             "hello",
         )
     assert decision.decision == "log"
@@ -228,7 +232,7 @@ def test_interceptor_audit_handles_non_json_serializable_metadata(caplog):
     assert len(audit_records) == 1
     payload = json.loads(audit_records[0].message.split("llm_gateway_audit ", 1)[1])
     # Path は default=str で文字列化される
-    assert payload["context"]["metadata"]["path"] == "/tmp/foo"
+    assert payload["context"]["metadata"]["path"] == str(sample_path)
 
 
 def test_interceptor_skips_audit_when_audit_log_disabled(caplog):
