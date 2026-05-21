@@ -12,7 +12,6 @@ import json
 import logging
 import sys
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -21,11 +20,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from hokusai.config.loaders import _parse_llm_gateway_config
 from hokusai.config.models import LLMGatewayConfig
 from hokusai.llm_gateway import (
-    InterceptorDecision,
     LLMGatewayContext,
     LLMGatewayInterceptor,
 )
-
 
 # ---------------------------------------------------------------------------
 # LLMGatewayConfig loader
@@ -132,6 +129,21 @@ def test_context_metadata_isolated_from_input_dict_mutations():
     assert "added" not in ctx.metadata
 
 
+def test_context_metadata_copies_even_when_mappingproxy_input():
+    """MappingProxyType 由来の Mapping を渡しても、内部で必ず dict コピーを取る
+    （PR #40 Copilot 2 回目指摘: underlying dict 経由の改変を防ぐ）"""
+    from types import MappingProxyType
+
+    underlying = {"k": "v"}
+    proxy_input = MappingProxyType(underlying)
+    ctx = LLMGatewayContext(provider="x", metadata=proxy_input)
+    # underlying dict を後から書き換えても context は影響を受けない
+    underlying["k"] = "mutated"
+    underlying["added"] = "after"
+    assert ctx.metadata["k"] == "v"
+    assert "added" not in ctx.metadata
+
+
 # ---------------------------------------------------------------------------
 # LLMGatewayInterceptor
 # ---------------------------------------------------------------------------
@@ -185,6 +197,20 @@ def test_interceptor_dry_run_uses_distinct_reason(caplog):
         )
     assert decision.decision == "log"
     assert decision.reason == "dry_run_log_only"
+
+
+def test_interceptor_audit_includes_config_snapshot(caplog):
+    """audit JSON に config_snapshot が含まれ、Phase 1 動作中の設定が記録される
+    （PR #40 Copilot 2 回目指摘: log_only / dry_run が decision に影響しなくても
+    監査上どの設定で動いていたかは残す）"""
+    config = LLMGatewayConfig(enabled=True, dry_run=True, audit_log_enabled=True)
+    interceptor = LLMGatewayInterceptor(config)
+    with caplog.at_level(logging.INFO, logger="hokusai.llm_gateway"):
+        interceptor.intercept(LLMGatewayContext(provider="x"), "p")
+    audit_records = [r for r in caplog.records if "llm_gateway_audit" in r.message]
+    payload = json.loads(audit_records[0].message.split("llm_gateway_audit ", 1)[1])
+    assert payload["config_snapshot"]["dry_run"] is True
+    assert payload["config_snapshot"]["log_only"] is True  # Phase 1 は常に True
 
 
 def test_interceptor_audit_handles_non_json_serializable_metadata(caplog):
@@ -267,9 +293,9 @@ class _FakeShellResult:
 
 def test_claude_code_client_invokes_interceptor_on_run(monkeypatch, caplog, tmp_path):
     """ClaudeCodeClient._run_claude_code が呼ばれると interceptor も呼ばれる"""
-    from hokusai.integrations.claude_code import ClaudeCodeClient
     from hokusai.config import set_config
     from hokusai.config.models import WorkflowConfig
+    from hokusai.integrations.claude_code import ClaudeCodeClient
 
     cfg = WorkflowConfig(
         llm_gateway=LLMGatewayConfig(enabled=True, audit_log_enabled=True),
@@ -334,9 +360,9 @@ def test_claude_code_client_includes_append_system_prompt_hash_in_metadata(
     不一致になる問題への対応）"""
     import hashlib
 
-    from hokusai.integrations.claude_code import ClaudeCodeClient
     from hokusai.config import set_config
     from hokusai.config.models import WorkflowConfig
+    from hokusai.integrations.claude_code import ClaudeCodeClient
 
     cfg = WorkflowConfig(
         llm_gateway=LLMGatewayConfig(enabled=True, audit_log_enabled=True),
@@ -371,9 +397,9 @@ def test_claude_code_client_skips_interceptor_when_llm_gateway_missing(
     monkeypatch, caplog, tmp_path
 ):
     """llm_gateway 属性が config にない場合は interceptor 呼び出しを silent skip"""
-    from hokusai.integrations.claude_code import ClaudeCodeClient
     from hokusai.config import set_config
     from hokusai.config.models import WorkflowConfig
+    from hokusai.integrations.claude_code import ClaudeCodeClient
 
     # WorkflowConfig を構築して llm_gateway を None にする（古い config 想定）
     cfg = WorkflowConfig()

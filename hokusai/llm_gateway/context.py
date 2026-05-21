@@ -10,7 +10,6 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Mapping
 
-
 _EMPTY_METADATA: Mapping[str, object] = MappingProxyType({})
 
 
@@ -44,10 +43,12 @@ class LLMGatewayContext:
     metadata: Mapping[str, object] = field(default_factory=lambda: _EMPTY_METADATA)
 
     def __post_init__(self) -> None:
-        # 入力 dict を read-only にラップ。元 dict の変更が context に影響しない
-        # よう、まず dict(...) で浅いコピーを取ってから MappingProxyType に通す。
-        # `frozen=True` のため object.__setattr__ を使う必要がある。
-        if not isinstance(self.metadata, MappingProxyType):
-            object.__setattr__(
-                self, "metadata", MappingProxyType(dict(self.metadata or {}))
-            )
+        # 入力が何であれ必ず `dict(...)` で浅いコピーを取ってから
+        # MappingProxyType でラップする。MappingProxyType を渡された場合に
+        # コピーを省くと、呼び出し側が underlying dict を保持していると
+        # 後続変更が context に反映され audit 再現性が崩れるため
+        # （PR #40 Copilot 2 回目指摘）。`frozen=True` のため
+        # `object.__setattr__` を使う必要がある。
+        object.__setattr__(
+            self, "metadata", MappingProxyType(dict(self.metadata or {}))
+        )

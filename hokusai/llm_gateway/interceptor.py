@@ -57,6 +57,12 @@ class LLMGatewayInterceptor:
         `decision="skipped"` を返し、有効化されている場合は decision="log"
         を返しつつ audit_log_enabled なら構造化 log entry を残す。
 
+        **`LLMGatewayConfig.log_only` フィールドは Phase 1 では未使用**
+        （schema / loader / audit log には残し、Phase 5+ で block decision
+        が解禁された際に「block するか log のみで止めるか」を制御する
+        フラグとして利用予定）。Phase 1 では実質常に log-only 動作なので
+        参照しなくても挙動は変わらない（PR #40 Copilot 2 回目指摘）。
+
         Args:
             context: 呼び出し context（少なくとも provider は埋める）
             prompt: 送信予定 prompt（hash / length のみ記録、本文は保存しない）
@@ -116,6 +122,13 @@ class LLMGatewayInterceptor:
             "context": context_dict,
             "prompt_length": len(prompt),
             "prompt_hash": prompt_hash,
+            # Phase 1 では log_only / dry_run は decision に影響しないが、
+            # 監査上「どの設定で動いていたか」を明示するため audit に残す
+            # （PR #40 Copilot 2 回目指摘）
+            "config_snapshot": {
+                "log_only": True,  # Phase 1 は実質的に常に True
+                "dry_run": reason == "dry_run_log_only",
+            },
         }
         # JSON 形式で 1 行に出力（後で grep / jq 解析しやすい形）。
         # metadata に非 JSON-serializable な値（Path 等）が混ざっていても
