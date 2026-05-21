@@ -200,17 +200,50 @@ def test_interceptor_dry_run_uses_distinct_reason(caplog):
 
 
 def test_interceptor_audit_includes_config_snapshot(caplog):
-    """audit JSON に config_snapshot が含まれ、Phase 1 動作中の設定が記録される
-    （PR #40 Copilot 2 回目指摘: log_only / dry_run が decision に影響しなくても
-    監査上どの設定で動いていたかは残す）"""
-    config = LLMGatewayConfig(enabled=True, dry_run=True, audit_log_enabled=True)
-    interceptor = LLMGatewayInterceptor(config)
+    """audit JSON の config_snapshot は LLMGatewayConfig の実値を反映する。
+
+    PR #40 Copilot 2 回目指摘で config_snapshot を audit に載せたが、3 回目で
+    「ハードコード/reason 推定ではなくユーザーが渡した実値を記録すべき」と
+    指摘されたため、log_only=True / False / dry_run=True / False の組み合わせを
+    変えて snapshot が一致することを検証する。
+    """
+    config_dry_run_log_only = LLMGatewayConfig(
+        enabled=True, dry_run=True, log_only=True, audit_log_enabled=True
+    )
+    interceptor = LLMGatewayInterceptor(config_dry_run_log_only)
     with caplog.at_level(logging.INFO, logger="hokusai.llm_gateway"):
         interceptor.intercept(LLMGatewayContext(provider="x"), "p")
     audit_records = [r for r in caplog.records if "llm_gateway_audit" in r.message]
     payload = json.loads(audit_records[0].message.split("llm_gateway_audit ", 1)[1])
-    assert payload["config_snapshot"]["dry_run"] is True
-    assert payload["config_snapshot"]["log_only"] is True  # Phase 1 は常に True
+    assert payload["config_snapshot"] == {
+        "enabled": True,
+        "log_only": True,
+        "dry_run": True,
+        "audit_log_enabled": True,
+    }
+
+    caplog.clear()
+    # log_only=False / dry_run=False の組み合わせでも実値が記録されること
+    # （Phase 1 では挙動は変わらないが、Phase 5+ への移行検証用に audit には
+    # 渡された値がそのまま残るべき）
+    config_explicit_false = LLMGatewayConfig(
+        enabled=True, dry_run=False, log_only=False, audit_log_enabled=True
+    )
+    interceptor2 = LLMGatewayInterceptor(config_explicit_false)
+    with caplog.at_level(logging.INFO, logger="hokusai.llm_gateway"):
+        interceptor2.intercept(LLMGatewayContext(provider="x"), "p")
+    audit_records2 = [
+        r for r in caplog.records if "llm_gateway_audit" in r.message
+    ]
+    payload2 = json.loads(
+        audit_records2[0].message.split("llm_gateway_audit ", 1)[1]
+    )
+    assert payload2["config_snapshot"] == {
+        "enabled": True,
+        "log_only": False,
+        "dry_run": False,
+        "audit_log_enabled": True,
+    }
 
 
 def test_interceptor_audit_handles_non_json_serializable_metadata(caplog):

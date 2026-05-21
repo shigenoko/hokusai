@@ -89,8 +89,8 @@ class LLMGatewayInterceptor:
             decision=DECISION_LOG, reason=reason, audit_emitted=audit_emitted
         )
 
-    @staticmethod
     def _emit_audit(
+        self,
         context: LLMGatewayContext,
         prompt: str,
         decision: str,
@@ -122,12 +122,17 @@ class LLMGatewayInterceptor:
             "context": context_dict,
             "prompt_length": len(prompt),
             "prompt_hash": prompt_hash,
+            # 監査上「どの設定で動いていたか」を再現できるよう、interceptor
+            # に渡された LLMGatewayConfig の実値をそのまま記録する。
             # Phase 1 では log_only / dry_run は decision に影響しないが、
-            # 監査上「どの設定で動いていたか」を明示するため audit に残す
-            # （PR #40 Copilot 2 回目指摘）
+            # ユーザーが `log_only=False` を設定したケースも audit に残す
+            # ことで Phase 5+ への移行検証を可能にする（PR #40 Copilot 3
+            # 回目指摘: ハードコード/推定ではなく実値を記録）。
             "config_snapshot": {
-                "log_only": True,  # Phase 1 は実質的に常に True
-                "dry_run": reason == "dry_run_log_only",
+                "enabled": self._config.enabled,
+                "log_only": self._config.log_only,
+                "dry_run": self._config.dry_run,
+                "audit_log_enabled": self._config.audit_log_enabled,
             },
         }
         # JSON 形式で 1 行に出力（後で grep / jq 解析しやすい形）。
