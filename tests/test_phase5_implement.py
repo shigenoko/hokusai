@@ -432,3 +432,74 @@ class TestResolveWorkPlan:
         content, source = _resolve_work_plan(minimal_state)
         assert content == self.VALID_PLAN
         assert source == "task_page_section"
+
+
+# ---------------------------------------------------------------------------
+# Work Item done 遷移 enqueue（Issue #38 / Workgraph Phase 2）
+# ---------------------------------------------------------------------------
+
+
+class TestEnqueueWorkItemDoneTransitions:
+    """_enqueue_work_item_done_transitions のテスト"""
+
+    def test_enqueue_done_transitions_for_each_work_item(self):
+        """work_plan の Work Item ごとに status="done" の status_change marker
+        付き payload を pending_work_items に enqueue する"""
+        from hokusai.nodes.phase5_implement import _enqueue_work_item_done_transitions
+
+        state = {
+            "workflow_id": "wf-1",
+            "work_plan": """\
+- [ ] implement login
+- [ ] add unit tests
+""",
+            "pending_work_items": [],
+        }
+        count = _enqueue_work_item_done_transitions(state)
+        assert count == 2
+        pending = state["pending_work_items"]
+        assert len(pending) == 2
+
+        for item in pending:
+            assert item["workflow_id"] == "wf-1"
+            assert item["phase"] == 4  # Phase 4 dedupe_key と同 identity
+            assert item["status"] == "done"
+            assert item["_event"] == "status_change"
+
+        titles = [it["title"] for it in pending]
+        assert titles == ["implement login", "add unit tests"]
+
+    def test_enqueue_done_transitions_no_op_when_work_plan_empty(self):
+        from hokusai.nodes.phase5_implement import _enqueue_work_item_done_transitions
+
+        state = {"workflow_id": "wf-1", "work_plan": "", "pending_work_items": []}
+        assert _enqueue_work_item_done_transitions(state) == 0
+        assert state["pending_work_items"] == []
+
+    def test_enqueue_done_transitions_no_op_when_no_work_items_extracted(self):
+        from hokusai.nodes.phase5_implement import _enqueue_work_item_done_transitions
+
+        state = {
+            "workflow_id": "wf-1",
+            "work_plan": "ただの段落だけです\n",
+            "pending_work_items": [],
+        }
+        assert _enqueue_work_item_done_transitions(state) == 0
+        assert state["pending_work_items"] == []
+
+    def test_enqueue_done_transitions_appends_to_existing_pending(self):
+        from hokusai.nodes.phase5_implement import _enqueue_work_item_done_transitions
+
+        state = {
+            "workflow_id": "wf-1",
+            "work_plan": "- [ ] new item\n",
+            "pending_work_items": [
+                {"workflow_id": "wf-1", "title": "preexisting", "phase": 4, "status": "pending"}
+            ],
+        }
+        assert _enqueue_work_item_done_transitions(state) == 1
+        # 既存 + 新規 = 2
+        assert len(state["pending_work_items"]) == 2
+        assert state["pending_work_items"][0]["title"] == "preexisting"
+        assert state["pending_work_items"][1]["title"] == "new item"
+        assert state["pending_work_items"][1]["status"] == "done"

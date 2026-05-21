@@ -232,3 +232,101 @@ def test_dispatcher_excludes_work_item_upsert_from_pending_count(
     # work_item_upsert + review_issue_raised の 2 件しか outbox に無い場合、
     # workflow page sync の pending は 0
     assert disp._count_pending_workflow_page_events_for("wf-1") == 0
+
+
+# ---------------------------------------------------------------------------
+# work_item_status_change: 状態遷移専用イベント
+# ---------------------------------------------------------------------------
+
+
+def test_dispatcher_work_item_status_change_calls_update_status(
+    store: SQLiteStore, monkeypatch
+):
+    """work_item_status_change は find_by_dedupe_key で page を見つけて
+    WorkItemsDBClient.update_status を呼ぶ"""
+    monkeypatch.setenv("TEST_TOKEN", "secret")
+    monkeypatch.setenv("TEST_DB", "wf-db")
+    monkeypatch.setenv("TEST_WORK_ITEMS_DB", "wi-db")
+
+    cfg = _make_config()
+    cfg.work_items_db_id_env = "TEST_WORK_ITEMS_DB"
+
+    # find_by_dedupe_key → ["existing"] を返す
+    api = _RecordingAPI(query_result=[{"id": "existing-page"}])
+
+    class _Disp(NotionSyncDispatcher):
+        def _get_api(self):
+            return api  # type: ignore[return-value]
+
+    disp = _Disp(store=store, config=cfg)
+    result = disp.dispatch("work_item_status_change", {
+        "workflow_id": "wf-1",
+        "title": "implement login",
+        "phase": 4,
+        "status": "done",
+    })
+    assert result is True
+    # update_page (status only) が呼ばれる
+    updates = [c for c in api.calls if c[0] == "update"]
+    assert len(updates) == 1
+    page_id = updates[0][1]["page_id"]
+    assert page_id == "existing-page"
+    props = updates[0][1]["properties"]
+    assert props["Status"]["select"]["name"] == "done"
+
+
+def test_dispatcher_work_item_status_change_warns_when_page_not_found(
+    store: SQLiteStore, monkeypatch, caplog
+):
+    """対応 Work Item が見つからない場合は warning で skip（API は呼ばない）"""
+    monkeypatch.setenv("TEST_TOKEN", "secret")
+    monkeypatch.setenv("TEST_DB", "wf-db")
+    monkeypatch.setenv("TEST_WORK_ITEMS_DB", "wi-db")
+
+    cfg = _make_config()
+    cfg.work_items_db_id_env = "TEST_WORK_ITEMS_DB"
+
+    api = _RecordingAPI(query_result=[])  # find_by_dedupe_key → 空
+
+    class _Disp(NotionSyncDispatcher):
+        def _get_api(self):
+            return api  # type: ignore[return-value]
+
+    disp = _Disp(store=store, config=cfg)
+    result = disp.dispatch("work_item_status_change", {
+        "workflow_id": "wf-1",
+        "title": "X",
+        "phase": 4,
+        "status": "done",
+    })
+    assert result is True
+    # query は呼ばれるが update は呼ばれない
+    updates = [c for c in api.calls if c[0] == "update"]
+    assert updates == []
+
+
+def test_dispatcher_work_item_status_change_requires_status(
+    store: SQLiteStore, monkeypatch
+):
+    """status 欠落時は API を呼ばずに no-op"""
+    monkeypatch.setenv("TEST_TOKEN", "secret")
+    monkeypatch.setenv("TEST_DB", "wf-db")
+    monkeypatch.setenv("TEST_WORK_ITEMS_DB", "wi-db")
+
+    cfg = _make_config()
+    cfg.work_items_db_id_env = "TEST_WORK_ITEMS_DB"
+
+    api = _RecordingAPI()
+
+    class _Disp(NotionSyncDispatcher):
+        def _get_api(self):
+            return api  # type: ignore[return-value]
+
+    disp = _Disp(store=store, config=cfg)
+    result = disp.dispatch("work_item_status_change", {
+        "workflow_id": "wf-1",
+        "title": "X",
+        "phase": 4,
+    })
+    assert result is True
+    assert api.calls == []

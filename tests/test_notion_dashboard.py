@@ -2561,3 +2561,34 @@ def test_drain_pending_work_items_swallows_exceptions():
         {"pending_work_items": [{"title": "X", "workflow_id": "w"}]},
         {"thread": "x"},
     )
+
+
+def test_drain_pending_work_items_dispatches_status_change_event_when_marker_set():
+    """payload に `_event="status_change"` marker があれば
+    work_item_status_change イベントとして dispatch される
+    （Phase 5 implement 完了時の状態遷移）"""
+    runner = _make_runner()
+    capt = _CapturingDispatch(runner)
+    runner.compiled_workflow = _FakeCompiledWorkflow()  # type: ignore[assignment]
+
+    pending = [
+        {
+            "workflow_id": "wf-1",
+            "title": "implement login",
+            "phase": 4,
+            "status": "done",
+            "_event": "status_change",
+        }
+    ]
+    runner._drain_pending_work_items(
+        {"pending_work_items": pending}, {"thread": "x"}
+    )
+    assert len(capt.calls) == 1
+    # event 名が切り替わる
+    assert capt.calls[0]["event_type"] == "work_item_status_change"
+    # idempotency_key も status_change 用
+    assert capt.calls[0]["idempotency_key"].startswith(
+        "wf-1:work_item_status_change:"
+    )
+    # `_event` は dispatcher 向け enriched payload からは除かれる（internal）
+    assert "_event" not in capt.calls[0]["payload"]

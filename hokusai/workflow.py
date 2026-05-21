@@ -221,8 +221,17 @@ class WorkflowRunner:
                 enriched, idempotency_key = self._prepare_work_item_dispatch(
                     payload, operator
                 )
+                # `_event` marker で event 名を切り替える（Phase 5 implement の
+                # 状態遷移は work_item_status_change を発火し、dispatcher 側で
+                # WorkItemsDBClient.update_status を呼ばせる）。marker を持た
+                # ない通常の Work Item enqueue は work_item_upsert。
+                event_name = (
+                    "work_item_status_change"
+                    if payload.get("_event") == "status_change"
+                    else "work_item_upsert"
+                )
                 self._safe_notion_dispatch(
-                    "work_item_upsert",
+                    event_name,
                     enriched,
                     idempotency_key=idempotency_key,
                 )
@@ -272,10 +281,18 @@ class WorkflowRunner:
                 title=str(enriched.get("title") or ""),
             )
             enriched["dedupe_key"] = dkey
+        # `_event` marker は drain 層が event 名分岐に使う internal なもの。
+        # 後段の dispatcher / Notion 側に送る必要はないので enriched からは除く。
+        event_marker = enriched.pop("_event", None)
+        event_for_key = (
+            "work_item_status_change"
+            if event_marker == "status_change"
+            else "work_item_upsert"
+        )
         idempotency_key = (
-            f"{wid}:work_item_upsert:{dkey}"
+            f"{wid}:{event_for_key}:{dkey}"
             if wid
-            else f"work_item_upsert:{dkey}"
+            else f"{event_for_key}:{dkey}"
         )
         return enriched, idempotency_key
 

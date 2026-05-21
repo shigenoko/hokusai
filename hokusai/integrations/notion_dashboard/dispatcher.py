@@ -36,6 +36,14 @@ EVENT_REVIEW_ISSUE_RAISED = "review_issue_raised"
 # upsert と分離せず、payload.status で扱う前提（既存 Notion 側 Status を温存
 # したいかは payload.preserve_status フラグで制御）。
 EVENT_WORK_ITEM_UPSERT = "work_item_upsert"
+# Work Item status 遷移専用イベント（Issue #38）。upsert は Status を温存する
+# ので、Phase 5 implement の in_progress → done のような明示的遷移はこちら
+# を使う。payload は (workflow_id / title / phase / status) の最小セット +
+# dedupe_key（省略時は build_dedupe_key で再生成）。dedupe_key で Work Item を
+# 同定し、Notion 側で見つからない場合は warning で skip（race condition で
+# 後段から発生したケースは Phase 5 完了時点で必ず Work Item が存在するので、
+# miss はバグまたは設定漏れと考える）。
+EVENT_WORK_ITEM_STATUS_CHANGE = "work_item_status_change"
 
 
 class NotionSyncDispatcher:
@@ -221,6 +229,10 @@ class NotionSyncDispatcher:
             )
             return
 
+        if event_type == EVENT_WORK_ITEM_STATUS_CHANGE:
+            self._handle_work_item_status_change(payload)
+            return
+
         # 後方互換: 旧 Service Status sync が outbox に積んだ
         # service_status_checked エントリは Notion 連携廃止済みなので
         # no-op として扱い、retry_pending() で drain できるようにする。
@@ -331,6 +343,7 @@ class NotionSyncDispatcher:
         excluded_types = (
             "review_issue_raised",
             "work_item_upsert",
+            "work_item_status_change",
             "service_status_checked",
         )
         try:
@@ -574,6 +587,55 @@ class NotionSyncDispatcher:
             or [],
             dedupe_key=payload.get("dedupe_key"),
         )
+
+    def _handle_work_item_status_change(self, payload: dict[str, Any]) -> None:
+        """Work Item の Status のみを明示的に上書きする（Issue #38）。
+
+        upsert_work_item は再 dispatch で Status を巻き戻さないために temponement
+        するため、Phase 5 implement の `in_progress` → `done` のような遷移には
+        本ハンドラを使う。dedupe_key（または workflow_id + phase + title）で
+        Work Item を同定し、見つからなければ warning で skip する（Phase 5 完了
+        時点で必ず Phase 4 enqueue 済 Work Item が Notion 側に存在する前提）。
+
+        Args:
+            payload: workflow_id / title / phase / status / dedupe_key
+        """
+        from .work_items_db import build_dedupe_key
+
+        work_items_db_id = os.environ.get(
+            self._config.work_items_db_id_env, ""
+        ).strip()
+        if not work_items_db_id:
+            logger.debug(
+                "Work Items DB ID 未設定のため status change をスキップ"
+            )
+            return
+
+        status = payload.get("status")
+        if not status:
+            logger.warning(
+                "work_item_status_change に status が無いためスキップ"
+            )
+            return
+
+        dedupe_key = payload.get("dedupe_key")
+        if not dedupe_key:
+            dedupe_key = build_dedupe_key(
+                workflow_id=payload.get("workflow_id"),
+                phase=payload.get("phase"),
+                title=str(payload.get("title") or ""),
+            )
+
+        client = self._get_work_items_client(work_items_db_id)
+        page_id = client.find_by_dedupe_key(dedupe_key)
+        if page_id is None:
+            logger.warning(
+                "Work Item の status 遷移先 page が見つからない: "
+                f"workflow_id={payload.get('workflow_id')}, "
+                f"title={payload.get('title')!r}, dedupe_key={dedupe_key[:8]}..."
+            )
+            return
+        client.update_status(page_id, str(status))
 
     def _enqueue_failure(
         self,
