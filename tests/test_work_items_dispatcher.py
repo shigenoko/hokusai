@@ -718,3 +718,35 @@ def test_dispatcher_work_item_claim_skips_when_phase_invalid_type(
         "claimed_by": "claude_code",
     })
     assert result is True
+
+
+def test_dispatcher_work_item_claim_skips_when_dedupe_key_invalid_type(
+    store: SQLiteStore, monkeypatch
+):
+    """dedupe_key が str でない型（list / dict / int 等）なら warning + skip
+    （PR #43 Copilot 4 回目指摘の poison message 防止）"""
+    monkeypatch.setenv("TEST_TOKEN", "secret")
+    monkeypatch.setenv("TEST_DB", "wf-db")
+    monkeypatch.setenv("TEST_WORK_ITEMS_DB", "wi-db")
+
+    cfg = _make_config()
+    cfg.work_items_db_id_env = "TEST_WORK_ITEMS_DB"
+    api = _RecordingAPI(query_result=[])
+
+    class _Disp(NotionSyncDispatcher):
+        def _get_api(self):
+            return api  # type: ignore[return-value]
+
+    disp = _Disp(store=store, config=cfg)
+    # list を dedupe_key に渡す
+    result = disp.dispatch("work_item_claim", {
+        "workflow_id": "wf-1",
+        "title": "X",
+        "phase": 4,
+        "claimed_by": "claude_code",
+        "dedupe_key": ["bad", "type"],
+    })
+    assert result is True
+    # find_by_dedupe_key も呼ばれない
+    queries = [c for c in api.calls if c[0] == "query"]
+    assert queries == []

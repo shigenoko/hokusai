@@ -828,6 +828,19 @@ class NotionSyncDispatcher:
             return None, None
 
         dedupe_key = payload.get("dedupe_key")
+        # **dedupe_key の型検証**（PR #43 Copilot 4 回目指摘）: payload 経由で
+        # str 以外（list / dict / int 等）が渡ると後段の `find_by_dedupe_key`
+        # の query filter 構築で TypeError → dispatch() catch-all → outbox
+        # 再投入の poison message 化リスクがあるため、dispatcher 層で先に
+        # 型を検証する。明示指定があって str でなければ skip（自動生成パスに
+        # 落とさない: 「dedupe_key を明示したが型が間違っている」のは呼び出し
+        # 側のバグなのでサイレント補正せず明示的に skip + warning する）。
+        if dedupe_key is not None and not isinstance(dedupe_key, str):
+            logger.warning(
+                "%s で dedupe_key が str でないためスキップ: %r",
+                event_label, dedupe_key,
+            )
+            return None, None
         if not dedupe_key:
             title = payload.get("title")
             if not title:
