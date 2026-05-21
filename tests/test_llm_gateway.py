@@ -198,8 +198,8 @@ def test_interceptor_hash_is_deterministic_for_same_prompt():
     # 同じであることを確認できれば十分（hash 関数の決定性は標準保証）
     assert spy.call_args_list[0].args[1] == "same"
     assert spy.call_args_list[1].args[1] == "same"
-    # 期待される hash 値も sanity check
-    assert hashlib.sha256("same".encode()).hexdigest()[:16] == expected_hash
+    # 期待される hash 値も sanity check（startswith で前方一致確認）
+    assert hashlib.sha256("same".encode()).hexdigest().startswith(expected_hash)
 
 
 # ---------------------------------------------------------------------------
@@ -216,7 +216,7 @@ class _FakeShellResult:
         self.duration_ms = 10
 
 
-def test_claude_code_client_invokes_interceptor_on_run(monkeypatch, caplog):
+def test_claude_code_client_invokes_interceptor_on_run(monkeypatch, caplog, tmp_path):
     """ClaudeCodeClient._run_claude_code が呼ばれると interceptor も呼ばれる"""
     from hokusai.integrations.claude_code import ClaudeCodeClient
     from hokusai.config import set_config
@@ -227,7 +227,7 @@ def test_claude_code_client_invokes_interceptor_on_run(monkeypatch, caplog):
     )
     set_config(cfg)
 
-    client = ClaudeCodeClient(working_dir=Path("/tmp"))
+    client = ClaudeCodeClient(working_dir=tmp_path)
     # claude コマンド検出をスキップ
     monkeypatch.setattr(
         ClaudeCodeClient, "claude_path", "/usr/bin/false"
@@ -253,11 +253,11 @@ def test_claude_code_client_invokes_interceptor_on_run(monkeypatch, caplog):
     assert payload["decision"] == "log"
 
 
-def test_claude_code_client_interceptor_swallows_exceptions(monkeypatch):
+def test_claude_code_client_interceptor_swallows_exceptions(monkeypatch, tmp_path):
     """interceptor が例外を投げても _run_claude_code は影響を受けない"""
     from hokusai.integrations.claude_code import ClaudeCodeClient
 
-    client = ClaudeCodeClient(working_dir=Path("/tmp"))
+    client = ClaudeCodeClient(working_dir=tmp_path)
     monkeypatch.setattr(
         ClaudeCodeClient, "claude_path", "/usr/bin/false"
     )
@@ -265,11 +265,12 @@ def test_claude_code_client_interceptor_swallows_exceptions(monkeypatch):
         "hokusai.integrations.claude_code.ShellRunner",
         lambda cwd=None: type("S", (), {"run": lambda self, cmd, timeout: _FakeShellResult("ok")})(),
     )
+
     # interceptor 内で例外を起こすために get_config を壊す
-    monkeypatch.setattr(
-        "hokusai.config.get_config",
-        lambda: (_ for _ in ()).throw(RuntimeError("config broken")),
-    )
+    def _raising_get_config():
+        raise RuntimeError("config broken")
+
+    monkeypatch.setattr("hokusai.config.get_config", _raising_get_config)
 
     # 例外が漏れないこと（returns ok）
     result = client._run_claude_code("prompt", timeout=10)
@@ -277,7 +278,7 @@ def test_claude_code_client_interceptor_swallows_exceptions(monkeypatch):
 
 
 def test_claude_code_client_skips_interceptor_when_llm_gateway_missing(
-    monkeypatch, caplog
+    monkeypatch, caplog, tmp_path
 ):
     """llm_gateway 属性が config にない場合は interceptor 呼び出しを silent skip"""
     from hokusai.integrations.claude_code import ClaudeCodeClient
@@ -289,7 +290,7 @@ def test_claude_code_client_skips_interceptor_when_llm_gateway_missing(
     cfg.llm_gateway = None  # type: ignore[assignment]
     set_config(cfg)
 
-    client = ClaudeCodeClient(working_dir=Path("/tmp"))
+    client = ClaudeCodeClient(working_dir=tmp_path)
     monkeypatch.setattr(ClaudeCodeClient, "claude_path", "/usr/bin/false")
     monkeypatch.setattr(
         "hokusai.integrations.claude_code.ShellRunner",
