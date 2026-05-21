@@ -76,6 +76,71 @@ def _commit_and_push(
         return False
 
 
+def _enqueue_work_item_claims(
+    state: WorkflowState, *, claimed_by: str = "claude_code"
+) -> int:
+    """Phase 5 implement 開始時に Phase 4 で enqueue した Work Item を claim する
+    イベントを `pending_work_items` に積む（Workgraph Phase 3 / Issue #42）。
+
+    work_plan markdown から Work Item を再抽出し、Phase 4 で使った
+    (workflow_id, phase=4, title) と同じ identity で claim イベントを発火
+    する。drain 層が dispatcher 経由で WorkItemsDBClient.claim_work_item を
+    呼び出す。lease 期限は dispatcher 側で DEFAULT_LEASE_DURATION_SECONDS
+    (1 時間) を採用する。
+
+    Args:
+        state: WorkflowState
+        claimed_by: Claim 主体（Phase 5 自動実装では既定 "claude_code"）
+
+    Returns:
+        enqueue した claim イベント件数（0 = work_plan 無し or Work Item 抽出無し）
+    """
+    work_plan = state.get("work_plan") or ""
+    candidates = extract_work_items(work_plan)
+    if not candidates:
+        return 0
+    pending = list(state.get("pending_work_items") or [])
+    workflow_id = state.get("workflow_id") or ""
+    for candidate in candidates:
+        pending.append({
+            "workflow_id": workflow_id,
+            "title": candidate["title"],
+            "phase": 4,  # Phase 4 enqueue と同 identity
+            "claimed_by": claimed_by,
+            "claim_type": "agent",
+            "_event": "claim",  # drain で work_item_claim event に切り替え
+        })
+    state["pending_work_items"] = pending
+    return len(candidates)
+
+
+def _enqueue_work_item_lease_releases(state: WorkflowState) -> int:
+    """Phase 5 implement 完了時に Phase 4 で enqueue した Work Item の lease を
+    release するイベントを `pending_work_items` に積む（Workgraph Phase 3）。
+
+    `_enqueue_work_item_done_transitions` と並んで呼ばれる想定。失敗時は
+    呼ばないことで lease を残し、期限切れ後に再割当可能にする（要件 §6.6）。
+
+    Returns:
+        enqueue した lease_release イベント件数
+    """
+    work_plan = state.get("work_plan") or ""
+    candidates = extract_work_items(work_plan)
+    if not candidates:
+        return 0
+    pending = list(state.get("pending_work_items") or [])
+    workflow_id = state.get("workflow_id") or ""
+    for candidate in candidates:
+        pending.append({
+            "workflow_id": workflow_id,
+            "title": candidate["title"],
+            "phase": 4,
+            "_event": "lease_release",
+        })
+    state["pending_work_items"] = pending
+    return len(candidates)
+
+
 def _enqueue_work_item_done_transitions(state: WorkflowState) -> int:
     """Phase 5 完了時に、Phase 4 で enqueue した Work Item を `done` に遷移する
     イベントを `pending_work_items` に積む（Issue #38 / Workgraph Phase 2）。
@@ -207,6 +272,13 @@ def _prepare_implementation(state: WorkflowState) -> tuple[WorkflowState, dict]:
 
     logger.info("Phase 5 開始: 自動実装")
     state = update_phase_status(state, 5, PhaseStatus.IN_PROGRESS)
+
+    # Work Items DB: Phase 4 で enqueue した Work Item を claim する
+    # （Workgraph Phase 3 / Issue #42）。Phase 5 自動実装で Claude Code が
+    # 取得した事実を Notion 側に反映し、lease を 1 時間張って並列衝突を
+    # 防ぐ。失敗時（タイムアウト / Phase 6 / 7 で revert）は lease を
+    # release しないことで期限切れ再割当を可能にする。
+    _enqueue_work_item_claims(state, claimed_by="claude_code")
 
     # 作業計画の解決（リトライモードの場合はスキップ可能）
     # state に既存の work_plan がある場合も検証し、不正なら他ソースにフォールバック
@@ -444,6 +516,11 @@ def _execute_implementation(
         # 拡張（implementation_result の解析で完了済ステップを特定する等）。
         # work_plan が空 / Work Items が抽出されなければ no-op。
         _enqueue_work_item_done_transitions(state)
+
+        # Workgraph Phase 3 / Issue #42: Phase 5 が正常完了したら lease を
+        # release する（done 遷移と並列）。失敗時はこの分岐に来ないので
+        # lease は active のまま残り、期限切れで再割当可能になる。
+        _enqueue_work_item_lease_releases(state)
 
         state = update_phase_status(state, 5, PhaseStatus.COMPLETED)
         executed_repos = total_repos - skipped_repos

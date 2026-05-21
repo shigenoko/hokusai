@@ -2609,3 +2609,56 @@ def test_drain_pending_work_items_marks_missing_title_in_idempotency_key():
     )
     # enriched payload には dedupe_key を **書き込まない**（dispatcher 側 guard 用）
     assert "dedupe_key" not in capt.calls[0]["payload"]
+
+
+def test_drain_pending_work_items_dispatches_claim_event_when_marker_set():
+    """payload に `_event="claim"` marker があれば work_item_claim イベント
+    として dispatch される（Workgraph Phase 3 / #42）"""
+    runner = _make_runner()
+    capt = _CapturingDispatch(runner)
+    runner.compiled_workflow = _FakeCompiledWorkflow()  # type: ignore[assignment]
+
+    pending = [
+        {
+            "workflow_id": "wf-1",
+            "title": "implement login",
+            "phase": 4,
+            "claimed_by": "claude_code",
+            "_event": "claim",
+        }
+    ]
+    runner._drain_pending_work_items(
+        {"pending_work_items": pending}, {"thread": "x"}
+    )
+    assert len(capt.calls) == 1
+    assert capt.calls[0]["event_type"] == "work_item_claim"
+    assert capt.calls[0]["idempotency_key"].startswith(
+        "wf-1:work_item_claim:"
+    )
+    # internal marker は dispatcher 側へは送らない
+    assert "_event" not in capt.calls[0]["payload"]
+
+
+def test_drain_pending_work_items_dispatches_lease_release_event_when_marker_set():
+    """`_event="lease_release"` marker があれば work_item_lease_release として
+    dispatch される（Workgraph Phase 3 / #42）"""
+    runner = _make_runner()
+    capt = _CapturingDispatch(runner)
+    runner.compiled_workflow = _FakeCompiledWorkflow()  # type: ignore[assignment]
+
+    pending = [
+        {
+            "workflow_id": "wf-1",
+            "title": "implement login",
+            "phase": 4,
+            "_event": "lease_release",
+        }
+    ]
+    runner._drain_pending_work_items(
+        {"pending_work_items": pending}, {"thread": "x"}
+    )
+    assert len(capt.calls) == 1
+    assert capt.calls[0]["event_type"] == "work_item_lease_release"
+    assert capt.calls[0]["idempotency_key"].startswith(
+        "wf-1:work_item_lease_release:"
+    )

@@ -51,6 +51,29 @@ class StreamResult:
     loop_detected: bool
 
 
+# Work Item drain layer で `_event` marker から dispatcher event 名へ
+# マッピングする helper（Workgraph Phase 2 / #38 で導入、Phase 3 / #42 で
+# claim / lease_release を追加）。dispatcher.py の EVENT_WORK_ITEM_* 定数と
+# 完全一致させる。
+_WORK_ITEM_EVENT_NAME_BY_MARKER: dict[str, str] = {
+    "status_change": "work_item_status_change",
+    "claim": "work_item_claim",
+    "lease_release": "work_item_lease_release",
+}
+
+
+def _resolve_work_item_event_name(marker: object) -> str:
+    """payload の `_event` marker から dispatcher event 名を解決する。
+
+    marker が None / 未知の場合は既定の `work_item_upsert`（Phase 4 enqueue）。
+    """
+    if isinstance(marker, str):
+        mapped = _WORK_ITEM_EVENT_NAME_BY_MARKER.get(marker)
+        if mapped is not None:
+            return mapped
+    return "work_item_upsert"
+
+
 class WorkflowRunner:
     """ワークフロー実行クラス"""
 
@@ -225,14 +248,13 @@ class WorkflowRunner:
                 enriched, idempotency_key = self._prepare_work_item_dispatch(
                     payload, operator
                 )
-                # `_event` marker で event 名を切り替える（Phase 5 implement の
-                # 状態遷移は work_item_status_change を発火し、dispatcher 側で
-                # WorkItemsDBClient.update_status を呼ばせる）。marker を持た
-                # ない通常の Work Item enqueue は work_item_upsert。
-                event_name = (
-                    "work_item_status_change"
-                    if payload.get("_event") == "status_change"
-                    else "work_item_upsert"
+                # `_event` marker で event 名を切り替える:
+                # - "status_change" → work_item_status_change（Phase 5 done 遷移）
+                # - "claim" → work_item_claim（Phase 5 開始時の lease 取得 / #42）
+                # - "lease_release" → work_item_lease_release（Phase 5 完了 release / #42）
+                # - 既定 → work_item_upsert（Phase 4 enqueue）
+                event_name = _resolve_work_item_event_name(
+                    payload.get("_event")
                 )
                 self._safe_notion_dispatch(
                     event_name,
@@ -270,11 +292,14 @@ class WorkflowRunner:
         - dedupe_key 欠落時は build_dedupe_key で stable hash を生成
           （Review Issues と同じく per-item キーで outbox uniqueness 衝突を回避）
         - **idempotency_key は payload の `_event` marker に応じて event 名が
-          切り替わる**:
+          切り替わる**（_resolve_work_item_event_name で一元管理）:
             - `_event="status_change"` → `workflow_id:work_item_status_change:dedupe_key`
+            - `_event="claim"`         → `workflow_id:work_item_claim:dedupe_key`
+            - `_event="lease_release"` → `workflow_id:work_item_lease_release:dedupe_key`
             - それ以外（既定）        → `workflow_id:work_item_upsert:dedupe_key`
-          同一 Work Item の upsert と status_change が outbox に独立 entry として
-          残るようにするため（PR #41 Copilot 3 回目指摘で contract を明示）。
+          同一 Work Item の upsert / status_change / claim / lease_release を
+          別 outbox entry として残すため（PR #41 Copilot 3 回目指摘で contract
+          を明示、#42 で claim/release を追加）。
         - 返す enriched payload から `_event` marker は除く（dispatcher / Notion
           側には送らない internal な分岐用フラグ）
         """
@@ -287,11 +312,7 @@ class WorkflowRunner:
         # `_event` marker は drain 層が event 名分岐に使う internal なもの。
         # 後段の dispatcher / Notion 側に送る必要はないので enriched からは除く。
         event_marker = enriched.pop("_event", None)
-        event_for_key = (
-            "work_item_status_change"
-            if event_marker == "status_change"
-            else "work_item_upsert"
-        )
+        event_for_key = _resolve_work_item_event_name(event_marker)
 
         dkey = enriched.get("dedupe_key")
         if not dkey:
