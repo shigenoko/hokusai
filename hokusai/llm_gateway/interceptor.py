@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import datetime
 
 from ..config.models import LLMGatewayConfig
@@ -97,14 +97,31 @@ class LLMGatewayInterceptor:
         で sqlite 永続化 / Notion 同期に拡張するが、Phase 1 は logger のみ。
         """
         prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
+        # dataclasses.asdict は MappingProxyType を deepcopy しようとして
+        # `cannot pickle 'mappingproxy' object` で落ちるため、context dict は
+        # 明示的に組み立てる（metadata は dict にコピーして展開）。
+        context_dict = {
+            "provider": context.provider,
+            "model": context.model,
+            "purpose": context.purpose,
+            "workflow_id": context.workflow_id,
+            "phase": context.phase,
+            "metadata": dict(context.metadata),
+        }
         entry = {
             "event": "llm_gateway_decision",
             "timestamp": datetime.now().isoformat(),
             "decision": decision,
             "reason": reason,
-            "context": asdict(context),
+            "context": context_dict,
             "prompt_length": len(prompt),
             "prompt_hash": prompt_hash,
         }
-        # JSON 形式で 1 行に出力（後で grep / jq 解析しやすい形）
-        logger.info("llm_gateway_audit %s", json.dumps(entry, ensure_ascii=False))
+        # JSON 形式で 1 行に出力（後で grep / jq 解析しやすい形）。
+        # metadata に非 JSON-serializable な値（Path 等）が混ざっていても
+        # default=str で文字列化して落ちないようにする（PR #40 Copilot 1
+        # 回目指摘）。
+        logger.info(
+            "llm_gateway_audit %s",
+            json.dumps(entry, ensure_ascii=False, default=str),
+        )

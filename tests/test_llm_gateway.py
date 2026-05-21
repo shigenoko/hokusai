@@ -111,6 +111,27 @@ def test_context_with_workflow():
     assert ctx.metadata["skill"] == "dev-plan"
 
 
+def test_context_metadata_is_read_only_after_init():
+    """metadata は MappingProxyType でラップされ、後から書き換え不可になる
+    （PR #40 Copilot 1 回目指摘: frozen dataclass の不変性が dict 内容に
+    及ばない問題への対応）。"""
+    ctx = LLMGatewayContext(provider="x", metadata={"k": "v"})
+    with pytest.raises(TypeError):
+        ctx.metadata["k"] = "tampered"  # type: ignore[index]
+    with pytest.raises(TypeError):
+        ctx.metadata["new"] = "value"  # type: ignore[index]
+
+
+def test_context_metadata_isolated_from_input_dict_mutations():
+    """呼び出し側が渡した dict を後から変えても context.metadata は不変"""
+    original = {"k": "v"}
+    ctx = LLMGatewayContext(provider="x", metadata=original)
+    original["k"] = "mutated-by-caller"
+    original["added"] = "after"
+    assert ctx.metadata["k"] == "v"
+    assert "added" not in ctx.metadata
+
+
 # ---------------------------------------------------------------------------
 # LLMGatewayInterceptor
 # ---------------------------------------------------------------------------
@@ -166,6 +187,24 @@ def test_interceptor_dry_run_uses_distinct_reason(caplog):
     assert decision.reason == "dry_run_log_only"
 
 
+def test_interceptor_audit_handles_non_json_serializable_metadata(caplog):
+    """metadata に Path 等の非 JSON-serializable な値が入っても audit が落ちない
+    （PR #40 Copilot 1 回目指摘）"""
+    config = LLMGatewayConfig(enabled=True, audit_log_enabled=True)
+    interceptor = LLMGatewayInterceptor(config)
+    with caplog.at_level(logging.INFO, logger="hokusai.llm_gateway"):
+        decision = interceptor.intercept(
+            LLMGatewayContext(provider="x", metadata={"path": Path("/tmp/foo")}),
+            "hello",
+        )
+    assert decision.decision == "log"
+    audit_records = [r for r in caplog.records if "llm_gateway_audit" in r.message]
+    assert len(audit_records) == 1
+    payload = json.loads(audit_records[0].message.split("llm_gateway_audit ", 1)[1])
+    # Path は default=str で文字列化される
+    assert payload["context"]["metadata"]["path"] == "/tmp/foo"
+
+
 def test_interceptor_skips_audit_when_audit_log_disabled(caplog):
     config = LLMGatewayConfig(enabled=True, audit_log_enabled=False)
     interceptor = LLMGatewayInterceptor(config)
@@ -179,27 +218,37 @@ def test_interceptor_skips_audit_when_audit_log_disabled(caplog):
     assert audit_records == []
 
 
-def test_interceptor_hash_is_deterministic_for_same_prompt():
-    """同じ prompt は同じ prompt_hash を返す（dedupe / 再現性のため）"""
-    config = LLMGatewayConfig(enabled=True, audit_log_enabled=True)
-    interceptor = LLMGatewayInterceptor(config)
-    # 内部メソッドで hash 計算ロジックを直接検証する代わりに、
-    # 2 回 intercept してロガーに同じ hash が現れることを確認
+def test_interceptor_hash_is_deterministic_for_same_prompt(caplog):
+    """同じ prompt は同じ prompt_hash を返す（dedupe / 再現性のため）。
+
+    PR #40 Copilot 1 回目指摘: spy が常に真の sanity check に劣化していたので、
+    実際の audit JSON を取得して `prompt_hash` 一致を検証する形に直す。
+    """
     import hashlib
 
-    expected_hash = hashlib.sha256("same".encode("utf-8")).hexdigest()[:16]
-    # ロガー output から確認する代わりに、interceptor._emit_audit を呼んで
-    # 直接 logger.info 引数を捕捉してテストする方が確実なので、それを spy
-    with patch.object(LLMGatewayInterceptor, "_emit_audit") as spy:
+    config = LLMGatewayConfig(enabled=True, audit_log_enabled=True)
+    interceptor = LLMGatewayInterceptor(config)
+
+    with caplog.at_level(logging.INFO, logger="hokusai.llm_gateway"):
         interceptor.intercept(LLMGatewayContext(provider="x"), "same")
         interceptor.intercept(LLMGatewayContext(provider="x"), "same")
-    assert spy.call_count == 2
-    # _emit_audit 内で hash を計算しているので、ここでは引数 prompt が
-    # 同じであることを確認できれば十分（hash 関数の決定性は標準保証）
-    assert spy.call_args_list[0].args[1] == "same"
-    assert spy.call_args_list[1].args[1] == "same"
-    # 期待される hash 値も sanity check（startswith で前方一致確認）
-    assert hashlib.sha256("same".encode()).hexdigest().startswith(expected_hash)
+        interceptor.intercept(LLMGatewayContext(provider="x"), "different")
+
+    audit_records = [r for r in caplog.records if "llm_gateway_audit" in r.message]
+    assert len(audit_records) == 3
+
+    def _extract_hash(record_message: str) -> str:
+        json_part = record_message.split("llm_gateway_audit ", 1)[1]
+        return json.loads(json_part)["prompt_hash"]
+
+    hashes = [_extract_hash(r.message) for r in audit_records]
+    # 同じ prompt "same" を 2 回送ると hash が一致する
+    assert hashes[0] == hashes[1]
+    # 別 prompt は別 hash
+    assert hashes[0] != hashes[2]
+    # 期待値（sha256 16 桁 hex）と一致
+    expected_same_hash = hashlib.sha256(b"same").hexdigest()[:16]
+    assert hashes[0] == expected_same_hash
 
 
 # ---------------------------------------------------------------------------
@@ -275,6 +324,47 @@ def test_claude_code_client_interceptor_swallows_exceptions(monkeypatch, tmp_pat
     # 例外が漏れないこと（returns ok）
     result = client._run_claude_code("prompt", timeout=10)
     assert result == "ok"
+
+
+def test_claude_code_client_includes_append_system_prompt_hash_in_metadata(
+    monkeypatch, caplog, tmp_path
+):
+    """`append_system_prompt` の hash / length が audit metadata に載る
+    （PR #40 Copilot 1 回目指摘: CLI に追加される内容と audit hash/length が
+    不一致になる問題への対応）"""
+    import hashlib
+
+    from hokusai.integrations.claude_code import ClaudeCodeClient
+    from hokusai.config import set_config
+    from hokusai.config.models import WorkflowConfig
+
+    cfg = WorkflowConfig(
+        llm_gateway=LLMGatewayConfig(enabled=True, audit_log_enabled=True),
+    )
+    set_config(cfg)
+
+    client = ClaudeCodeClient(working_dir=tmp_path)
+    monkeypatch.setattr(ClaudeCodeClient, "claude_path", "/usr/bin/false")
+    monkeypatch.setattr(
+        "hokusai.integrations.claude_code.ShellRunner",
+        lambda cwd=None: type("S", (), {"run": lambda self, cmd, timeout: _FakeShellResult()})(),
+    )
+
+    system_prompt = "You are restricted to read-only operations."
+    with caplog.at_level(logging.INFO, logger="hokusai.llm_gateway"):
+        client._run_claude_code(
+            "main prompt",
+            timeout=10,
+            append_system_prompt=system_prompt,
+        )
+
+    audit_records = [r for r in caplog.records if "llm_gateway_audit" in r.message]
+    assert len(audit_records) == 1
+    payload = json.loads(audit_records[0].message.split("llm_gateway_audit ", 1)[1])
+    metadata = payload["context"]["metadata"]
+    assert metadata["append_system_prompt_length"] == len(system_prompt)
+    expected_hash = hashlib.sha256(system_prompt.encode("utf-8")).hexdigest()[:16]
+    assert metadata["append_system_prompt_hash"] == expected_hash
 
 
 def test_claude_code_client_skips_interceptor_when_llm_gateway_missing(
