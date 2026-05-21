@@ -20,6 +20,7 @@ from ...logging_config import get_logger
 from .client import NotionAPIClient, NotionAPIError, NotionRateLimitError
 from .pull_requests_db import PullRequestsDBClient
 from .review_issues_db import ReviewIssuesDBClient
+from .work_items_db import WorkItemsDBClient
 from .workflows_db import WorkflowsDBClient
 
 logger = get_logger("integrations.notion_dashboard.dispatcher")
@@ -28,6 +29,20 @@ logger = get_logger("integrations.notion_dashboard.dispatcher")
 # Review Issue 発火イベント。Phase 6 verification failure / Phase 7 final review 等
 # から dispatch される。payload 構造は _handle_review_issue_raised を参照。
 EVENT_REVIEW_ISSUE_RAISED = "review_issue_raised"
+# Work Item upsert イベント（Workgraph Phase 2 / Issue #38）。Phase 4 plan ノード
+# が work_plan から抽出した Work Item を Notion に同期する際に dispatch される。
+# payload 構造は _handle_work_item_upsert を参照。
+# **Status 遷移は本イベントでは扱わない**: upsert ハンドラは Notion 側 Status を
+# 意図的に温存する（再 dispatch で人手や Phase 5 の状態遷移を巻き戻さないため）。
+# 明示的な状態遷移には別イベント EVENT_WORK_ITEM_STATUS_CHANGE を使う。
+EVENT_WORK_ITEM_UPSERT = "work_item_upsert"
+# Work Item status 遷移専用イベント（Issue #38）。upsert は Status を温存する
+# ため、Phase 5 implement の in_progress → done のような明示的遷移はこちらを
+# 使う。payload は (workflow_id / title / phase / status) の最小セット +
+# dedupe_key（省略時は build_dedupe_key で再生成）。dedupe_key で Work Item を
+# 同定し、Notion 側で見つからない場合は warning で skip する（race condition
+# で後段から発生したケースは Phase 5 完了時点で必ず Work Item が存在する前提）。
+EVENT_WORK_ITEM_STATUS_CHANGE = "work_item_status_change"
 
 
 class NotionSyncDispatcher:
@@ -45,6 +60,7 @@ class NotionSyncDispatcher:
         self._workflows_db: WorkflowsDBClient | None = None
         self._pull_requests_db: PullRequestsDBClient | None = None
         self._review_issues_db: ReviewIssuesDBClient | None = None
+        self._work_items_db: WorkItemsDBClient | None = None
         # workflow_id → page_id の positive-cache（PR #37 Copilot 7 回目指摘）。
         # Phase 6/7 drain で同一 workflow の review_issue を複数 dispatch する際、
         # 各 dispatch で Workflows DB に lookup query を投げないよう抑止する。
@@ -203,6 +219,19 @@ class NotionSyncDispatcher:
             )
             return
 
+        if event_type == EVENT_WORK_ITEM_UPSERT:
+            # Work Items DB 系も Workflows DB の sync_errors とは別軸の同期。
+            # Review Issues と同じく enrich 不要。retry 経由なら自己 entry を
+            # race 検出から除外。
+            self._handle_work_item_upsert(
+                payload, exclude_idempotency_key=exclude_idempotency_key
+            )
+            return
+
+        if event_type == EVENT_WORK_ITEM_STATUS_CHANGE:
+            self._handle_work_item_status_change(payload)
+            return
+
         # 後方互換: 旧 Service Status sync が outbox に積んだ
         # service_status_checked エントリは Notion 連携廃止済みなので
         # no-op として扱い、retry_pending() で drain できるようにする。
@@ -307,7 +336,15 @@ class NotionSyncDispatcher:
         """
         if self._store is None:
             return 0
-        excluded_types = ("review_issue_raised", "service_status_checked")
+        # work_item_upsert は review_issue_raised と同じく workflow page sync
+        # とは独立した同期。同 workflow_id の workflow_started が pending の
+        # 際の deferred ループを避けるため除外する。
+        excluded_types = (
+            "review_issue_raised",
+            "work_item_upsert",
+            "work_item_status_change",
+            "service_status_checked",
+        )
         try:
             with self._store._connect() as conn:  # type: ignore[attr-defined]
                 placeholders = ",".join(["?"] * len(excluded_types))
@@ -478,6 +515,178 @@ class NotionSyncDispatcher:
             title=payload.get("title"),
         )
 
+    def _handle_work_item_upsert(
+        self,
+        payload: dict[str, Any],
+        *,
+        exclude_idempotency_key: str | None = None,
+    ) -> None:
+        """Work Item upsert イベントを Work Items DB に反映する（Issue #38）。
+
+        Review Issues と同じ workflow_page race 対策を持つ:
+        - 対応 workflow ページが Notion 上に存在せず、かつ outbox に同 workflow_id
+          の workflow page sync イベントが pending（workflow_started 等）の場合は、
+          race condition として deferして NotionAPIError(503) で outbox に積み直す。
+        - pending workflow page sync が無く workflow ページも存在しない場合に限り、
+          Workflow relation 無しで Work Item を upsert（best effort, genuine miss）。
+
+        Args:
+            payload: work_item_upsert の payload（workflow_id / title / phase /
+                status / operator / description / dedupe_key /
+                dependency_page_ids / blocking_review_issue_page_ids）
+            exclude_idempotency_key: retry_pending() 経由の再送時、自己 entry を
+                race 検出の pending 集計から除外するキー
+        """
+        work_items_db_id = os.environ.get(
+            self._config.work_items_db_id_env, ""
+        ).strip()
+        if not work_items_db_id:
+            logger.debug(
+                "Work Items DB ID が未設定のため Work Item 同期をスキップ"
+            )
+            return
+
+        title = payload.get("title")
+        if not title:
+            logger.warning(
+                "work_item_upsert に title が無いためスキップ"
+            )
+            return
+
+        workflow_id = payload.get("workflow_id")
+        workflow_page_id: str | None = None
+        if workflow_id:
+            workflow_page_id = self._lookup_workflow_page_id(workflow_id)
+            if workflow_page_id is None:
+                pending_count = self._count_pending_workflow_page_events_for(
+                    workflow_id, exclude_key=exclude_idempotency_key
+                )
+                if pending_count > 0:
+                    raise NotionAPIError(
+                        503,
+                        f"workflow page not yet synced for workflow_id="
+                        f"{workflow_id}; deferring work_item_upsert dispatch "
+                        f"({pending_count} pending workflow page events)",
+                        code="workflow_page_pending",
+                    )
+
+        client = self._get_work_items_client(work_items_db_id)
+        client.upsert_work_item(
+            title=str(title),
+            phase=payload.get("phase"),
+            status=str(payload.get("status") or "pending"),
+            workflow_id=workflow_id,
+            workflow_page_id=workflow_page_id,
+            operator=payload.get("operator"),
+            description=payload.get("description"),
+            dependency_page_ids=payload.get("dependency_page_ids") or [],
+            blocking_review_issue_page_ids=payload.get(
+                "blocking_review_issue_page_ids"
+            )
+            or [],
+            dedupe_key=payload.get("dedupe_key"),
+        )
+
+    def _handle_work_item_status_change(self, payload: dict[str, Any]) -> None:
+        """Work Item の Status のみを明示的に上書きする（Issue #38）。
+
+        upsert_work_item は再 dispatch で Status を巻き戻さないために温存
+        するため、Phase 5 implement の `in_progress` → `done` のような遷移には
+        本ハンドラを使う。dedupe_key（または workflow_id + phase + title）で
+        Work Item を同定し、見つからなければ warning で skip する（Phase 5 完了
+        時点で必ず Phase 4 enqueue 済 Work Item が Notion 側に存在する前提）。
+
+        Args:
+            payload: workflow_id / title / phase / status / dedupe_key
+        """
+        from .work_items_db import build_dedupe_key
+
+        work_items_db_id = os.environ.get(
+            self._config.work_items_db_id_env, ""
+        ).strip()
+        if not work_items_db_id:
+            logger.debug(
+                "Work Items DB ID 未設定のため status change をスキップ"
+            )
+            return
+
+        status = payload.get("status")
+        if not status:
+            logger.warning(
+                "work_item_status_change に status が無いためスキップ"
+            )
+            return
+
+        dedupe_key = payload.get("dedupe_key")
+        if not dedupe_key:
+            # dedupe_key 自動生成は title が必須（空文字を許すと
+            # build_dedupe_key の入力が `workflow_id|phase|""` になり、
+            # 同 workflow/phase の全 Work Item が同一 dedupe_key に潰れて
+            # 別 Work Item を誤って更新するリスクがあるため）。PR #41
+            # Copilot 4 回目指摘で title 必須化。
+            title = payload.get("title")
+            if not title:
+                logger.warning(
+                    "work_item_status_change で dedupe_key も title も無いため "
+                    "Work Item を同定できずスキップ: workflow_id=%s, phase=%s",
+                    payload.get("workflow_id"), payload.get("phase"),
+                )
+                return
+            dedupe_key = build_dedupe_key(
+                workflow_id=payload.get("workflow_id"),
+                phase=payload.get("phase"),
+                title=str(title),
+            )
+
+        client = self._get_work_items_client(work_items_db_id)
+        page_id = client.find_by_dedupe_key(dedupe_key)
+        if page_id is None:
+            # Work Item が見つからない場合、対応する `work_item_upsert` が
+            # outbox に残っているかを確認する。残っていれば、Phase 4 の upsert
+            # が Notion 障害等で pending のまま Phase 5 の status_change が
+            # 先に走った race condition なので、deferして outbox 再送に任せる
+            # （`workflow_started` ↔ `review_issue_raised` と同じ deferred 戦略。
+            # PR #41 Copilot 7 回目指摘で silent drop を防止）。
+            workflow_id = payload.get("workflow_id")
+            # outbox に **同じ dedupe_key の** work_item_upsert が pending かを
+            # inline で確認する（PR #41 Copilot 8 回目指摘で範囲を絞り込み）。
+            # 旧版は `workflow_id × event_type` で集計していたため、対象 Work
+            # Item と無関係な別 item の upsert が残っているだけで status_change
+            # が永久 defer されるリスクがあった。idempotency_key は
+            # `{wid}:work_item_upsert:{dedupe_key}` 形式なので exact match で
+            # 同定する（drain 層 `_prepare_work_item_dispatch` の生成則と一致）。
+            # 失敗時は `0` 扱いで defer をスキップし、genuine miss 側に倒す。
+            pending_upsert = 0
+            if workflow_id and self._store is not None:
+                expected_key = f"{workflow_id}:work_item_upsert:{dedupe_key}"
+                try:
+                    with self._store._connect() as conn:  # type: ignore[attr-defined]
+                        row = conn.execute(
+                            "SELECT COUNT(*) FROM notion_sync_outbox "
+                            "WHERE idempotency_key = ?",
+                            (expected_key,),
+                        ).fetchone()
+                        pending_upsert = int(row[0]) if row else 0
+                except Exception:
+                    pending_upsert = 0
+            if pending_upsert > 0:
+                raise NotionAPIError(
+                    503,
+                    f"work_item_upsert not yet synced for workflow_id={workflow_id}; "
+                    f"deferring work_item_status_change dispatch "
+                    f"({pending_upsert} pending work_item_upsert events)",
+                    code="work_item_upsert_pending",
+                )
+            # genuine miss（upsert も無く Notion 側にも page が存在しない）。
+            # 後続に影響しないので warning で skip。
+            logger.warning(
+                "Work Item の status 遷移先 page が見つからない: "
+                f"workflow_id={workflow_id}, "
+                f"title={payload.get('title')!r}, dedupe_key={dedupe_key[:8]}..."
+            )
+            return
+        client.update_status(page_id, str(status))
+
     def _enqueue_failure(
         self,
         idempotency_key: str,
@@ -575,6 +784,14 @@ class NotionSyncDispatcher:
                 database_id=database_id,
             )
         return self._review_issues_db
+
+    def _get_work_items_client(self, database_id: str) -> WorkItemsDBClient:
+        if self._work_items_db is None:
+            self._work_items_db = WorkItemsDBClient(
+                api=self._get_api(),
+                database_id=database_id,
+            )
+        return self._work_items_db
 
     def _get_api(self) -> NotionAPIClient:
         if self._api is None:

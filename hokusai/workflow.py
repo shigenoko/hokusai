@@ -190,6 +190,143 @@ class WorkflowRunner:
             )
             return 0
 
+    def _drain_pending_work_items(
+        self, state_values: dict, langgraph_config: dict
+    ) -> int:
+        """Phase 4 plan / Phase 5 implement が pending_work_items に積んだ
+        payload を Notion Work Items DB へ dispatch し、state からは clear する
+        （Issue #38 / Workgraph Phase 2）。
+
+        Review Issues drain と同じパターン:
+        - operator は state["operator"] を優先採用、無ければ resolve_operator_name
+        - idempotency_key は per-work-item（dedupe_key で同定）。同 phase 内の
+          複数 Work Item を 1 outbox entry に潰さないため。
+        - **dispatch event 名は payload の `_event` marker で切り替わる**:
+            - `_event="status_change"` → `work_item_status_change`（Phase 5 done 遷移）
+            - それ以外（既定）        → `work_item_upsert`（Phase 4 enqueue）
+          idempotency_key 側にも event 名が反映されるため、同一 Work Item の
+          upsert / status_change は outbox 上で別エントリになる。
+        - drain 後は LangGraph state + self.store の両方を clear（PR #37 と同じ
+          理由で、drain 直後に loop が止まっても `continue_workflow` 経路で
+          再 dispatch されないようにする）
+        - 例外はワークフロー本体に伝播させない（best effort）
+
+        Returns:
+            dispatch 試行した work_item 件数（0 = drain なし）
+        """
+        try:
+            pending = state_values.get("pending_work_items") or []
+            if not pending:
+                return 0
+            operator = state_values.get("operator")
+            if not operator and self.notion_dispatcher.is_configured():
+                operator = resolve_operator_name()
+            for payload in pending:
+                enriched, idempotency_key = self._prepare_work_item_dispatch(
+                    payload, operator
+                )
+                # `_event` marker で event 名を切り替える（Phase 5 implement の
+                # 状態遷移は work_item_status_change を発火し、dispatcher 側で
+                # WorkItemsDBClient.update_status を呼ばせる）。marker を持た
+                # ない通常の Work Item enqueue は work_item_upsert。
+                event_name = (
+                    "work_item_status_change"
+                    if payload.get("_event") == "status_change"
+                    else "work_item_upsert"
+                )
+                self._safe_notion_dispatch(
+                    event_name,
+                    enriched,
+                    idempotency_key=idempotency_key,
+                )
+            # LangGraph state を clear
+            self.compiled_workflow.update_state(
+                langgraph_config, {"pending_work_items": []}
+            )
+            # state_values の in-place clear + store 永続化（Review Issues と同じ）
+            state_values["pending_work_items"] = []
+            workflow_id = state_values.get("workflow_id")
+            if workflow_id:
+                try:
+                    self.store.save_workflow(workflow_id, state_values)
+                except Exception as save_err:
+                    logger.debug(
+                        f"work_items drain 後の store 保存で例外を抑制: {save_err}"
+                    )
+            return len(pending)
+        except Exception as wi_err:
+            logger.debug(
+                f"Work Items 同期 drain 中のエラーを抑制: {wi_err}"
+            )
+            return 0
+
+    @staticmethod
+    def _prepare_work_item_dispatch(
+        payload: dict, operator: str | None
+    ) -> tuple[dict, str]:
+        """Work Item 系イベントの payload を enrich し、idempotency_key を組み立てる。
+
+        - operator が指定されており payload に未含なら enrich
+        - dedupe_key 欠落時は build_dedupe_key で stable hash を生成
+          （Review Issues と同じく per-item キーで outbox uniqueness 衝突を回避）
+        - **idempotency_key は payload の `_event` marker に応じて event 名が
+          切り替わる**:
+            - `_event="status_change"` → `workflow_id:work_item_status_change:dedupe_key`
+            - それ以外（既定）        → `workflow_id:work_item_upsert:dedupe_key`
+          同一 Work Item の upsert と status_change が outbox に独立 entry として
+          残るようにするため（PR #41 Copilot 3 回目指摘で contract を明示）。
+        - 返す enriched payload から `_event` marker は除く（dispatcher / Notion
+          側には送らない internal な分岐用フラグ）
+        """
+        from .integrations.notion_dashboard.work_items_db import build_dedupe_key
+
+        enriched = dict(payload)
+        if operator and "operator" not in enriched:
+            enriched["operator"] = operator
+        wid = enriched.get("workflow_id") or ""
+        # `_event` marker は drain 層が event 名分岐に使う internal なもの。
+        # 後段の dispatcher / Notion 側に送る必要はないので enriched からは除く。
+        event_marker = enriched.pop("_event", None)
+        event_for_key = (
+            "work_item_status_change"
+            if event_marker == "status_change"
+            else "work_item_upsert"
+        )
+
+        dkey = enriched.get("dedupe_key")
+        if not dkey:
+            # **空 title fallback を撤廃**: `title=str(... or "")` を許すと
+            # status_change 経路で空 title 由来の dedupe_key が同一
+            # workflow/phase の全 Work Item で衝突し、別 Work Item を
+            # 誤って更新するリスクがある（PR #41 Copilot 5 回目指摘）。
+            # title が無ければ dedupe_key を生成せず、idempotency_key の
+            # 末尾は `_missing_title_phase<N>` のような可視値にして outbox 上で
+            # identification できるようにする（workflow_id は idempotency_key
+            # 全体の prefix 側 `{wid}:work_item_*:` に既に入るのでここでは
+            # 重複させない）。dispatch 側の handler が title 必須を再検査して
+            # skip する。
+            title_val = enriched.get("title")
+            if title_val:
+                dkey = build_dedupe_key(
+                    workflow_id=wid or None,
+                    phase=enriched.get("phase"),
+                    title=str(title_val),
+                )
+                enriched["dedupe_key"] = dkey
+            else:
+                dkey = f"_missing_title_phase{enriched.get('phase') or 'na'}"
+                # enriched には dedupe_key を **書き込まない**: dispatch 側
+                # handler が再度 title 必須をチェックして skip するため、
+                # `_missing_title_*` を上書きしてしまうと handler の guard が
+                # 効かなくなる。idempotency_key だけ作って outbox 上で区別する。
+
+        idempotency_key = (
+            f"{wid}:{event_for_key}:{dkey}"
+            if wid
+            else f"{event_for_key}:{dkey}"
+        )
+        return enriched, idempotency_key
+
     @staticmethod
     def _prepare_review_issue_dispatch(
         payload: dict, operator: str | None
@@ -947,6 +1084,9 @@ class WorkflowRunner:
 
                 # Review Issues DB 同期キューの drain（#36 / v0.5.0）
                 self._drain_pending_review_issues(current_state.values, config)
+
+                # Work Items DB 同期キューの drain（Issue #38 / Workgraph Phase 2）
+                self._drain_pending_work_items(current_state.values, config)
 
                 # ループ検出: 同じフェーズが繰り返されているか
                 if current_phase:

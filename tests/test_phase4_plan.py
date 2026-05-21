@@ -9,13 +9,12 @@ Phase 4 出力検証の強化テスト:
 - phase4_plan_node() 統合テスト
 """
 
-import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 from hokusai.nodes.phase4_plan import (
+    _DEV_PLAN_START_MARKERS,
     _extract_dev_plan_content,
     _validate_work_plan,
-    _DEV_PLAN_START_MARKERS,
     extract_expected_files_from_dev_plan,
 )
 from hokusai.state import PhaseStatus
@@ -325,3 +324,70 @@ class TestPhase4PlanNodeIntegration:
         assert "## 最新版ドキュメント" in saved_content
         assert self.VALID_PLAN in saved_content
         mock_cross_review.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Work Items DB enqueue（Issue #38 / Workgraph Phase 2）
+# ---------------------------------------------------------------------------
+
+
+class TestEnqueueWorkItemsFromPlan:
+    """_enqueue_work_items_from_plan のテスト"""
+
+    def test_enqueue_extracts_checkboxes_to_pending(self):
+        """checkbox 形式の work_plan から pending_work_items に enqueue される"""
+        from hokusai.nodes.phase4_plan import _enqueue_work_items_from_plan
+
+        state = {"workflow_id": "wf-1", "pending_work_items": []}
+        work_plan = """\
+## 開発計画
+
+- [ ] implement login form
+- [ ] add unit tests
+"""
+        count = _enqueue_work_items_from_plan(state, work_plan)
+        assert count == 2
+        assert len(state["pending_work_items"]) == 2
+
+        first = state["pending_work_items"][0]
+        assert first["workflow_id"] == "wf-1"
+        assert first["title"] == "implement login form"
+        assert first["phase"] == 4
+        assert first["status"] == "pending"
+        assert first["description"] == "- [ ] implement login form"
+
+    def test_enqueue_returns_zero_when_no_candidates(self):
+        from hokusai.nodes.phase4_plan import _enqueue_work_items_from_plan
+
+        state = {"workflow_id": "wf-1", "pending_work_items": []}
+        count = _enqueue_work_items_from_plan(state, "ただの段落です\n")
+        assert count == 0
+        assert state["pending_work_items"] == []
+
+    def test_enqueue_appends_to_existing_pending(self):
+        """既存の pending_work_items がある場合は append する（上書きしない）"""
+        from hokusai.nodes.phase4_plan import _enqueue_work_items_from_plan
+
+        state = {
+            "workflow_id": "wf-1",
+            "pending_work_items": [
+                {"workflow_id": "wf-1", "title": "preexisting", "phase": 3, "status": "pending"}
+            ],
+        }
+        work_plan = "- [ ] new item\n"
+        count = _enqueue_work_items_from_plan(state, work_plan)
+        assert count == 1
+        # 既存 + 新規の 2 件
+        assert len(state["pending_work_items"]) == 2
+        assert state["pending_work_items"][0]["title"] == "preexisting"
+        assert state["pending_work_items"][1]["title"] == "new item"
+
+    def test_enqueue_handles_missing_workflow_id(self):
+        """workflow_id が state に無い場合も空文字で fallback して enqueue する"""
+        from hokusai.nodes.phase4_plan import _enqueue_work_items_from_plan
+
+        state = {"pending_work_items": []}
+        work_plan = "- [ ] some item\n"
+        count = _enqueue_work_items_from_plan(state, work_plan)
+        assert count == 1
+        assert state["pending_work_items"][0]["workflow_id"] == ""

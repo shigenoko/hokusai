@@ -361,24 +361,9 @@ def test_notion_api_client_429_eventually_raises(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-class _RecordingAPI:
-    """API クライアントの動作を記録するスタブ"""
-
-    def __init__(self, *, query_result: list | None = None):
-        self.calls: list[tuple[str, dict]] = []
-        self._query_result = query_result or []
-
-    def query_database(self, database_id: str, *, filter_: dict | None = None) -> dict:
-        self.calls.append(("query", {"database_id": database_id, "filter": filter_}))
-        return {"results": self._query_result}
-
-    def create_page(self, payload: dict) -> dict:
-        self.calls.append(("create", payload))
-        return {"id": "page-new"}
-
-    def update_page(self, page_id: str, payload: dict) -> dict:
-        self.calls.append(("update", {"page_id": page_id, **payload}))
-        return {"id": page_id}
+# API スタブは tests/_notion_test_helpers.py に集約（PR #41 Round 9 で
+# test_work_items_dispatcher.py との重複行検知を解消するため移行）。
+from tests._notion_test_helpers import NotionRecordingAPI as _RecordingAPI  # noqa: E402
 
 
 def test_workflows_db_creates_when_not_exists():
@@ -2424,3 +2409,203 @@ def test_dispatcher_pr_created_propagates_last_sync_and_sync_errors(
     # GitLab MR URL も合わせて入る
     assert "GitLab MR" in props
     assert props["GitLab MR"]["url"] == "https://x/100"
+
+
+# ---------------------------------------------------------------------------
+# WorkflowRunner._drain_pending_work_items（Issue #38 / Workgraph Phase 2）
+# ---------------------------------------------------------------------------
+
+
+def test_drain_pending_work_items_no_op_when_empty():
+    runner = _make_runner()
+    capt = _CapturingDispatch(runner)
+    runner.compiled_workflow = _FakeCompiledWorkflow()  # type: ignore[assignment]
+
+    n = runner._drain_pending_work_items(
+        {"pending_work_items": []}, {"thread": "x"}
+    )
+    assert n == 0
+    assert capt.calls == []
+    assert runner.compiled_workflow.update_state_calls == []
+
+
+def test_drain_pending_work_items_dispatches_each_with_per_item_idempotency_key():
+    """複数の pending Work Item を per-item idempotency_key で dispatch する"""
+    runner = _make_runner()
+    capt = _CapturingDispatch(runner)
+    fake_cw = _FakeCompiledWorkflow()
+    runner.compiled_workflow = fake_cw  # type: ignore[assignment]
+
+    pending = [
+        {
+            "workflow_id": "wf-1",
+            "title": "implement login",
+            "phase": 5,
+            "status": "pending",
+            "dedupe_key": "wi-alpha",
+        },
+        {
+            "workflow_id": "wf-1",
+            "title": "implement logout",
+            "phase": 5,
+            "status": "pending",
+            "dedupe_key": "wi-beta",
+        },
+    ]
+    n = runner._drain_pending_work_items(
+        {"pending_work_items": pending, "operator": "alice"},
+        {"thread": "x"},
+    )
+    assert n == 2
+    assert len(capt.calls) == 2
+    assert capt.calls[0]["event_type"] == "work_item_upsert"
+    # idempotency_key は per-item で dedupe_key を含む
+    assert capt.calls[0]["idempotency_key"] == "wf-1:work_item_upsert:wi-alpha"
+    assert capt.calls[1]["idempotency_key"] == "wf-1:work_item_upsert:wi-beta"
+    # state["operator"] が enrich される
+    assert capt.calls[0]["payload"]["operator"] == "alice"
+    assert capt.calls[1]["payload"]["operator"] == "alice"
+    # drain 後に state を clear
+    assert len(fake_cw.update_state_calls) == 1
+    assert fake_cw.update_state_calls[0][1] == {"pending_work_items": []}
+
+
+def test_drain_pending_work_items_persists_cleared_state_to_store():
+    """drain 後に self.store にも clear 後の state を保存する
+    （review_issues と同じく、drain 直後に loop が止まっても再 dispatch
+    されないように）"""
+    runner = _make_runner()
+    _CapturingDispatch(runner)
+    runner.compiled_workflow = _FakeCompiledWorkflow()  # type: ignore[assignment]
+
+    save_calls: list[tuple[str, dict]] = []
+    original_save = runner.store.save_workflow
+
+    def _spy_save(wid, st):
+        save_calls.append((wid, dict(st)))
+        return original_save(wid, st)
+
+    runner.store.save_workflow = _spy_save  # type: ignore[assignment]
+
+    state_values = {
+        "workflow_id": "wf-persist",
+        "pending_work_items": [
+            {
+                "workflow_id": "wf-persist",
+                "title": "X",
+                "phase": 4,
+                "dedupe_key": "k",
+            }
+        ],
+    }
+    runner._drain_pending_work_items(state_values, {"thread": "x"})
+
+    assert state_values["pending_work_items"] == []
+    assert len(save_calls) >= 1
+    saved_wid, saved_state = save_calls[-1]
+    assert saved_wid == "wf-persist"
+    assert saved_state["pending_work_items"] == []
+
+
+def test_drain_pending_work_items_falls_back_to_build_dedupe_key_when_missing():
+    """dedupe_key 欠落時は build_dedupe_key で生成し idempotency_key に反映"""
+    runner = _make_runner()
+    capt = _CapturingDispatch(runner)
+    runner.compiled_workflow = _FakeCompiledWorkflow()  # type: ignore[assignment]
+
+    pending = [
+        {
+            "workflow_id": "wf-1",
+            "title": "implement X",
+            "phase": 5,
+        }
+    ]
+    runner._drain_pending_work_items(
+        {"pending_work_items": pending}, {"thread": "x"}
+    )
+    # idempotency_key に dedupe_key が含まれる（fallback で hash 生成）
+    assert capt.calls[0]["idempotency_key"].startswith(
+        "wf-1:work_item_upsert:"
+    )
+    # 末尾の dedupe_key は 16 hex（build_dedupe_key の戻り値）
+    parts = capt.calls[0]["idempotency_key"].split(":")
+    assert len(parts[-1]) == 16
+
+
+def test_drain_pending_work_items_swallows_exceptions():
+    """drain 中の例外はワークフロー本体に伝播しない（best effort）"""
+    runner = _make_runner()
+    runner.compiled_workflow = _FakeCompiledWorkflow()  # type: ignore[assignment]
+
+    def raising(event_type, payload, **kwargs):
+        raise RuntimeError("boom")
+
+    runner._safe_notion_dispatch = raising  # type: ignore[method-assign]
+    # 例外を投げないこと
+    runner._drain_pending_work_items(
+        {"pending_work_items": [{"title": "X", "workflow_id": "w"}]},
+        {"thread": "x"},
+    )
+
+
+def test_drain_pending_work_items_dispatches_status_change_event_when_marker_set():
+    """payload に `_event="status_change"` marker があれば
+    work_item_status_change イベントとして dispatch される
+    （Phase 5 implement 完了時の状態遷移）"""
+    runner = _make_runner()
+    capt = _CapturingDispatch(runner)
+    runner.compiled_workflow = _FakeCompiledWorkflow()  # type: ignore[assignment]
+
+    pending = [
+        {
+            "workflow_id": "wf-1",
+            "title": "implement login",
+            "phase": 4,
+            "status": "done",
+            "_event": "status_change",
+        }
+    ]
+    runner._drain_pending_work_items(
+        {"pending_work_items": pending}, {"thread": "x"}
+    )
+    assert len(capt.calls) == 1
+    # event 名が切り替わる
+    assert capt.calls[0]["event_type"] == "work_item_status_change"
+    # idempotency_key も status_change 用
+    assert capt.calls[0]["idempotency_key"].startswith(
+        "wf-1:work_item_status_change:"
+    )
+    # `_event` は dispatcher 向け enriched payload からは除かれる（internal）
+    assert "_event" not in capt.calls[0]["payload"]
+
+
+def test_drain_pending_work_items_marks_missing_title_in_idempotency_key():
+    """`_prepare_work_item_dispatch` で title 欠落時は空 title fallback を
+    せず、`_missing_title_phase<N>` を idempotency_key 末尾に入れる
+    （PR #41 Copilot 5 回目指摘: 空 title 由来 dedupe_key の衝突回避）。
+    enriched payload には dedupe_key を書き込まないことで、dispatcher 側
+    handler の title 必須 guard が効くようにする。"""
+    runner = _make_runner()
+    capt = _CapturingDispatch(runner)
+    runner.compiled_workflow = _FakeCompiledWorkflow()  # type: ignore[assignment]
+
+    pending = [
+        {
+            "workflow_id": "wf-1",
+            "phase": 4,
+            "status": "done",
+            "_event": "status_change",
+            # title も dedupe_key も省略
+        }
+    ]
+    runner._drain_pending_work_items(
+        {"pending_work_items": pending}, {"thread": "x"}
+    )
+    assert len(capt.calls) == 1
+    # idempotency_key は `_missing_title_phase4` を含む（衝突回避用 marker）
+    assert (
+        capt.calls[0]["idempotency_key"]
+        == "wf-1:work_item_status_change:_missing_title_phase4"
+    )
+    # enriched payload には dedupe_key を **書き込まない**（dispatcher 側 guard 用）
+    assert "dedupe_key" not in capt.calls[0]["payload"]

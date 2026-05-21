@@ -25,6 +25,7 @@ from ..state import (
 from ..utils.notion_helpers import update_notion_checkboxes
 from ..utils.repo_resolver import resolve_runtime_repositories
 from ..utils.shell import ShellRunner
+from ..utils.work_items_extractor import extract_work_items
 
 logger = get_logger("phase5")
 
@@ -73,6 +74,40 @@ def _commit_and_push(
         logger.error(f"{repo_name}: プッシュ失敗: {e}")
         print(f"   ⚠️ {repo_name}: プッシュ失敗 - {e}")
         return False
+
+
+def _enqueue_work_item_done_transitions(state: WorkflowState) -> int:
+    """Phase 5 完了時に、Phase 4 で enqueue した Work Item を `done` に遷移する
+    イベントを `pending_work_items` に積む（Issue #38 / Workgraph Phase 2）。
+
+    実装は MVP 粒度: state["work_plan"] から Work Item を再抽出し、Phase 4 で
+    使った (workflow_id, phase=4, title) と同じ identity で `work_item_upsert`
+    ではなく `work_item_status_change` イベントを enqueue する。drain 層が
+    dispatcher 経由で update_status を呼び出す。
+
+    Returns:
+        enqueue した遷移イベント件数（0 = work_plan 無し or Work Item 抽出無し）
+    """
+    work_plan = state.get("work_plan") or ""
+    candidates = extract_work_items(work_plan)
+    if not candidates:
+        return 0
+    pending = list(state.get("pending_work_items") or [])
+    workflow_id = state.get("workflow_id") or ""
+    for candidate in candidates:
+        # `_event` field で dispatcher 振り分けを示す（drain 層が
+        # _prepare_work_item_dispatch で workflow.py が event 名を決める）。
+        # ここでは payload に status="done" を入れ、drain 側は payload に
+        # `_event="status_change"` 印が付いていれば event を切り替える。
+        pending.append({
+            "workflow_id": workflow_id,
+            "title": candidate["title"],
+            "phase": 4,  # 同じ phase で identity を作る（Phase 4 で enqueue した dedupe_key と一致させる）
+            "status": "done",
+            "_event": "status_change",  # drain で event を切り替える marker
+        })
+    state["pending_work_items"] = pending
+    return len(candidates)
 
 
 def phase5_implement_node(state: WorkflowState) -> WorkflowState:
@@ -402,6 +437,14 @@ def _execute_implementation(
         # 結果を結合
         final_result = "\n\n".join(all_results)
         state["implementation_result"] = final_result
+
+        # Work Items DB: Phase 4 で enqueue した Work Item を done に遷移
+        # （Issue #38 / Workgraph Phase 2）。Phase 5 が成功した時点で全 Work
+        # Item を done にする MVP 粒度。個別 Work Item の状態追跡は将来の
+        # 拡張（implementation_result の解析で完了済ステップを特定する等）。
+        # work_plan が空 / Work Items が抽出されなければ no-op。
+        _enqueue_work_item_done_transitions(state)
+
         state = update_phase_status(state, 5, PhaseStatus.COMPLETED)
         executed_repos = total_repos - skipped_repos
         state = add_audit_log(state, 5, "implementation_completed", "success", {
