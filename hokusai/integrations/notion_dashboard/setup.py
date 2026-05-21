@@ -49,6 +49,11 @@ logger = get_logger("integrations.notion_dashboard.setup")
 WORKFLOWS_DB_TITLE = "Workflows DB"
 PULL_REQUESTS_DB_TITLE = "Pull Requests DB"
 REVIEW_ISSUES_DB_TITLE = "Review Issues DB"
+# v0.7.0〜（Workgraph Phase 2 / Issue #38）。Phase 4 plan の work_plan を
+# 構造化された Work Item の集合として Notion に同期し、依存関係 / blocking
+# Review Issue を踏まえた ready 判定の根拠を Notion 側で人間が確認できる
+# ようにする。
+WORK_ITEMS_DB_TITLE = "Work Items DB"
 
 
 # 各 DB スキーマで共通利用するプロパティ名定数（重複文字列を一元化）
@@ -76,6 +81,19 @@ _PULL_REQUESTS_DB_DESCRIPTION = (
     "Created At / Last Updated）への編集は行わないでください。Reviewer プロパティ"
     "のみ運用上の入力可能枠として用意しています。詳細は HOKUSAI 運用ガイド"
     "（docs/notion-dashboard-operation-guide.md）を参照。"
+)
+
+_WORK_ITEMS_DB_DESCRIPTION = (
+    "⚠️ HOKUSAI が自動管理する DB です（Workgraph Phase 2 / Issue #38）。"
+    "Phase 4 plan で生成された work_plan を構造化 Work Item として同期します。"
+    "dedupe_key は workflow_id + phase + title の sha256 hash 先頭 16 文字。"
+    "Status / Phase / Workflow / Dedupe Key / Operator / Description / "
+    "Dependencies / Blocking Review Issues / Last Updated を HOKUSAI が書き込み"
+    "ます。Created At は新規作成時のみ書き込み、Notion 側で初回作成時刻を温存"
+    "します。Status の手動編集（in_progress → done など）は HOKUSAI からの上書き"
+    "対象外とし、人間の運用判断を温存します（Review Issues DB と同じポリシー）。"
+    "詳細は HOKUSAI 運用ガイド（docs/notion-dashboard-operation-guide.md の "
+    "Work Items DB セクション）を参照。"
 )
 
 _REVIEW_ISSUES_DB_DESCRIPTION = (
@@ -264,6 +282,58 @@ def _review_issues_db_properties(workflows_db_id: str) -> dict[str, dict[str, An
     }
 
 
+# ----- Work Items DB プロパティ定義（Workgraph Phase 2 / Issue #38） ------
+# Status enum は要件定義の状態機械（pending → ready → in_progress → done、
+# blocked / skipped / canceled は派生分岐）と完全一致させる。Dependencies は
+# Work Items DB 自身への self-relation、Blocking Review Issues は Review Issues
+# DB への relation。Review Issues DB との相互 relation は Work Items DB 作成
+# 後に Review Issues DB schema を update して張る（順序問題の回避）。
+def _work_items_db_properties(
+    workflows_db_id: str, review_issues_db_id: str
+) -> dict[str, dict[str, Any]]:
+    return {
+        "Title": {"title": {}},
+        "Status": {
+            "select": {
+                "options": [
+                    {"name": "pending", "color": "gray"},
+                    {"name": "ready", "color": "blue"},
+                    {"name": "in_progress", "color": "yellow"},
+                    {"name": "blocked", "color": "red"},
+                    {"name": "done", "color": "green"},
+                    {"name": "skipped", "color": "default"},
+                    {"name": "canceled", "color": "brown"},
+                ]
+            }
+        },
+        "Phase": {"number": {"format": "number"}},
+        "Workflow": {
+            "relation": {
+                "database_id": workflows_db_id,
+                "single_property": {},
+            }
+        },
+        # Dependencies は Work Items DB 自身への self-relation。create_database
+        # 時点では Work Items DB の id がまだ存在しないため、自己参照は
+        # 「database_id を自分自身に指定する」形で作成時に解決される。
+        # ただし Notion API は self-relation を create_database で受け付けず、
+        # 作成後に update_database で `database_id: <自分自身の id>` を指定
+        # する必要があるため、本 schema では一旦省略し、setup_notion_workspace
+        # の中で post-creation update により Dependencies を追加する。
+        "Blocking Review Issues": {
+            "relation": {
+                "database_id": review_issues_db_id,
+                "single_property": {},
+            }
+        },
+        "Dedupe Key": {"rich_text": {}},
+        "Operator": {"rich_text": {}},
+        "Description": {"rich_text": {}},
+        "Created At": {"date": {}},
+        _PROP_LAST_UPDATED: {"date": {}},
+    }
+
+
 class NotionSetupError(Exception):
     """Notion セットアップ中の致命的エラー（呼び出し側へ伝搬する）"""
 
@@ -383,13 +453,92 @@ def setup_notion_workspace(
             "Review Issues DB の作成レスポンスに id が含まれません"
         )
 
+    # 4. Work Items DB を作る（Workflow / Blocking Review Issues の relation を含める）。
+    # Dependencies は self-relation なので create 時点では張れず、後段で update する。
+    logger.info("Work Items DB を作成中...")
+    try:
+        wi_db = api.create_database({
+            "parent": {"type": "page_id", "page_id": parent_page_id},
+            "title": [
+                {"type": "text", "text": {"content": WORK_ITEMS_DB_TITLE}}
+            ],
+            "description": [
+                {"type": "text", "text": {"content": _WORK_ITEMS_DB_DESCRIPTION}}
+            ],
+            "properties": _work_items_db_properties(
+                workflows_db_id, review_issues_db_id
+            ),
+        })
+    except Exception as e:
+        raise NotionSetupError(
+            f"Work Items DB の作成に失敗: {type(e).__name__}: {e}"
+        ) from e
+
+    work_items_db_id = wi_db.get("id")
+    if not work_items_db_id:
+        raise NotionSetupError(
+            "Work Items DB の作成レスポンスに id が含まれません"
+        )
+
+    # 5. Work Items DB の Dependencies（self-relation）を後付け追加する。
+    # Notion API は create_database 時点で自身の id を引けないため、作成後に
+    # update_database で database_id を自分自身に指定する形で張る必要がある。
+    try:
+        api.update_database(
+            work_items_db_id,
+            {
+                "properties": {
+                    "Dependencies": {
+                        "relation": {
+                            "database_id": work_items_db_id,
+                            "single_property": {},
+                        }
+                    }
+                }
+            },
+        )
+    except Exception as e:
+        # Dependencies は ready 判定の根幹だが、setup を fail させると DB が
+        # 残骸として残るため、warning でログを出して呼び出し側で再実行可能と
+        # する。Work Items DB 自体は使えるが、依存関係は手動 update が必要。
+        logger.warning(
+            "Work Items DB の Dependencies（self-relation）追加に失敗: %s: %s",
+            type(e).__name__, str(e),
+        )
+
+    # 6. Review Issues DB に Blocking Work Items（逆 relation）を後付け追加する。
+    # Review Issues DB → Work Items DB の方向。Work Items DB → Review Issues DB
+    # 方向（Blocking Review Issues）と組み合わせて、相互ナビゲートを可能にする。
+    try:
+        api.update_database(
+            review_issues_db_id,
+            {
+                "properties": {
+                    "Blocking Work Items": {
+                        "relation": {
+                            "database_id": work_items_db_id,
+                            "single_property": {},
+                        }
+                    }
+                }
+            },
+        )
+    except Exception as e:
+        # Dependencies と同じく warning で継続。Review Issues 側からのナビが
+        # 効かないだけで、Work Items 側 → Review Issues 側の relation は機能する。
+        logger.warning(
+            "Review Issues DB の Blocking Work Items 逆 relation 追加に失敗: %s: %s",
+            type(e).__name__, str(e),
+        )
+
     result: dict[str, Any] = {
         "workflows_db_id": workflows_db_id,
         "pull_requests_db_id": pull_requests_db_id,
         "review_issues_db_id": review_issues_db_id,
+        "work_items_db_id": work_items_db_id,
     }
 
-    # 4. scaffold（オプトイン）: 標準ドキュメントツリーを作成
+    # 7. scaffold（オプトイン）: 標準ドキュメントツリーを作成
     # DB 作成と異なり、scaffold 失敗は致命扱いしない（DB は既に作成済みのため）。
     # scaffold_notion_workspace は入力検証以外は raise せず、partial state を
     # 返り値に含めるため、ここでは error 用の fallback dict 構築は不要。
@@ -817,6 +966,7 @@ def persist_env_vars(
     workflows_env_name: str = "HOKUSAI_NOTION_WORKFLOWS_DB_ID",
     pull_requests_env_name: str = "HOKUSAI_NOTION_PR_DB_ID",
     review_issues_env_name: str = "HOKUSAI_NOTION_REVIEW_ISSUES_DB_ID",
+    work_items_env_name: str = "HOKUSAI_NOTION_WORK_ITEMS_DB_ID",
     profile_name: str | None = None,
     backup: bool = True,
 ) -> dict[str, Any]:
@@ -833,6 +983,9 @@ def persist_env_vars(
         review_issues_env_name: Review Issues DB ID を保持する env 変数名。
             ids に review_issues_db_id が含まれない旧呼び出しでも安全に動くよう、
             その場合はこの行を省略する（後方互換）。
+        work_items_env_name: Work Items DB ID を保持する env 変数名（Issue #38 /
+            v0.7.0〜）。Review Issues と同じく ids に work_items_db_id が含まれ
+            ない旧呼び出しでも行を省略する後方互換 fallback を持つ。
         profile_name: profile 名（指定時は profile 別マーカーを使う）。
             `None` の場合は v0.4.0 以前の従来マーカーを使い、後方互換を維持する。
         backup: True なら書き込み前に <rc_path>.hokusai.bak を作成
@@ -851,6 +1004,7 @@ def persist_env_vars(
     _validate_env_var_name(workflows_env_name, role="workflows_env_name")
     _validate_env_var_name(pull_requests_env_name, role="pull_requests_env_name")
     _validate_env_var_name(review_issues_env_name, role="review_issues_env_name")
+    _validate_env_var_name(work_items_env_name, role="work_items_env_name")
 
     # profile 名指定時は profile 別マーカー、未指定時は従来マーカー
     if profile_name is not None:
@@ -879,6 +1033,13 @@ def persist_env_vars(
     if review_issues_db_id:
         block_lines.append(
             f'export {review_issues_env_name}="{review_issues_db_id}"'
+        )
+    # Work Items DB ID は v0.7.0（Issue #38 / Workgraph Phase 2）で追加。
+    # 同じく ids に未含なら省略する後方互換 fallback。
+    work_items_db_id = ids.get("work_items_db_id")
+    if work_items_db_id:
+        block_lines.append(
+            f'export {work_items_env_name}="{work_items_db_id}"'
         )
     block_lines.append(end_marker)
     new_block = "\n".join(block_lines) + "\n"
