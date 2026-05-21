@@ -28,6 +28,7 @@ from ..utils.phase_page_templates import (
     build_phase_page_content,
     initialize_phase_page_state,
 )
+from ..utils.work_items_extractor import extract_work_items
 
 logger = get_logger("phase4")
 
@@ -110,6 +111,35 @@ def extract_expected_files_from_dev_plan(result: str) -> list[str]:
             normalized.append(f.rstrip("/") + "/")
 
     return normalized
+
+
+def _enqueue_work_items_from_plan(state: WorkflowState, work_plan: str) -> int:
+    """work_plan markdown から Work Item 候補を抽出し、state の
+    `pending_work_items` に append する（Issue #38 / Workgraph Phase 2）。
+
+    既存の `pending_work_items` がある場合は順序を保って append する。
+    同じ workflow が複数回 Phase 4 を実行しても重複 dispatch されないのは
+    Notion 側で dedupe_key (workflow_id + phase + title) により抑止される
+    ため。本関数自身は state 内重複検出はしない（dispatch 側の責務）。
+
+    Returns:
+        enqueue した Work Item 件数（0 = 抽出なし）
+    """
+    candidates = extract_work_items(work_plan)
+    if not candidates:
+        return 0
+    pending = list(state.get("pending_work_items") or [])
+    workflow_id = state.get("workflow_id") or ""
+    for candidate in candidates:
+        pending.append({
+            "workflow_id": workflow_id,
+            "title": candidate["title"],
+            "phase": 4,
+            "status": "pending",
+            "description": candidate.get("source_line", ""),
+        })
+    state["pending_work_items"] = pending
+    return len(candidates)
 
 
 def phase4_plan_node(state: WorkflowState) -> WorkflowState:
@@ -276,16 +306,33 @@ def phase4_plan_node(state: WorkflowState) -> WorkflowState:
             print("🛑 Phase 4 停止: クロスLLMレビューで確認が必要です")
             return state
 
+        # Work Items DB 同期キューへ enqueue（Issue #38 / Workgraph Phase 2）。
+        # work_plan markdown から抽出した Work Item 候補を state の
+        # `pending_work_items` に積む。実際の Notion dispatch は workflow.py の
+        # drain layer が次の step 後に処理する。
+        work_items_count = _enqueue_work_items_from_plan(state, output_text)
+        if work_items_count > 0:
+            state = add_audit_log(
+                state, 4, "work_items_enqueued", "success",
+                details={"count": work_items_count},
+            )
+            logger.info(
+                f"Work Items 同期キューへ enqueue: {work_items_count} 件"
+            )
+
         state = update_phase_status(state, 4, PhaseStatus.COMPLETED)
         state = add_audit_log(state, 4, "dev_plan_completed", "success", {
             "expected_files_count": len(expected_files),
             "expected_files": expected_files,
             "work_plan_length": len(output_text),
+            "work_items_count": work_items_count,
         })
 
         print("✅ Phase 4 完了: 作業計画を作成しました")
         if expected_files:
             print(f"   変更予定ファイル: {len(expected_files)}件")
+        if work_items_count > 0:
+            print(f"   Work Items: {work_items_count}件抽出")
         logger.info("Phase 4 完了")
 
     except Exception as e:
