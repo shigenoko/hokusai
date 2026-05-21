@@ -25,7 +25,11 @@ import re
 # - 行頭の whitespace は許容（インデントされた sub-item にも反応）
 # - checkbox の中身は ` ` / `x` / `X` のいずれか
 # - title 部分は行末まで（trailing whitespace は後段で strip）
-_CHECKBOX_PATTERN = re.compile(r"^\s*[-*]\s*\[\s*[xX ]?\s*\]\s+(.+?)\s*$")
+# **ReDoS 対策**: leading whitespace は `\s{0,16}` で上限を設け、checkbox 内は
+# 単一文字クラス `[xX ]` にしてネスト量指定子（`\s*[xX ]?\s*`）の組合せ爆発を
+# 排除（SonarCloud python:S5852 対策。markdown の checkbox 表記は実用上
+# 1 文字で十分で、`[x ]` / `[X]` / `[ ]` のいずれかに限定する）。
+_CHECKBOX_PATTERN = re.compile(r"^\s{0,16}[-*]\s+\[[xX ]\]\s+(.+?)\s*$")
 
 # 番号付きステップ: `1.1 タイトル` / `1.1. タイトル` / `### 1. タイトル` / `## 1.1 タイトル`
 # - 行頭の `#` (markdown heading) と whitespace は許容
@@ -115,16 +119,22 @@ def _normalize_title(text: str) -> str:
     # （PR #41 Copilot 3 回目指摘の修正で気付いた）。代わりに、regex で
     # wrapping を剥がした後に通常の `.strip()` で前後空白を整える。
     stripped = (text or "").strip()
+    # ReDoS 対策（SonarCloud python:S5852）: ネスト量指定子を避け、
+    # `\*+` / `_+` の代わりに `\*{1,3}` / `_{1,3}` で上限を明示し、
+    # かつ内側 capture も `+?` (lazy) ではなく `+` (greedy) と否定文字
+    # クラス `[^*\n]+` / `[^_\n]+` の組合せにする。否定文字クラスは
+    # 終端文字を最初から含まないので backtracking で爆発しない。
     # inline code: `text`
-    stripped = re.sub(r"`([^`\n]+?)`", r"\1", stripped)
-    # bold / italic: *text* / **text**
-    stripped = re.sub(r"\*+([^*\n]+?)\*+", r"\1", stripped)
+    stripped = re.sub(r"`([^`\n]+)`", r"\1", stripped)
+    # bold / italic: *text* / **text** / ***text***
+    stripped = re.sub(r"\*{1,3}([^*\n]+)\*{1,3}", r"\1", stripped)
     # italic with underscores: word boundary が必要（snake_case 識別子を保護）。
     # 前後が英数字でない位置でだけ `_..._` を剥がす。Python re モジュールには
     # Unicode 単語境界がある（\b）が、`_` も word character なので `\b` は
     # 期待通り動かない。前後の文字を look-around で明示的に検査する。
+    # `_{1,3}` で量指定子に上限を設けるのも ReDoS 対策。
     stripped = re.sub(
-        r"(?<![A-Za-z0-9])_+([^_\n]+?)_+(?![A-Za-z0-9])", r"\1", stripped
+        r"(?<![A-Za-z0-9])_{1,3}([^_\n]+)_{1,3}(?![A-Za-z0-9])", r"\1", stripped
     )
     return stripped.strip()
 
