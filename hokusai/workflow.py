@@ -238,17 +238,21 @@ class WorkflowRunner:
     ) -> int:
         """Phase 4 plan / Phase 5 implement が pending_work_items に積んだ
         payload を Notion Work Items DB へ dispatch し、state からは clear する
-        （Issue #38 / Workgraph Phase 2）。
+        （Issue #38 Workgraph Phase 2、#42 Phase 3 で claim/lease_release 追加）。
 
         Review Issues drain と同じパターン:
         - operator は state["operator"] を優先採用、無ければ resolve_operator_name
         - idempotency_key は per-work-item（dedupe_key で同定）。同 phase 内の
           複数 Work Item を 1 outbox entry に潰さないため。
-        - **dispatch event 名は payload の `_event` marker で切り替わる**:
+        - **dispatch event 名は payload の `_event` marker で切り替わる**
+          （`_resolve_work_item_event_name` に集約）:
             - `_event="status_change"` → `work_item_status_change`（Phase 5 done 遷移）
+            - `_event="claim"`         → `work_item_claim`（Phase 5 開始の lease 取得 / #42）
+            - `_event="lease_release"` → `work_item_lease_release`（Phase 5 完了 release / #42）
             - それ以外（既定）        → `work_item_upsert`（Phase 4 enqueue）
-          idempotency_key 側にも event 名が反映されるため、同一 Work Item の
-          upsert / status_change は outbox 上で別エントリになる。
+          idempotency_key 側にも同じ event 名が反映され、同一 Work Item の
+          upsert / status_change / claim / lease_release が outbox 上で別
+          エントリとして残る。
         - drain 後は LangGraph state + self.store の両方を clear（PR #37 と同じ
           理由で、drain 直後に loop が止まっても `continue_workflow` 経路で
           再 dispatch されないようにする）
