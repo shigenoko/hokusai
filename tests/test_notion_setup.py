@@ -63,9 +63,10 @@ class _RecordingClient:
         return {"id": self._work_items_id}
 
     def update_database(self, database_id: str, payload: dict) -> dict:
-        # Work Items DB の Dependencies（self-relation）追加と Review Issues DB
-        # への Blocking Work Items 逆 relation 追加で呼ばれる。テストでは
-        # payload を記録するだけの no-op。
+        # Work Items DB の Dependencies（self-relation）追加だけで呼ばれる
+        # （Round 2 で Review Issues 側の Blocking Work Items は dual_property
+        # に統一したため、HOKUSAI 側からの update_database は不要になった）。
+        # テストでは payload を記録するだけの no-op。
         self.calls.append(("update_database", {"database_id": database_id, "payload": payload}))
         return {"id": database_id}
 
@@ -2113,7 +2114,8 @@ class _DBPlusScaffoldClient:
         return {"id": f"db-{title}"}
 
     def update_database(self, database_id, payload):
-        # Work Items DB Dependencies / Review Issues 逆 relation 追加で呼ばれる
+        # Work Items DB の Dependencies（self-relation）追加だけで呼ばれる
+        # （Round 2 で Review Issues 逆 relation は dual_property に統一）。
         self.update_database_calls += 1
         return {"id": database_id}
 

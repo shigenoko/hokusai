@@ -366,3 +366,74 @@ def test_dispatcher_work_item_status_change_skips_when_dedupe_key_and_title_both
     # find_by_dedupe_key も呼ばれないことを確認
     queries = [c for c in api.calls if c[0] == "query"]
     assert queries == []
+
+
+def test_dispatcher_work_item_status_change_defers_when_upsert_pending(
+    store: SQLiteStore, monkeypatch
+):
+    """status_change で page が見つからず、同 workflow の work_item_upsert が
+    outbox に pending なら NotionAPIError(503) で defer する
+    （PR #41 Copilot 7 回目指摘: silent drop 防止）。"""
+    monkeypatch.setenv("TEST_TOKEN", "secret")
+    monkeypatch.setenv("TEST_DB", "wf-db")
+    monkeypatch.setenv("TEST_WORK_ITEMS_DB", "wi-db")
+
+    cfg = _make_config()
+    cfg.work_items_db_id_env = "TEST_WORK_ITEMS_DB"
+
+    # find_by_dedupe_key → 空（page 未存在）
+    api = _RecordingAPI(query_result=[])
+    # 同じ workflow_id の work_item_upsert が outbox に pending
+    store.enqueue_notion_sync(
+        idempotency_key="wf-1:work_item_upsert:abc123",
+        workflow_id="wf-1",
+        event_type="work_item_upsert",
+        payload={"workflow_id": "wf-1", "title": "X", "phase": 4},
+    )
+
+    class _Disp(NotionSyncDispatcher):
+        def _get_api(self):
+            return api  # type: ignore[return-value]
+
+    disp = _Disp(store=store, config=cfg)
+    result = disp.dispatch(EVENT_WORK_ITEM_STATUS_CHANGE, {
+        "workflow_id": "wf-1",
+        "title": "X",
+        "phase": 4,
+        "status": "done",
+    })
+    # dispatch は False（outbox にキューイング）。update_status は呼ばれない。
+    assert result is False
+    updates = [c for c in api.calls if c[0] == "update"]
+    assert updates == []
+
+
+def test_dispatcher_work_item_status_change_genuine_miss_skips_with_warning(
+    store: SQLiteStore, monkeypatch, caplog
+):
+    """status_change で page が見つからず、pending upsert も無いケースは
+    genuine miss として warning + skip（後続には影響しない）。"""
+    monkeypatch.setenv("TEST_TOKEN", "secret")
+    monkeypatch.setenv("TEST_DB", "wf-db")
+    monkeypatch.setenv("TEST_WORK_ITEMS_DB", "wi-db")
+
+    cfg = _make_config()
+    cfg.work_items_db_id_env = "TEST_WORK_ITEMS_DB"
+
+    api = _RecordingAPI(query_result=[])  # page 未存在
+
+    class _Disp(NotionSyncDispatcher):
+        def _get_api(self):
+            return api  # type: ignore[return-value]
+
+    disp = _Disp(store=store, config=cfg)
+    result = disp.dispatch(EVENT_WORK_ITEM_STATUS_CHANGE, {
+        "workflow_id": "wf-1",
+        "title": "X",
+        "phase": 4,
+        "status": "done",
+    })
+    # pending upsert が無いので defer はせず、warning + skip で成功扱い
+    assert result is True
+    updates = [c for c in api.calls if c[0] == "update"]
+    assert updates == []
