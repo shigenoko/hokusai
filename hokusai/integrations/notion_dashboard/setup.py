@@ -58,6 +58,8 @@ WORK_ITEMS_DB_TITLE = "Work Items DB"
 
 # 各 DB スキーマで共通利用するプロパティ名定数（重複文字列を一元化）
 _PROP_LAST_UPDATED = "Last Updated"
+# 全 DB に共通する Created At プロパティ名（SonarCloud S1192 対応で定数化）
+_PROP_CREATED_AT = "Created At"
 
 
 # ----- DB 説明（手動編集を抑止する警告文） ------------------------------
@@ -211,7 +213,7 @@ def _pr_db_properties(workflows_db_id: str) -> dict[str, dict[str, Any]]:
             }
         },
         "Reviewer": {"multi_select": {"options": []}},
-        "Created At": {"date": {}},
+        _PROP_CREATED_AT: {"date": {}},
         _PROP_LAST_UPDATED: {"date": {}},
     }
 
@@ -277,7 +279,7 @@ def _review_issues_db_properties(workflows_db_id: str) -> dict[str, dict[str, An
         "Rule ID": {"rich_text": {}},
         "File Path": {"rich_text": {}},
         "Message": {"rich_text": {}},
-        "Created At": {"date": {}},
+        _PROP_CREATED_AT: {"date": {}},
         _PROP_LAST_UPDATED: {"date": {}},
     }
 
@@ -329,9 +331,72 @@ def _work_items_db_properties(
         "Dedupe Key": {"rich_text": {}},
         "Operator": {"rich_text": {}},
         "Description": {"rich_text": {}},
-        "Created At": {"date": {}},
+        _PROP_CREATED_AT: {"date": {}},
         _PROP_LAST_UPDATED: {"date": {}},
     }
+
+
+def _add_work_items_dependencies_self_relation(
+    api: NotionAPIClient, work_items_db_id: str
+) -> None:
+    """Work Items DB の Dependencies（self-relation）を作成後に追加する。
+
+    Dependencies は ready 判定の根幹だが、失敗しても setup 全体を fail させると
+    DB が残骸として残るため、warning でログを出して呼び出し側で再実行可能と
+    する（DB 自体は使えるが、依存関係は手動 update が必要）。
+    """
+    try:
+        api.update_database(
+            work_items_db_id,
+            {
+                "properties": {
+                    "Dependencies": {
+                        "relation": {
+                            "database_id": work_items_db_id,
+                            "single_property": {},
+                        }
+                    }
+                }
+            },
+        )
+    except Exception as e:
+        logger.warning(
+            "Work Items DB の Dependencies（self-relation）追加に失敗: %s: %s",
+            type(e).__name__, str(e),
+        )
+
+
+def _add_review_issues_blocking_work_items_relation(
+    api: NotionAPIClient,
+    review_issues_db_id: str,
+    work_items_db_id: str,
+) -> None:
+    """Review Issues DB → Work Items DB の `Blocking Work Items` 逆 relation を
+    作成後に追加する。Work Items DB → Review Issues DB 方向（Blocking Review
+    Issues）と組み合わせて相互ナビゲートを可能にする。
+
+    Dependencies と同じく warning で継続（Review Issues 側からのナビが効かない
+    だけで、Work Items 側 → Review Issues 側の relation は機能する）。
+    """
+    try:
+        api.update_database(
+            review_issues_db_id,
+            {
+                "properties": {
+                    "Blocking Work Items": {
+                        "relation": {
+                            "database_id": work_items_db_id,
+                            "single_property": {},
+                        }
+                    }
+                }
+            },
+        )
+    except Exception as e:
+        logger.warning(
+            "Review Issues DB の Blocking Work Items 逆 relation 追加に失敗: %s: %s",
+            type(e).__name__, str(e),
+        )
 
 
 class NotionSetupError(Exception):
@@ -483,53 +548,12 @@ def setup_notion_workspace(
     # 5. Work Items DB の Dependencies（self-relation）を後付け追加する。
     # Notion API は create_database 時点で自身の id を引けないため、作成後に
     # update_database で database_id を自分自身に指定する形で張る必要がある。
-    try:
-        api.update_database(
-            work_items_db_id,
-            {
-                "properties": {
-                    "Dependencies": {
-                        "relation": {
-                            "database_id": work_items_db_id,
-                            "single_property": {},
-                        }
-                    }
-                }
-            },
-        )
-    except Exception as e:
-        # Dependencies は ready 判定の根幹だが、setup を fail させると DB が
-        # 残骸として残るため、warning でログを出して呼び出し側で再実行可能と
-        # する。Work Items DB 自体は使えるが、依存関係は手動 update が必要。
-        logger.warning(
-            "Work Items DB の Dependencies（self-relation）追加に失敗: %s: %s",
-            type(e).__name__, str(e),
-        )
+    _add_work_items_dependencies_self_relation(api, work_items_db_id)
 
     # 6. Review Issues DB に Blocking Work Items（逆 relation）を後付け追加する。
-    # Review Issues DB → Work Items DB の方向。Work Items DB → Review Issues DB
-    # 方向（Blocking Review Issues）と組み合わせて、相互ナビゲートを可能にする。
-    try:
-        api.update_database(
-            review_issues_db_id,
-            {
-                "properties": {
-                    "Blocking Work Items": {
-                        "relation": {
-                            "database_id": work_items_db_id,
-                            "single_property": {},
-                        }
-                    }
-                }
-            },
-        )
-    except Exception as e:
-        # Dependencies と同じく warning で継続。Review Issues 側からのナビが
-        # 効かないだけで、Work Items 側 → Review Issues 側の relation は機能する。
-        logger.warning(
-            "Review Issues DB の Blocking Work Items 逆 relation 追加に失敗: %s: %s",
-            type(e).__name__, str(e),
-        )
+    _add_review_issues_blocking_work_items_relation(
+        api, review_issues_db_id, work_items_db_id
+    )
 
     result: dict[str, Any] = {
         "workflows_db_id": workflows_db_id,

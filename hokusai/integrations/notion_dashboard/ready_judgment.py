@@ -16,25 +16,30 @@ from __future__ import annotations
 
 from typing import Iterable, Mapping
 
+from .review_issues_db import STATUS_OPEN as REVIEW_ISSUE_STATUS_OPEN
 from .work_items_db import (
     STATUS_BLOCKED,
+    STATUS_CANCELED,
     STATUS_DONE,
+    STATUS_IN_PROGRESS,
     STATUS_PENDING,
     STATUS_READY,
+    STATUS_SKIPPED,
 )
 
-# Review Issue の status enum（review_issues_db.STATUS_OPEN 等と一致させる）。
-# 進行を阻害する状態は "open" のみで、resolved / waived / duplicate は阻害
-# しない。後段で値が追加された場合はここを更新する。
-_BLOCKING_REVIEW_ISSUE_STATUSES = frozenset({"open"})
+# Review Issue の status enum。review_issues_db.STATUS_OPEN を直接参照する
+# ことで、Review Issues DB 側で enum 値が変わったときに自動追従する
+# （PR #41 Copilot 1 回目指摘で drift 防止のため string literal を撤廃）。
+_BLOCKING_REVIEW_ISSUE_STATUSES = frozenset({REVIEW_ISSUE_STATUS_OPEN})
 
 # Work Item が「進行中／完了側」と見なされる status。これらは ready 判定の
 # 対象から外す（既に in_progress 以降は ready / blocked を再評価しない）。
+# work_items_db の STATUS_* 定数を直接参照し、enum 値変更時に自動追従する。
 _TERMINAL_OR_ACTIVE_STATUSES = frozenset({
     STATUS_DONE,
-    "in_progress",
-    "skipped",
-    "canceled",
+    STATUS_IN_PROGRESS,
+    STATUS_SKIPPED,
+    STATUS_CANCELED,
 })
 
 

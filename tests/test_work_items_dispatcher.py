@@ -1,7 +1,9 @@
-"""Work Items DB dispatcher / drain 統合テスト（Issue #38 / Workgraph Phase 2）
+"""Work Items DB dispatcher 統合テスト（Issue #38 / Workgraph Phase 2）
 
-dispatcher.NotionSyncDispatcher の work_item_upsert ハンドラと、
-HOKUSAIWorkflow._drain_pending_work_items / _prepare_work_item_dispatch を検証。
+dispatcher.NotionSyncDispatcher の work_item_upsert / work_item_status_change
+ハンドラを検証する。`WorkflowRunner._drain_pending_work_items` の drain 経路
+テストは tests/test_notion_dashboard.py 側に置く（Review Issues drain と同じ
+fixture を共用するため）。
 """
 
 from __future__ import annotations

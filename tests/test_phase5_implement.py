@@ -498,8 +498,7 @@ class TestEnqueueWorkItemDoneTransitions:
             ],
         }
         assert _enqueue_work_item_done_transitions(state) == 1
-        # 既存 + 新規 = 2
-        assert len(state["pending_work_items"]) == 2
+        assert len(state["pending_work_items"]) == 2  # 既存 1 + 新規 1
         assert state["pending_work_items"][0]["title"] == "preexisting"
         assert state["pending_work_items"][1]["title"] == "new item"
         assert state["pending_work_items"][1]["status"] == "done"

@@ -81,7 +81,7 @@ def test_extract_checkbox_skips_too_short_titles():
 
 
 def test_extract_checkbox_with_asterisk_bullet():
-    """`*` バレットでも reconize される（一部 LLM 出力で混在する）"""
+    """`*` バレットでも recognize される（一部 LLM 出力で混在する）"""
     md = """\
 * [ ] step alpha
 * [ ] step beta

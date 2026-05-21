@@ -30,19 +30,18 @@ logger = get_logger("integrations.notion_dashboard.dispatcher")
 # から dispatch される。payload 構造は _handle_review_issue_raised を参照。
 EVENT_REVIEW_ISSUE_RAISED = "review_issue_raised"
 # Work Item upsert イベント（Workgraph Phase 2 / Issue #38）。Phase 4 plan ノード
-# が work_plan から抽出した Work Item を Notion に同期する／Phase 5 implement が
-# 状態を更新する際に dispatch される。payload 構造は _handle_work_item_upsert
-# を参照。Status 遷移専用イベント（Phase 5 implement の in_progress → done）は
-# upsert と分離せず、payload.status で扱う前提（既存 Notion 側 Status を温存
-# したいかは payload.preserve_status フラグで制御）。
+# が work_plan から抽出した Work Item を Notion に同期する際に dispatch される。
+# payload 構造は _handle_work_item_upsert を参照。
+# **Status 遷移は本イベントでは扱わない**: upsert ハンドラは Notion 側 Status を
+# 意図的に温存する（再 dispatch で人手や Phase 5 の状態遷移を巻き戻さないため）。
+# 明示的な状態遷移には別イベント EVENT_WORK_ITEM_STATUS_CHANGE を使う。
 EVENT_WORK_ITEM_UPSERT = "work_item_upsert"
 # Work Item status 遷移専用イベント（Issue #38）。upsert は Status を温存する
-# ので、Phase 5 implement の in_progress → done のような明示的遷移はこちら
-# を使う。payload は (workflow_id / title / phase / status) の最小セット +
+# ため、Phase 5 implement の in_progress → done のような明示的遷移はこちらを
+# 使う。payload は (workflow_id / title / phase / status) の最小セット +
 # dedupe_key（省略時は build_dedupe_key で再生成）。dedupe_key で Work Item を
-# 同定し、Notion 側で見つからない場合は warning で skip（race condition で
-# 後段から発生したケースは Phase 5 完了時点で必ず Work Item が存在するので、
-# miss はバグまたは設定漏れと考える）。
+# 同定し、Notion 側で見つからない場合は warning で skip する（race condition
+# で後段から発生したケースは Phase 5 完了時点で必ず Work Item が存在する前提）。
 EVENT_WORK_ITEM_STATUS_CHANGE = "work_item_status_change"
 
 
@@ -591,7 +590,7 @@ class NotionSyncDispatcher:
     def _handle_work_item_status_change(self, payload: dict[str, Any]) -> None:
         """Work Item の Status のみを明示的に上書きする（Issue #38）。
 
-        upsert_work_item は再 dispatch で Status を巻き戻さないために temponement
+        upsert_work_item は再 dispatch で Status を巻き戻さないために温存
         するため、Phase 5 implement の `in_progress` → `done` のような遷移には
         本ハンドラを使う。dedupe_key（または workflow_id + phase + title）で
         Work Item を同定し、見つからなければ warning で skip する（Phase 5 完了
