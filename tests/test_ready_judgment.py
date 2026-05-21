@@ -191,3 +191,24 @@ def test_dependency_page_ids_with_invalid_entries_are_filtered():
     lookup = {"dep-1": {"status": "done"}}
     # 実 dep は 1 件だけ → 全 done → ready
     assert compute_ready_state(wi, work_items_by_page_id=lookup) == "ready"
+
+
+def test_dependency_page_ids_dict_input_is_ignored():
+    """dict / Mapping を dependency_page_ids に渡しても、キーを page_id と
+    誤解釈せず空 list 扱いになる（PR #41 Copilot 7 回目指摘）"""
+    wi = {
+        "status": "pending",
+        # 誤って dict を渡してしまったケース
+        "dependency_page_ids": {"dep-1": "done", "dep-2": "pending"},
+    }
+    # dict は無視されるので「依存無し / blocker 無し」→ pending 温存
+    assert compute_ready_state(wi) == "pending"
+
+
+def test_blocking_review_issue_page_ids_dict_input_is_ignored():
+    """blocking_review_issue_page_ids も dict は無視（同上）"""
+    wi = {
+        "status": "pending",
+        "blocking_review_issue_page_ids": {"ri-1": {"status": "open"}},
+    }
+    assert compute_ready_state(wi) == "pending"

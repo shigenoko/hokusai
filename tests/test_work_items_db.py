@@ -21,10 +21,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from hokusai.integrations.notion_dashboard.client import NotionAPIError
 from hokusai.integrations.notion_dashboard.work_items_db import (
+    STATUS_BLOCKED,
+    STATUS_CANCELED,
     STATUS_DONE,
     STATUS_IN_PROGRESS,
     STATUS_PENDING,
     STATUS_READY,
+    STATUS_SKIPPED,
     WorkItemsDBClient,
     build_dedupe_key,
 )
@@ -264,10 +267,10 @@ def test_update_status_accepts_all_seven_statuses():
         STATUS_PENDING,
         STATUS_READY,
         STATUS_IN_PROGRESS,
-        "blocked",
+        STATUS_BLOCKED,
         STATUS_DONE,
-        "skipped",
-        "canceled",
+        STATUS_SKIPPED,
+        STATUS_CANCELED,
     ):
         client.update_status("page-x", status)
 

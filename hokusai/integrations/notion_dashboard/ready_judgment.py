@@ -139,11 +139,24 @@ def _has_open_blocker(
 
 
 def _as_list(value: object) -> list[str]:
-    """page_id list を安全に取り出す（None / 非 iterable / 非 str 要素を除外）。"""
+    """page_id list を安全に取り出す（None / 非 list-like / 非 str 要素を除外）。
+
+    page_id は list[str] / tuple[str, ...] の形でしか受け付けない:
+    - `str` / `bytes` は単一文字列として誤入力扱いで無視
+    - `Mapping`（dict 等）は iterable だが iteration はキーを返すため、
+      dict を渡されると静かにキーを page_id として誤解釈する事故になる
+      （PR #41 Copilot 7 回目指摘）。明示的に除外する。
+    - その他の Iterable（generator / set 等）は受け入れるが、要素が str
+      かつ空でないものだけを残す
+    """
     if value is None:
         return []
     if isinstance(value, (str, bytes)):
-        # 単一文字列は誤入力として無視（list[str] を期待しているため）
+        return []
+    if isinstance(value, Mapping):
+        # dict / Mapping を iterable として消費するとキーが page_id 扱いに
+        # なるため、明示的にエラー側に倒す（空 list を返して呼び出し側で
+        # 「依存無し / blocker 無し」として判定させる方が安全）。
         return []
     if not isinstance(value, Iterable):
         return []

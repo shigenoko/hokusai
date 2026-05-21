@@ -32,7 +32,7 @@ import re
 #   greedy `(.+)$` で line-end まで一気に取り、Python 側 `.rstrip()` で
 #   末尾空白を除去する（regex engine が anchor を満たす方向に backtrack
 #   する余地を消す）
-_CHECKBOX_PATTERN = re.compile(r"^\s{0,16}[-*]\s+\[[xX ]\]\s+(.+)$")
+_CHECKBOX_PATTERN = re.compile(r"^\s{0,16}[-*]\s{1,8}\[[xX ]\]\s{1,8}(.+)$")
 
 # 番号付きステップ: `1.1 タイトル` / `1.1. タイトル` / `### 1. タイトル` / `## 1.1 タイトル`
 # - 行頭の `#` (markdown heading) と whitespace は許容
