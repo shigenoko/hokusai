@@ -21,6 +21,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from hokusai.integrations.notion_dashboard.client import NotionAPIError
 from hokusai.integrations.notion_dashboard.work_items_db import (
+    CLAIM_TYPE_AGENT,
+    CLAIM_TYPE_HUMAN,
+    DEFAULT_LEASE_DURATION_SECONDS,
+    LEASE_STATUS_ACTIVE,
+    LEASE_STATUS_EXPIRED,
+    LEASE_STATUS_RELEASED,
     STATUS_BLOCKED,
     STATUS_CANCELED,
     STATUS_DONE,
@@ -309,3 +315,128 @@ def test_property_not_found_retry_drops_missing_property():
     assert "Description" in api.create_calls[0]["properties"]
     assert "Description" not in api.create_calls[1]["properties"]
     assert result["id"] == "new-page-id"
+
+
+# ---------------------------------------------------------------------------
+# Lease API: claim_work_item / release_lease / expire_lease
+# （Workgraph Phase 3 / Issue #42 / v0.8.0）
+# ---------------------------------------------------------------------------
+
+
+def test_claim_work_item_writes_active_lease_with_token():
+    """claim_work_item は Lease Status=active / Started At / Expires At /
+    Claimed By / Claim Type / Lease Token を書き込む"""
+    api = _FakeAPI(existing_id="page-x")
+    client = WorkItemsDBClient(api=api, database_id="wi-db")
+    client.claim_work_item(
+        "page-x", claimed_by="claude_code", lease_duration_seconds=600
+    )
+
+    assert len(api.update_calls) == 1
+    page_id, payload = api.update_calls[0]
+    assert page_id == "page-x"
+    props = payload["properties"]
+    assert props["Claimed By"]["rich_text"][0]["text"]["content"] == "claude_code"
+    assert props["Claim Type"]["select"]["name"] == CLAIM_TYPE_AGENT
+    assert props["Lease Status"]["select"]["name"] == LEASE_STATUS_ACTIVE
+    assert "Lease Started At" in props
+    assert "Lease Expires At" in props
+    # token は uuid4 hex（32 文字）
+    token = props["Lease Token"]["rich_text"][0]["text"]["content"]
+    assert len(token) == 32
+    # hex 文字のみ
+    assert all(c in "0123456789abcdef" for c in token)
+
+
+def test_claim_work_item_with_human_claim_type():
+    """human claim type も受け付ける"""
+    api = _FakeAPI(existing_id="page-x")
+    client = WorkItemsDBClient(api=api, database_id="wi-db")
+    client.claim_work_item(
+        "page-x", claimed_by="alice@example.com", claim_type=CLAIM_TYPE_HUMAN
+    )
+    _, payload = api.update_calls[0]
+    assert payload["properties"]["Claim Type"]["select"]["name"] == CLAIM_TYPE_HUMAN
+    assert (
+        payload["properties"]["Claimed By"]["rich_text"][0]["text"]["content"]
+        == "alice@example.com"
+    )
+
+
+def test_claim_work_item_rejects_invalid_claim_type():
+    client = WorkItemsDBClient(api=_FakeAPI(), database_id="wi-db")
+    with pytest.raises(ValueError, match="Claim Type"):
+        client.claim_work_item("page-x", claimed_by="x", claim_type="bot")
+
+
+def test_claim_work_item_rejects_empty_claimed_by():
+    client = WorkItemsDBClient(api=_FakeAPI(), database_id="wi-db")
+    with pytest.raises(ValueError, match="claimed_by"):
+        client.claim_work_item("page-x", claimed_by="")
+
+
+def test_claim_work_item_rejects_nonpositive_duration():
+    client = WorkItemsDBClient(api=_FakeAPI(), database_id="wi-db")
+    with pytest.raises(ValueError, match="lease_duration_seconds"):
+        client.claim_work_item(
+            "page-x", claimed_by="x", lease_duration_seconds=0
+        )
+    with pytest.raises(ValueError, match="lease_duration_seconds"):
+        client.claim_work_item(
+            "page-x", claimed_by="x", lease_duration_seconds=-10
+        )
+
+
+def test_claim_work_item_default_duration_is_one_hour():
+    """DEFAULT_LEASE_DURATION_SECONDS は 3600（1 時間）"""
+    assert DEFAULT_LEASE_DURATION_SECONDS == 3600
+
+
+def test_release_lease_writes_released_status_only():
+    """release_lease は Lease Status を released に。Claimed By / Token は温存。"""
+    api = _FakeAPI(existing_id="page-x")
+    client = WorkItemsDBClient(api=api, database_id="wi-db")
+    client.release_lease("page-x")
+
+    assert len(api.update_calls) == 1
+    _page_id, payload = api.update_calls[0]
+    props = payload["properties"]
+    assert props["Lease Status"]["select"]["name"] == LEASE_STATUS_RELEASED
+    # Claimed By / Token は監査用に温存 → payload に含まれない（既存値を残す）
+    assert "Claimed By" not in props
+    assert "Lease Token" not in props
+    # Last Updated は書き換える
+    assert "Last Updated" in props
+
+
+def test_expire_lease_writes_expired_status_only():
+    """expire_lease は Lease Status を expired に。"""
+    api = _FakeAPI(existing_id="page-x")
+    client = WorkItemsDBClient(api=api, database_id="wi-db")
+    client.expire_lease("page-x")
+
+    assert len(api.update_calls) == 1
+    _page_id, payload = api.update_calls[0]
+    props = payload["properties"]
+    assert props["Lease Status"]["select"]["name"] == LEASE_STATUS_EXPIRED
+    assert "Last Updated" in props
+
+
+def test_claim_then_release_lifecycle():
+    """claim → release の典型 lifecycle を 2 回連続呼び出しで検証。"""
+    api = _FakeAPI(existing_id="page-x")
+    client = WorkItemsDBClient(api=api, database_id="wi-db")
+    client.claim_work_item("page-x", claimed_by="claude_code")
+    client.release_lease("page-x")
+
+    assert len(api.update_calls) == 2
+    # 1 回目: active
+    assert (
+        api.update_calls[0][1]["properties"]["Lease Status"]["select"]["name"]
+        == LEASE_STATUS_ACTIVE
+    )
+    # 2 回目: released
+    assert (
+        api.update_calls[1][1]["properties"]["Lease Status"]["select"]["name"]
+        == LEASE_STATUS_RELEASED
+    )
