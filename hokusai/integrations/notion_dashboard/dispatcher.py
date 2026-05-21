@@ -20,6 +20,7 @@ from ...logging_config import get_logger
 from .client import NotionAPIClient, NotionAPIError, NotionRateLimitError
 from .pull_requests_db import PullRequestsDBClient
 from .review_issues_db import ReviewIssuesDBClient
+from .work_items_db import WorkItemsDBClient
 from .workflows_db import WorkflowsDBClient
 
 logger = get_logger("integrations.notion_dashboard.dispatcher")
@@ -28,6 +29,13 @@ logger = get_logger("integrations.notion_dashboard.dispatcher")
 # Review Issue 発火イベント。Phase 6 verification failure / Phase 7 final review 等
 # から dispatch される。payload 構造は _handle_review_issue_raised を参照。
 EVENT_REVIEW_ISSUE_RAISED = "review_issue_raised"
+# Work Item upsert イベント（Workgraph Phase 2 / Issue #38）。Phase 4 plan ノード
+# が work_plan から抽出した Work Item を Notion に同期する／Phase 5 implement が
+# 状態を更新する際に dispatch される。payload 構造は _handle_work_item_upsert
+# を参照。Status 遷移専用イベント（Phase 5 implement の in_progress → done）は
+# upsert と分離せず、payload.status で扱う前提（既存 Notion 側 Status を温存
+# したいかは payload.preserve_status フラグで制御）。
+EVENT_WORK_ITEM_UPSERT = "work_item_upsert"
 
 
 class NotionSyncDispatcher:
@@ -45,6 +53,7 @@ class NotionSyncDispatcher:
         self._workflows_db: WorkflowsDBClient | None = None
         self._pull_requests_db: PullRequestsDBClient | None = None
         self._review_issues_db: ReviewIssuesDBClient | None = None
+        self._work_items_db: WorkItemsDBClient | None = None
         # workflow_id → page_id の positive-cache（PR #37 Copilot 7 回目指摘）。
         # Phase 6/7 drain で同一 workflow の review_issue を複数 dispatch する際、
         # 各 dispatch で Workflows DB に lookup query を投げないよう抑止する。
@@ -203,6 +212,15 @@ class NotionSyncDispatcher:
             )
             return
 
+        if event_type == EVENT_WORK_ITEM_UPSERT:
+            # Work Items DB 系も Workflows DB の sync_errors とは別軸の同期。
+            # Review Issues と同じく enrich 不要。retry 経由なら自己 entry を
+            # race 検出から除外。
+            self._handle_work_item_upsert(
+                payload, exclude_idempotency_key=exclude_idempotency_key
+            )
+            return
+
         # 後方互換: 旧 Service Status sync が outbox に積んだ
         # service_status_checked エントリは Notion 連携廃止済みなので
         # no-op として扱い、retry_pending() で drain できるようにする。
@@ -307,7 +325,14 @@ class NotionSyncDispatcher:
         """
         if self._store is None:
             return 0
-        excluded_types = ("review_issue_raised", "service_status_checked")
+        # work_item_upsert は review_issue_raised と同じく workflow page sync
+        # とは独立した同期。同 workflow_id の workflow_started が pending の
+        # 際の deferred ループを避けるため除外する。
+        excluded_types = (
+            "review_issue_raised",
+            "work_item_upsert",
+            "service_status_checked",
+        )
         try:
             with self._store._connect() as conn:  # type: ignore[attr-defined]
                 placeholders = ",".join(["?"] * len(excluded_types))
@@ -478,6 +503,78 @@ class NotionSyncDispatcher:
             title=payload.get("title"),
         )
 
+    def _handle_work_item_upsert(
+        self,
+        payload: dict[str, Any],
+        *,
+        exclude_idempotency_key: str | None = None,
+    ) -> None:
+        """Work Item upsert イベントを Work Items DB に反映する（Issue #38）。
+
+        Review Issues と同じ workflow_page race 対策を持つ:
+        - 対応 workflow ページが Notion 上に存在せず、かつ outbox に同 workflow_id
+          の workflow page sync イベントが pending（workflow_started 等）の場合は、
+          race condition として deferして NotionAPIError(503) で outbox に積み直す。
+        - pending workflow page sync が無く workflow ページも存在しない場合に限り、
+          Workflow relation 無しで Work Item を upsert（best effort, genuine miss）。
+
+        Args:
+            payload: work_item_upsert の payload（workflow_id / title / phase /
+                status / operator / description / dedupe_key /
+                dependency_page_ids / blocking_review_issue_page_ids）
+            exclude_idempotency_key: retry_pending() 経由の再送時、自己 entry を
+                race 検出の pending 集計から除外するキー
+        """
+        work_items_db_id = os.environ.get(
+            self._config.work_items_db_id_env, ""
+        ).strip()
+        if not work_items_db_id:
+            logger.debug(
+                "Work Items DB ID が未設定のため Work Item 同期をスキップ"
+            )
+            return
+
+        title = payload.get("title")
+        if not title:
+            logger.warning(
+                "work_item_upsert に title が無いためスキップ"
+            )
+            return
+
+        workflow_id = payload.get("workflow_id")
+        workflow_page_id: str | None = None
+        if workflow_id:
+            workflow_page_id = self._lookup_workflow_page_id(workflow_id)
+            if workflow_page_id is None:
+                pending_count = self._count_pending_workflow_page_events_for(
+                    workflow_id, exclude_key=exclude_idempotency_key
+                )
+                if pending_count > 0:
+                    raise NotionAPIError(
+                        503,
+                        f"workflow page not yet synced for workflow_id="
+                        f"{workflow_id}; deferring work_item_upsert dispatch "
+                        f"({pending_count} pending workflow page events)",
+                        code="workflow_page_pending",
+                    )
+
+        client = self._get_work_items_client(work_items_db_id)
+        client.upsert_work_item(
+            title=str(title),
+            phase=payload.get("phase"),
+            status=str(payload.get("status") or "pending"),
+            workflow_id=workflow_id,
+            workflow_page_id=workflow_page_id,
+            operator=payload.get("operator"),
+            description=payload.get("description"),
+            dependency_page_ids=payload.get("dependency_page_ids") or [],
+            blocking_review_issue_page_ids=payload.get(
+                "blocking_review_issue_page_ids"
+            )
+            or [],
+            dedupe_key=payload.get("dedupe_key"),
+        )
+
     def _enqueue_failure(
         self,
         idempotency_key: str,
@@ -575,6 +672,14 @@ class NotionSyncDispatcher:
                 database_id=database_id,
             )
         return self._review_issues_db
+
+    def _get_work_items_client(self, database_id: str) -> WorkItemsDBClient:
+        if self._work_items_db is None:
+            self._work_items_db = WorkItemsDBClient(
+                api=self._get_api(),
+                database_id=database_id,
+            )
+        return self._work_items_db
 
     def _get_api(self) -> NotionAPIClient:
         if self._api is None:

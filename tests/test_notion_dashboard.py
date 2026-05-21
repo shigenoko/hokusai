@@ -2424,3 +2424,140 @@ def test_dispatcher_pr_created_propagates_last_sync_and_sync_errors(
     # GitLab MR URL も合わせて入る
     assert "GitLab MR" in props
     assert props["GitLab MR"]["url"] == "https://x/100"
+
+
+# ---------------------------------------------------------------------------
+# WorkflowRunner._drain_pending_work_items（Issue #38 / Workgraph Phase 2）
+# ---------------------------------------------------------------------------
+
+
+def test_drain_pending_work_items_no_op_when_empty():
+    runner = _make_runner()
+    capt = _CapturingDispatch(runner)
+    runner.compiled_workflow = _FakeCompiledWorkflow()  # type: ignore[assignment]
+
+    n = runner._drain_pending_work_items(
+        {"pending_work_items": []}, {"thread": "x"}
+    )
+    assert n == 0
+    assert capt.calls == []
+    assert runner.compiled_workflow.update_state_calls == []
+
+
+def test_drain_pending_work_items_dispatches_each_with_per_item_idempotency_key():
+    """複数の pending Work Item を per-item idempotency_key で dispatch する"""
+    runner = _make_runner()
+    capt = _CapturingDispatch(runner)
+    fake_cw = _FakeCompiledWorkflow()
+    runner.compiled_workflow = fake_cw  # type: ignore[assignment]
+
+    pending = [
+        {
+            "workflow_id": "wf-1",
+            "title": "implement login",
+            "phase": 5,
+            "status": "pending",
+            "dedupe_key": "wi-alpha",
+        },
+        {
+            "workflow_id": "wf-1",
+            "title": "implement logout",
+            "phase": 5,
+            "status": "pending",
+            "dedupe_key": "wi-beta",
+        },
+    ]
+    n = runner._drain_pending_work_items(
+        {"pending_work_items": pending, "operator": "alice"},
+        {"thread": "x"},
+    )
+    assert n == 2
+    assert len(capt.calls) == 2
+    assert capt.calls[0]["event_type"] == "work_item_upsert"
+    # idempotency_key は per-item で dedupe_key を含む
+    assert capt.calls[0]["idempotency_key"] == "wf-1:work_item_upsert:wi-alpha"
+    assert capt.calls[1]["idempotency_key"] == "wf-1:work_item_upsert:wi-beta"
+    # state["operator"] が enrich される
+    assert capt.calls[0]["payload"]["operator"] == "alice"
+    assert capt.calls[1]["payload"]["operator"] == "alice"
+    # drain 後に state を clear
+    assert len(fake_cw.update_state_calls) == 1
+    assert fake_cw.update_state_calls[0][1] == {"pending_work_items": []}
+
+
+def test_drain_pending_work_items_persists_cleared_state_to_store():
+    """drain 後に self.store にも clear 後の state を保存する
+    （review_issues と同じく、drain 直後に loop が止まっても再 dispatch
+    されないように）"""
+    runner = _make_runner()
+    _CapturingDispatch(runner)
+    runner.compiled_workflow = _FakeCompiledWorkflow()  # type: ignore[assignment]
+
+    save_calls: list[tuple[str, dict]] = []
+    original_save = runner.store.save_workflow
+
+    def _spy_save(wid, st):
+        save_calls.append((wid, dict(st)))
+        return original_save(wid, st)
+
+    runner.store.save_workflow = _spy_save  # type: ignore[assignment]
+
+    state_values = {
+        "workflow_id": "wf-persist",
+        "pending_work_items": [
+            {
+                "workflow_id": "wf-persist",
+                "title": "X",
+                "phase": 4,
+                "dedupe_key": "k",
+            }
+        ],
+    }
+    runner._drain_pending_work_items(state_values, {"thread": "x"})
+
+    assert state_values["pending_work_items"] == []
+    assert len(save_calls) >= 1
+    saved_wid, saved_state = save_calls[-1]
+    assert saved_wid == "wf-persist"
+    assert saved_state["pending_work_items"] == []
+
+
+def test_drain_pending_work_items_falls_back_to_build_dedupe_key_when_missing():
+    """dedupe_key 欠落時は build_dedupe_key で生成し idempotency_key に反映"""
+    runner = _make_runner()
+    capt = _CapturingDispatch(runner)
+    runner.compiled_workflow = _FakeCompiledWorkflow()  # type: ignore[assignment]
+
+    pending = [
+        {
+            "workflow_id": "wf-1",
+            "title": "implement X",
+            "phase": 5,
+        }
+    ]
+    runner._drain_pending_work_items(
+        {"pending_work_items": pending}, {"thread": "x"}
+    )
+    # idempotency_key に dedupe_key が含まれる（fallback で hash 生成）
+    assert capt.calls[0]["idempotency_key"].startswith(
+        "wf-1:work_item_upsert:"
+    )
+    # 末尾の dedupe_key は 16 hex（build_dedupe_key の戻り値）
+    parts = capt.calls[0]["idempotency_key"].split(":")
+    assert len(parts[-1]) == 16
+
+
+def test_drain_pending_work_items_swallows_exceptions():
+    """drain 中の例外はワークフロー本体に伝播しない（best effort）"""
+    runner = _make_runner()
+    runner.compiled_workflow = _FakeCompiledWorkflow()  # type: ignore[assignment]
+
+    def raising(event_type, payload, **kwargs):
+        raise RuntimeError("boom")
+
+    runner._safe_notion_dispatch = raising  # type: ignore[method-assign]
+    # 例外を投げないこと
+    runner._drain_pending_work_items(
+        {"pending_work_items": [{"title": "X", "workflow_id": "w"}]},
+        {"thread": "x"},
+    )

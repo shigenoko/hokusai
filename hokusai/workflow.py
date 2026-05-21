@@ -190,6 +190,95 @@ class WorkflowRunner:
             )
             return 0
 
+    def _drain_pending_work_items(
+        self, state_values: dict, langgraph_config: dict
+    ) -> int:
+        """Phase 4 plan / Phase 5 implement が pending_work_items に積んだ
+        payload を Notion Work Items DB へ dispatch し、state からは clear する
+        （Issue #38 / Workgraph Phase 2）。
+
+        Review Issues drain と同じパターン:
+        - operator は state["operator"] を優先採用、無ければ resolve_operator_name
+        - idempotency_key は per-work-item（`workflow_id:work_item_upsert:dedupe_key`）。
+          既定キーで集約させると、同 phase 内の複数 Work Item が 1 outbox entry に
+          潰れる問題があるため。
+        - drain 後は LangGraph state + self.store の両方を clear（PR #37 と同じ
+          理由で、drain 直後に loop が止まっても `continue_workflow` 経路で
+          再 dispatch されないようにする）
+        - 例外はワークフロー本体に伝播させない（best effort）
+
+        Returns:
+            dispatch 試行した work_item 件数（0 = drain なし）
+        """
+        try:
+            pending = state_values.get("pending_work_items") or []
+            if not pending:
+                return 0
+            operator = state_values.get("operator")
+            if not operator and self.notion_dispatcher.is_configured():
+                operator = resolve_operator_name()
+            for payload in pending:
+                enriched, idempotency_key = self._prepare_work_item_dispatch(
+                    payload, operator
+                )
+                self._safe_notion_dispatch(
+                    "work_item_upsert",
+                    enriched,
+                    idempotency_key=idempotency_key,
+                )
+            # LangGraph state を clear
+            self.compiled_workflow.update_state(
+                langgraph_config, {"pending_work_items": []}
+            )
+            # state_values の in-place clear + store 永続化（Review Issues と同じ）
+            state_values["pending_work_items"] = []
+            workflow_id = state_values.get("workflow_id")
+            if workflow_id:
+                try:
+                    self.store.save_workflow(workflow_id, state_values)
+                except Exception as save_err:
+                    logger.debug(
+                        f"work_items drain 後の store 保存で例外を抑制: {save_err}"
+                    )
+            return len(pending)
+        except Exception as wi_err:
+            logger.debug(
+                f"Work Items 同期 drain 中のエラーを抑制: {wi_err}"
+            )
+            return 0
+
+    @staticmethod
+    def _prepare_work_item_dispatch(
+        payload: dict, operator: str | None
+    ) -> tuple[dict, str]:
+        """work_item_upsert の payload を enrich し、idempotency_key を組み立てる。
+
+        - operator が指定されており payload に未含なら enrich
+        - dedupe_key 欠落時は build_dedupe_key で stable hash を生成
+          （Review Issues と同じく per-item キーで outbox uniqueness 衝突を回避）
+        - idempotency_key は `workflow_id:work_item_upsert:dedupe_key` 形式
+        """
+        from .integrations.notion_dashboard.work_items_db import build_dedupe_key
+
+        enriched = dict(payload)
+        if operator and "operator" not in enriched:
+            enriched["operator"] = operator
+        wid = enriched.get("workflow_id") or ""
+        dkey = enriched.get("dedupe_key")
+        if not dkey:
+            dkey = build_dedupe_key(
+                workflow_id=wid or None,
+                phase=enriched.get("phase"),
+                title=str(enriched.get("title") or ""),
+            )
+            enriched["dedupe_key"] = dkey
+        idempotency_key = (
+            f"{wid}:work_item_upsert:{dkey}"
+            if wid
+            else f"work_item_upsert:{dkey}"
+        )
+        return enriched, idempotency_key
+
     @staticmethod
     def _prepare_review_issue_dispatch(
         payload: dict, operator: str | None
@@ -947,6 +1036,9 @@ class WorkflowRunner:
 
                 # Review Issues DB 同期キューの drain（#36 / v0.5.0）
                 self._drain_pending_review_issues(current_state.values, config)
+
+                # Work Items DB 同期キューの drain（Issue #38 / Workgraph Phase 2）
+                self._drain_pending_work_items(current_state.values, config)
 
                 # ループ検出: 同じフェーズが繰り返されているか
                 if current_phase:
