@@ -24,22 +24,26 @@ import re
 # Checkbox 形式の Work Item 行: `- [ ] タイトル` / `- [x] タイトル` / `* [ ]` 等
 # - 行頭の whitespace は許容（インデントされた sub-item にも反応）
 # - checkbox の中身は ` ` / `x` / `X` のいずれか
-# - title 部分は行末まで（trailing whitespace は後段で strip）
-# **ReDoS 対策**: leading whitespace は `\s{0,16}` で上限を設け、checkbox 内は
-# 単一文字クラス `[xX ]` にしてネスト量指定子（`\s*[xX ]?\s*`）の組合せ爆発を
-# 排除（SonarCloud python:S5852 対策。markdown の checkbox 表記は実用上
-# 1 文字で十分で、`[x ]` / `[X]` / `[ ]` のいずれかに限定する）。
-_CHECKBOX_PATTERN = re.compile(r"^\s{0,16}[-*]\s+\[[xX ]\]\s+(.+?)\s*$")
+# - title 部分は行末まで（trailing whitespace は match 後に Python 側で strip）
+# **ReDoS 対策（SonarCloud python:S5852）**:
+# - 行頭 whitespace は `\s{0,16}` で上限化
+# - checkbox 中身は単一文字クラス `[xX ]` でネスト量指定子を排除
+# - title 部分は `(.+?)\s*$` の lazy + trailing anchor 組合せを避けるため
+#   greedy `(.+)$` で line-end まで一気に取り、Python 側 `.rstrip()` で
+#   末尾空白を除去する（regex engine が anchor を満たす方向に backtrack
+#   する余地を消す）
+_CHECKBOX_PATTERN = re.compile(r"^\s{0,16}[-*]\s+\[[xX ]\]\s+(.+)$")
 
 # 番号付きステップ: `1.1 タイトル` / `1.1. タイトル` / `### 1. タイトル` / `## 1.1 タイトル`
 # - 行頭の `#` (markdown heading) と whitespace は許容
 # - 番号は `N` または `N.N` 形式（深さ 2 まで）
 # - 番号末尾の `.` / `:` / `)` / 全角コロンは title 区切りとして許容
+# ReDoS 対策: `\s*` / `\d+` を bound、title は greedy + `$` で末尾固定。
 _NUMBERED_PATTERN = re.compile(
-    r"^\s*#{0,6}\s*"
-    r"(\d+(?:\.\d+)?)"  # `1` または `1.1`
+    r"^\s{0,16}#{0,6}\s{0,16}"
+    r"(\d{1,4}(?:\.\d{1,4})?)"  # `1` または `1.1`（深さ 2、桁数は実用上 4 まで）
     r"[\.\:\)\．\)\：]?"  # 番号末尾の区切り文字（任意、全角含む）
-    r"\s+(.+?)\s*$"
+    r"\s{1,8}(.+)$"
 )
 
 # inline emphasis を剥がすための文字

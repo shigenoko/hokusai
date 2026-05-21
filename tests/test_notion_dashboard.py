@@ -2592,3 +2592,35 @@ def test_drain_pending_work_items_dispatches_status_change_event_when_marker_set
     )
     # `_event` は dispatcher 向け enriched payload からは除かれる（internal）
     assert "_event" not in capt.calls[0]["payload"]
+
+
+def test_drain_pending_work_items_marks_missing_title_in_idempotency_key():
+    """`_prepare_work_item_dispatch` で title 欠落時は空 title fallback を
+    せず、`_missing_title_phase<N>` を idempotency_key 末尾に入れる
+    （PR #41 Copilot 5 回目指摘: 空 title 由来 dedupe_key の衝突回避）。
+    enriched payload には dedupe_key を書き込まないことで、dispatcher 側
+    handler の title 必須 guard が効くようにする。"""
+    runner = _make_runner()
+    capt = _CapturingDispatch(runner)
+    runner.compiled_workflow = _FakeCompiledWorkflow()  # type: ignore[assignment]
+
+    pending = [
+        {
+            "workflow_id": "wf-1",
+            "phase": 4,
+            "status": "done",
+            "_event": "status_change",
+            # title も dedupe_key も省略
+        }
+    ]
+    runner._drain_pending_work_items(
+        {"pending_work_items": pending}, {"thread": "x"}
+    )
+    assert len(capt.calls) == 1
+    # idempotency_key は `_missing_title_phase4` を含む（衝突回避用 marker）
+    assert (
+        capt.calls[0]["idempotency_key"]
+        == "wf-1:work_item_status_change:_missing_title_phase4"
+    )
+    # enriched payload には dedupe_key を **書き込まない**（dispatcher 側 guard 用）
+    assert "dedupe_key" not in capt.calls[0]["payload"]

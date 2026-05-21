@@ -284,14 +284,6 @@ class WorkflowRunner:
         if operator and "operator" not in enriched:
             enriched["operator"] = operator
         wid = enriched.get("workflow_id") or ""
-        dkey = enriched.get("dedupe_key")
-        if not dkey:
-            dkey = build_dedupe_key(
-                workflow_id=wid or None,
-                phase=enriched.get("phase"),
-                title=str(enriched.get("title") or ""),
-            )
-            enriched["dedupe_key"] = dkey
         # `_event` marker は drain 層が event 名分岐に使う internal なもの。
         # 後段の dispatcher / Notion 側に送る必要はないので enriched からは除く。
         event_marker = enriched.pop("_event", None)
@@ -300,6 +292,32 @@ class WorkflowRunner:
             if event_marker == "status_change"
             else "work_item_upsert"
         )
+
+        dkey = enriched.get("dedupe_key")
+        if not dkey:
+            # **空 title fallback を撤廃**: `title=str(... or "")` を許すと
+            # status_change 経路で空 title 由来の dedupe_key が同一
+            # workflow/phase の全 Work Item で衝突し、別 Work Item を
+            # 誤って更新するリスクがある（PR #41 Copilot 5 回目指摘）。
+            # title が無ければ dedupe_key を生成せず、idempotency_key の
+            # 末尾は `_missing_title_<workflow_id>_<phase>` のような可視
+            # 値にして outbox 上で identification できるようにする
+            # （dispatch 側の handler が title 必須を再検査して skip する）。
+            title_val = enriched.get("title")
+            if title_val:
+                dkey = build_dedupe_key(
+                    workflow_id=wid or None,
+                    phase=enriched.get("phase"),
+                    title=str(title_val),
+                )
+                enriched["dedupe_key"] = dkey
+            else:
+                dkey = f"_missing_title_phase{enriched.get('phase') or 'na'}"
+                # enriched には dedupe_key を **書き込まない**: dispatch 側
+                # handler が再度 title 必須をチェックして skip するため、
+                # `_missing_title_*` を上書きしてしまうと handler の guard が
+                # 効かなくなる。idempotency_key だけ作って outbox 上で区別する。
+
         idempotency_key = (
             f"{wid}:{event_for_key}:{dkey}"
             if wid
