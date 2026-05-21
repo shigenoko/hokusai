@@ -582,3 +582,68 @@ def test_dispatcher_work_item_claim_defers_when_upsert_pending(
     })
     # outbox にキューイングで False
     assert result is False
+
+
+def test_dispatcher_work_item_claim_skips_when_lease_duration_non_numeric(
+    store: SQLiteStore, monkeypatch
+):
+    """lease_duration_seconds が非数値 (str / list 等) なら warning + skip
+    （poison message 化防止、PR #43 Copilot 2 回目指摘）"""
+    disp, api = _build_lease_dispatcher_with_existing_page(store, monkeypatch)
+    result = disp.dispatch("work_item_claim", {
+        "workflow_id": "wf-1",
+        "title": "X",
+        "phase": 4,
+        "claimed_by": "claude_code",
+        "lease_duration_seconds": "abc",  # 非数値
+    })
+    assert result is True
+    # claim_work_item は呼ばれない
+    updates = [c for c in api.calls if c[0] == "update"]
+    assert updates == []
+
+
+def test_dispatcher_work_item_claim_skips_when_lease_duration_zero_or_negative(
+    store: SQLiteStore, monkeypatch
+):
+    """lease_duration_seconds が 0 以下なら warning + skip"""
+    disp, api = _build_lease_dispatcher_with_existing_page(store, monkeypatch)
+    result = disp.dispatch("work_item_claim", {
+        "workflow_id": "wf-1",
+        "title": "X",
+        "phase": 4,
+        "claimed_by": "claude_code",
+        "lease_duration_seconds": 0,
+    })
+    assert result is True
+    updates = [c for c in api.calls if c[0] == "update"]
+    assert updates == []
+
+    # 負数も同じ
+    disp2, api2 = _build_lease_dispatcher_with_existing_page(store, monkeypatch)
+    result2 = disp2.dispatch("work_item_claim", {
+        "workflow_id": "wf-1",
+        "title": "X",
+        "phase": 4,
+        "claimed_by": "claude_code",
+        "lease_duration_seconds": -100,
+    })
+    assert result2 is True
+    assert [c for c in api2.calls if c[0] == "update"] == []
+
+
+def test_dispatcher_work_item_claim_skips_when_claim_type_invalid(
+    store: SQLiteStore, monkeypatch
+):
+    """claim_type が agent/human 以外なら warning + skip"""
+    disp, api = _build_lease_dispatcher_with_existing_page(store, monkeypatch)
+    result = disp.dispatch("work_item_claim", {
+        "workflow_id": "wf-1",
+        "title": "X",
+        "phase": 4,
+        "claimed_by": "claude_code",
+        "claim_type": "bot",  # 不正
+    })
+    assert result is True
+    updates = [c for c in api.calls if c[0] == "update"]
+    assert updates == []

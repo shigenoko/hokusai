@@ -731,22 +731,61 @@ class NotionSyncDispatcher:
         if not claimed_by:
             logger.warning("work_item_claim に claimed_by が無いためスキップ")
             return
-        from .work_items_db import CLAIM_TYPE_AGENT, DEFAULT_LEASE_DURATION_SECONDS
+        from .work_items_db import (
+            CLAIM_TYPE_AGENT,
+            CLAIM_TYPE_HUMAN,
+            DEFAULT_LEASE_DURATION_SECONDS,
+        )
 
-        # lease_duration_seconds は **None / 未指定のみ** DEFAULT にフォール
-        # バックする。`payload.get(...) or DEFAULT` だと payload が明示的に
-        # `0` を送ってきても DEFAULT に潰れて呼び出しミスを隠してしまうため
-        # （PR #43 Copilot 1 回目指摘）、None 判定で分岐し、0 / 負数は
-        # WorkItemsDBClient.claim_work_item 側の ValueError に任せる。
+        # **入力検証（poison message 防止）**:
+        # PR #43 Copilot 2 回目指摘で、不正な payload（非数値 lease_duration
+        # や enum 外の claim_type 等）が WorkItemsDBClient.claim_work_item の
+        # ValueError を引き起こすと、dispatch() の catch-all で outbox に積み
+        # 直されて永続リトライループになるリスクがあった。dispatcher 層で
+        # warning + skip して outbox に入れないよう先回りで検証する。
+
+        # claim_type: agent / human のみ許可
+        raw_claim_type = payload.get("claim_type")
+        if raw_claim_type is None:
+            claim_type = CLAIM_TYPE_AGENT
+        else:
+            claim_type_str = str(raw_claim_type)
+            if claim_type_str not in (CLAIM_TYPE_AGENT, CLAIM_TYPE_HUMAN):
+                logger.warning(
+                    "work_item_claim の claim_type が不正なのでスキップ: %r",
+                    raw_claim_type,
+                )
+                return
+            claim_type = claim_type_str
+
+        # lease_duration_seconds: None は DEFAULT。明示値は int 変換を
+        # 試み、失敗 / 0 以下なら warning + skip（client 側 ValueError を
+        # 待たない）。
         raw_duration = payload.get("lease_duration_seconds")
         if raw_duration is None:
             lease_duration_seconds = DEFAULT_LEASE_DURATION_SECONDS
         else:
-            lease_duration_seconds = int(raw_duration)
+            try:
+                lease_duration_seconds = int(raw_duration)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "work_item_claim の lease_duration_seconds が非数値 "
+                    "なのでスキップ: %r",
+                    raw_duration,
+                )
+                return
+            if lease_duration_seconds <= 0:
+                logger.warning(
+                    "work_item_claim の lease_duration_seconds が 0 以下 "
+                    "なのでスキップ: %d",
+                    lease_duration_seconds,
+                )
+                return
+
         client.claim_work_item(
             page_id,
             claimed_by=str(claimed_by),
-            claim_type=str(payload.get("claim_type") or CLAIM_TYPE_AGENT),
+            claim_type=claim_type,
             lease_duration_seconds=lease_duration_seconds,
         )
 
