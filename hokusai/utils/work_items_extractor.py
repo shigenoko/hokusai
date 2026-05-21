@@ -91,19 +91,39 @@ def extract_work_items(work_plan: str) -> list[dict]:
 
 
 def _normalize_title(text: str) -> str:
-    """markdown の inline emphasis を剥がし、前後空白を削る。
+    """markdown の inline emphasis（wrapping のみ）を剥がし、前後空白を削る。
 
     例:
         `**login form**` → `login form`
         `` `auth.py` を修正 `` → `auth.py を修正`
         `*重要*` → `重要`
+        `fix_auth_flow を修正` → `fix_auth_flow を修正`（snake_case 識別子を温存）
+
+    実装方針:
+    - emphasis を **囲んでいる場合のみ剥がす**（前回の単純な `re.sub(r"[*_`]+", "")`
+      は単語内の `_` まで除去して `fix_auth_flow` → `fixauthflow` のように
+      snake_case 識別子を壊す問題があった。PR #41 Copilot 3 回目指摘で修正）
+    - `` ` `` / `*` は wrapping 検出にだけ正規表現を当て、内側のテキストを保持
+    - `_` は word boundary（前後が英数字でない）と組み合わせて、`snake_case_id`
+      のような識別子内の `_` を残しつつ `_italic_` のような wrapping だけ剥がす
     """
-    stripped = (text or "").strip().strip(_INLINE_EMPHASIS_CHARS).strip()
-    # 内部の連続 emphasis（**word**）も剥がす。re.sub で `*+`/`_+`/`` `+ ``
-    # を空文字に置き換える。これは body 中の italic / bold / code を全て
-    # plain text 化する単純化（Notion 側の rich_text に意味のあるマークアップ
-    # を載せたい場合は別途設計）。
-    return re.sub(r"[*_`]+", "", stripped).strip()
+    # `.strip(_INLINE_EMPHASIS_CHARS)` は使わない: 片側の wrapping だけ消えて
+    # regex の `\*+...\*+` などのペア検出が成立しなくなるため
+    # （PR #41 Copilot 3 回目指摘の修正で気付いた）。代わりに、regex で
+    # wrapping を剥がした後に通常の `.strip()` で前後空白を整える。
+    stripped = (text or "").strip()
+    # inline code: `text`
+    stripped = re.sub(r"`([^`\n]+?)`", r"\1", stripped)
+    # bold / italic: *text* / **text**
+    stripped = re.sub(r"\*+([^*\n]+?)\*+", r"\1", stripped)
+    # italic with underscores: word boundary が必要（snake_case 識別子を保護）。
+    # 前後が英数字でない位置でだけ `_..._` を剥がす。Python re モジュールには
+    # Unicode 単語境界がある（\b）が、`_` も word character なので `\b` は
+    # 期待通り動かない。前後の文字を look-around で明示的に検査する。
+    stripped = re.sub(
+        r"(?<![A-Za-z0-9])_+([^_\n]+?)_+(?![A-Za-z0-9])", r"\1", stripped
+    )
+    return stripped.strip()
 
 
 def _is_valid_title(title: str) -> bool:

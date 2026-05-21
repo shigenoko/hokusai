@@ -58,6 +58,23 @@ def test_extract_checkbox_with_inline_emphasis():
     assert items[1]["title"] == "important refactor"
 
 
+def test_extract_preserves_snake_case_identifiers():
+    """snake_case の識別子は title 内の `_` を温存する
+    （PR #41 Copilot 3 回目指摘: 旧版は `_normalize_title` が全 `_` を除去し
+    `fix_auth_flow` → `fixauthflow` のように壊していた）"""
+    md = """\
+- [ ] fix_auth_flow を修正
+- [ ] add `oauth_callback_handler` to `src/api.py`
+- [ ] _italic wrap_ but keep snake_case_id intact
+"""
+    items = extract_work_items(md)
+    titles = [it["title"] for it in items]
+    assert titles[0] == "fix_auth_flow を修正"
+    assert titles[1] == "add oauth_callback_handler to src/api.py"
+    # `_italic wrap_` は wrapping として剥がされるが、`snake_case_id` の `_` は残る
+    assert titles[2] == "italic wrap but keep snake_case_id intact"
+
+
 def test_extract_checkbox_dedupe_preserves_first():
     """同じ title は 1 件目だけ残す"""
     md = """\

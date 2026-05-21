@@ -199,9 +199,13 @@ class WorkflowRunner:
 
         Review Issues drain と同じパターン:
         - operator は state["operator"] を優先採用、無ければ resolve_operator_name
-        - idempotency_key は per-work-item（`workflow_id:work_item_upsert:dedupe_key`）。
-          既定キーで集約させると、同 phase 内の複数 Work Item が 1 outbox entry に
-          潰れる問題があるため。
+        - idempotency_key は per-work-item（dedupe_key で同定）。同 phase 内の
+          複数 Work Item を 1 outbox entry に潰さないため。
+        - **dispatch event 名は payload の `_event` marker で切り替わる**:
+            - `_event="status_change"` → `work_item_status_change`（Phase 5 done 遷移）
+            - それ以外（既定）        → `work_item_upsert`（Phase 4 enqueue）
+          idempotency_key 側にも event 名が反映されるため、同一 Work Item の
+          upsert / status_change は outbox 上で別エントリになる。
         - drain 後は LangGraph state + self.store の両方を clear（PR #37 と同じ
           理由で、drain 直後に loop が止まっても `continue_workflow` 経路で
           再 dispatch されないようにする）
@@ -260,12 +264,19 @@ class WorkflowRunner:
     def _prepare_work_item_dispatch(
         payload: dict, operator: str | None
     ) -> tuple[dict, str]:
-        """work_item_upsert の payload を enrich し、idempotency_key を組み立てる。
+        """Work Item 系イベントの payload を enrich し、idempotency_key を組み立てる。
 
         - operator が指定されており payload に未含なら enrich
         - dedupe_key 欠落時は build_dedupe_key で stable hash を生成
           （Review Issues と同じく per-item キーで outbox uniqueness 衝突を回避）
-        - idempotency_key は `workflow_id:work_item_upsert:dedupe_key` 形式
+        - **idempotency_key は payload の `_event` marker に応じて event 名が
+          切り替わる**:
+            - `_event="status_change"` → `workflow_id:work_item_status_change:dedupe_key`
+            - それ以外（既定）        → `workflow_id:work_item_upsert:dedupe_key`
+          同一 Work Item の upsert と status_change が outbox に独立 entry として
+          残るようにするため（PR #41 Copilot 3 回目指摘で contract を明示）。
+        - 返す enriched payload から `_event` marker は除く（dispatcher / Notion
+          側には送らない internal な分岐用フラグ）
         """
         from .integrations.notion_dashboard.work_items_db import build_dedupe_key
 

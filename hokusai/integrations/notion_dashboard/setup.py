@@ -94,8 +94,9 @@ _WORK_ITEMS_DB_DESCRIPTION = (
     "ます。Created At は新規作成時のみ書き込み、Notion 側で初回作成時刻を温存"
     "します。Status の手動編集（in_progress → done など）は HOKUSAI からの上書き"
     "対象外とし、人間の運用判断を温存します（Review Issues DB と同じポリシー）。"
-    "詳細は HOKUSAI 運用ガイド（docs/notion-dashboard-operation-guide.md の "
-    "Work Items DB セクション）を参照。"
+    "詳細は GitHub Issue #38 と HOKUSAI 運用ガイド"
+    "（docs/notion-dashboard-operation-guide.md）を参照。Work Items DB 専用"
+    "セクションは Workgraph Phase 2 リリース時に追加予定。"
 )
 
 _REVIEW_ISSUES_DB_DESCRIPTION = (

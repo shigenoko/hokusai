@@ -22,6 +22,7 @@ from hokusai.config.models import (
     NotionSyncRetryConfig,
 )
 from hokusai.integrations.notion_dashboard.dispatcher import (
+    EVENT_WORK_ITEM_STATUS_CHANGE,
     EVENT_WORK_ITEM_UPSERT,
     NotionSyncDispatcher,
 )
@@ -261,7 +262,7 @@ def test_dispatcher_work_item_status_change_calls_update_status(
             return api  # type: ignore[return-value]
 
     disp = _Disp(store=store, config=cfg)
-    result = disp.dispatch("work_item_status_change", {
+    result = disp.dispatch(EVENT_WORK_ITEM_STATUS_CHANGE, {
         "workflow_id": "wf-1",
         "title": "implement login",
         "phase": 4,
@@ -295,7 +296,7 @@ def test_dispatcher_work_item_status_change_warns_when_page_not_found(
             return api  # type: ignore[return-value]
 
     disp = _Disp(store=store, config=cfg)
-    result = disp.dispatch("work_item_status_change", {
+    result = disp.dispatch(EVENT_WORK_ITEM_STATUS_CHANGE, {
         "workflow_id": "wf-1",
         "title": "X",
         "phase": 4,
@@ -325,7 +326,7 @@ def test_dispatcher_work_item_status_change_requires_status(
             return api  # type: ignore[return-value]
 
     disp = _Disp(store=store, config=cfg)
-    result = disp.dispatch("work_item_status_change", {
+    result = disp.dispatch(EVENT_WORK_ITEM_STATUS_CHANGE, {
         "workflow_id": "wf-1",
         "title": "X",
         "phase": 4,
