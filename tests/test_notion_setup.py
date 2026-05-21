@@ -92,22 +92,23 @@ def test_setup_rejects_empty_parent_page_id():
 
 def test_setup_creates_four_resources_in_order():
     """Workflows → Pull Requests → Review Issues → Work Items の順で作成し、
-    Work Items DB 作成後に Dependencies（self-relation）と Review Issues DB の
-    Blocking Work Items 逆 relation を update で追加する（Issue #38 / Workgraph
-    Phase 2）。"""
+    Work Items DB 作成後に Dependencies（self-relation）を update で追加する
+    （Issue #38 / Workgraph Phase 2）。Review Issues DB 側の `Blocking Work
+    Items` プロパティは `Blocking Review Issues` を dual_property で作成する
+    ことで Notion が自動生成するため、HOKUSAI 側からの update_database は
+    Dependencies の 1 回のみ。"""
     client = _RecordingClient()
     result = setup_notion_workspace(
         "token", "parent-page-id", api_client=client
     )
 
     actions = [c[0] for c in client.calls]
-    # create_database x 4 + update_database x 2（Dependencies + 逆 relation）
+    # create_database x 4 + update_database x 1（Dependencies self-relation のみ）
     assert actions == [
         "create_database",
         "create_database",
         "create_database",
         "create_database",
-        "update_database",
         "update_database",
     ]
     assert result["workflows_db_id"] == "wf-db-id"
@@ -374,7 +375,9 @@ def test_setup_raises_when_work_items_db_fails():
 
 
 def test_setup_work_items_db_payload_includes_relations():
-    """Work Items DB 作成 payload に Workflow / Blocking Review Issues relation が含まれる"""
+    """Work Items DB 作成 payload に Workflow / Blocking Review Issues relation が含まれる。
+    Blocking Review Issues は dual_property で synced backref を作る形になる
+    （PR #41 Copilot 2 回目指摘で single_property から変更）。"""
     client = _RecordingClient()
     setup_notion_workspace("token", "parent", api_client=client)
 
@@ -382,12 +385,14 @@ def test_setup_work_items_db_payload_includes_relations():
     title_text = wi_payload["title"][0]["text"]["content"]
     assert title_text == WORK_ITEMS_DB_TITLE
     props = wi_payload["properties"]
-    # Workflow relation は Workflows DB を参照
+    # Workflow relation は Workflows DB を参照（single_property のまま）
     assert props["Workflow"]["relation"]["database_id"] == "wf-db-id"
-    # Blocking Review Issues は Review Issues DB を参照
-    assert (
-        props["Blocking Review Issues"]["relation"]["database_id"] == "ri-db-id"
-    )
+    assert "single_property" in props["Workflow"]["relation"]
+    # Blocking Review Issues は dual_property（synced backref）で
+    # Review Issues DB を参照し、synced_property_name で逆方向名を指定
+    blocking = props["Blocking Review Issues"]["relation"]
+    assert blocking["database_id"] == "ri-db-id"
+    assert blocking["dual_property"]["synced_property_name"] == "Blocking Work Items"
     # Status / Phase / Description / Dedupe Key / Operator / Created At / Last Updated
     for key in (
         "Title",
@@ -416,17 +421,22 @@ def test_setup_work_items_dependencies_self_relation_added_after_create():
     assert deps["relation"]["database_id"] == "wi-db-id"
 
 
-def test_setup_review_issues_blocking_work_items_reverse_relation_added():
-    """Work Items DB 作成後、Review Issues DB 側に Blocking Work Items 逆 relation が追加される"""
+def test_setup_does_not_manually_add_blocking_work_items_reverse_relation():
+    """Review Issues DB への `Blocking Work Items` 手動追加は **行わない**。
+    Blocking Review Issues を dual_property で作成することで Notion が synced
+    backref を自動生成するため、別途 update_database を呼ぶと別 relation に
+    なってしまう（PR #41 Copilot 2 回目指摘で削除）。"""
     client = _RecordingClient()
     setup_notion_workspace("token", "parent", api_client=client)
 
-    # 6 回目（index 5）の呼び出しが逆 relation の update であることを確認
-    action, args = client.calls[5]
-    assert action == "update_database"
-    assert args["database_id"] == "ri-db-id"
-    rev = args["payload"]["properties"]["Blocking Work Items"]
-    assert rev["relation"]["database_id"] == "wi-db-id"
+    # update_database 呼び出しは Dependencies の 1 回のみ
+    update_calls = [
+        args for action, args in client.calls if action == "update_database"
+    ]
+    assert len(update_calls) == 1
+    # Dependencies update のみで Blocking Work Items の手動 update は無い
+    assert "Dependencies" in update_calls[0]["payload"]["properties"]
+    assert "Blocking Work Items" not in update_calls[0]["payload"]["properties"]
 
 
 def test_setup_raises_when_response_missing_id(monkeypatch):
@@ -2123,8 +2133,9 @@ def test_setup_workspace_without_scaffold_does_not_create_pages():
     result = setup_notion_workspace("token", "parent", api_client=client)
     # Workflows + PR + Review Issues + Work Items = 4
     assert client.create_database_calls == 4
-    # Dependencies self-relation + Review Issues 逆 relation = 2
-    assert client.update_database_calls == 2
+    # Dependencies self-relation のみ = 1（Blocking Work Items は dual_property
+    # により Notion が自動生成するので HOKUSAI 側からの update は不要）
+    assert client.update_database_calls == 1
     assert client.create_page_calls == []
     assert "scaffold" not in result
 

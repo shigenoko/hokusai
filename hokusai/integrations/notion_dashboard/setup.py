@@ -288,8 +288,11 @@ def _review_issues_db_properties(workflows_db_id: str) -> dict[str, dict[str, An
 # Status enum は要件定義の状態機械（pending → ready → in_progress → done、
 # blocked / skipped / canceled は派生分岐）と完全一致させる。Dependencies は
 # Work Items DB 自身への self-relation、Blocking Review Issues は Review Issues
-# DB への relation。Review Issues DB との相互 relation は Work Items DB 作成
-# 後に Review Issues DB schema を update して張る（順序問題の回避）。
+# DB への **dual_property（synced）relation**。`single_property` を 2 本張ると
+# Notion 上では別々の独立 relation になり「逆参照」が成立しないため、片側を
+# dual_property で作成する形に統一する（PR #41 Copilot 2 回目指摘）。これに
+# より Notion 側で `Blocking Work Items` プロパティが自動的に Review Issues DB
+# 上に作成され、双方向ナビゲーションが可能になる。
 def _work_items_db_properties(
     workflows_db_id: str, review_issues_db_id: str
 ) -> dict[str, dict[str, Any]]:
@@ -325,7 +328,16 @@ def _work_items_db_properties(
         "Blocking Review Issues": {
             "relation": {
                 "database_id": review_issues_db_id,
-                "single_property": {},
+                # dual_property で synced backref を作る。Notion API は
+                # `synced_property_name` を指定すると Review Issues DB 側に
+                # 自動的に逆方向 relation を作成し、片側を更新すると他方に
+                # 反映される（true bidirectional）。`Workflow` 系の relation
+                # では backref が不要だったため single_property を使用するが、
+                # Work Items ↔ Review Issues は ready 判定で相互参照する
+                # ため dual_property を採用する。
+                "dual_property": {
+                    "synced_property_name": "Blocking Work Items",
+                },
             }
         },
         "Dedupe Key": {"rich_text": {}},
@@ -362,39 +374,6 @@ def _add_work_items_dependencies_self_relation(
     except Exception as e:
         logger.warning(
             "Work Items DB の Dependencies（self-relation）追加に失敗: %s: %s",
-            type(e).__name__, str(e),
-        )
-
-
-def _add_review_issues_blocking_work_items_relation(
-    api: NotionAPIClient,
-    review_issues_db_id: str,
-    work_items_db_id: str,
-) -> None:
-    """Review Issues DB → Work Items DB の `Blocking Work Items` 逆 relation を
-    作成後に追加する。Work Items DB → Review Issues DB 方向（Blocking Review
-    Issues）と組み合わせて相互ナビゲートを可能にする。
-
-    Dependencies と同じく warning で継続（Review Issues 側からのナビが効かない
-    だけで、Work Items 側 → Review Issues 側の relation は機能する）。
-    """
-    try:
-        api.update_database(
-            review_issues_db_id,
-            {
-                "properties": {
-                    "Blocking Work Items": {
-                        "relation": {
-                            "database_id": work_items_db_id,
-                            "single_property": {},
-                        }
-                    }
-                }
-            },
-        )
-    except Exception as e:
-        logger.warning(
-            "Review Issues DB の Blocking Work Items 逆 relation 追加に失敗: %s: %s",
             type(e).__name__, str(e),
         )
 
@@ -548,12 +527,11 @@ def setup_notion_workspace(
     # 5. Work Items DB の Dependencies（self-relation）を後付け追加する。
     # Notion API は create_database 時点で自身の id を引けないため、作成後に
     # update_database で database_id を自分自身に指定する形で張る必要がある。
+    # Blocking Review Issues は dual_property で create 時に張っているため、
+    # Review Issues DB 側に `Blocking Work Items` プロパティは Notion が自動
+    # 生成する（旧版では update_database で手動追加していたが、別 relation に
+    # なってしまう問題を回避するため dual_property に統一した）。
     _add_work_items_dependencies_self_relation(api, work_items_db_id)
-
-    # 6. Review Issues DB に Blocking Work Items（逆 relation）を後付け追加する。
-    _add_review_issues_blocking_work_items_relation(
-        api, review_issues_db_id, work_items_db_id
-    )
 
     result: dict[str, Any] = {
         "workflows_db_id": workflows_db_id,
