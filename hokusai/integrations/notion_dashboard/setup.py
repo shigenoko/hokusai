@@ -541,7 +541,7 @@ def setup_notion_workspace(
         "work_items_db_id": work_items_db_id,
     }
 
-    # 7. scaffold（オプトイン）: 標準ドキュメントツリーを作成
+    # 6. scaffold（オプトイン）: 標準ドキュメントツリーを作成
     # DB 作成と異なり、scaffold 失敗は致命扱いしない（DB は既に作成済みのため）。
     # scaffold_notion_workspace は入力検証以外は raise せず、partial state を
     # 返り値に含めるため、ここでは error 用の fallback dict 構築は不要。

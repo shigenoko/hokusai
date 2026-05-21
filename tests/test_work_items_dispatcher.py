@@ -333,3 +333,36 @@ def test_dispatcher_work_item_status_change_requires_status(
     })
     assert result is True
     assert api.calls == []
+
+
+def test_dispatcher_work_item_status_change_skips_when_dedupe_key_and_title_both_missing(
+    store: SQLiteStore, monkeypatch
+):
+    """dedupe_key が無く title も無い場合は同定不能なので skip（誤更新防止）
+    （PR #41 Copilot 4 回目指摘: 空 title で build_dedupe_key を走らせると
+    同一 workflow_id/phase 配下の全 Work Item が同一 dedupe_key に潰れて
+    別 Work Item を誤って更新するリスクがあるため、title 必須に）。"""
+    monkeypatch.setenv("TEST_TOKEN", "secret")
+    monkeypatch.setenv("TEST_DB", "wf-db")
+    monkeypatch.setenv("TEST_WORK_ITEMS_DB", "wi-db")
+
+    cfg = _make_config()
+    cfg.work_items_db_id_env = "TEST_WORK_ITEMS_DB"
+
+    api = _RecordingAPI()
+
+    class _Disp(NotionSyncDispatcher):
+        def _get_api(self):
+            return api  # type: ignore[return-value]
+
+    disp = _Disp(store=store, config=cfg)
+    result = disp.dispatch(EVENT_WORK_ITEM_STATUS_CHANGE, {
+        "workflow_id": "wf-1",
+        "phase": 4,
+        "status": "done",
+        # title も dedupe_key も省略
+    })
+    assert result is True
+    # find_by_dedupe_key も呼ばれないことを確認
+    queries = [c for c in api.calls if c[0] == "query"]
+    assert queries == []

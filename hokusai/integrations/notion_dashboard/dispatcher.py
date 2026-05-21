@@ -619,10 +619,23 @@ class NotionSyncDispatcher:
 
         dedupe_key = payload.get("dedupe_key")
         if not dedupe_key:
+            # dedupe_key 自動生成は title が必須（空文字を許すと
+            # build_dedupe_key の入力が `workflow_id|phase|""` になり、
+            # 同 workflow/phase の全 Work Item が同一 dedupe_key に潰れて
+            # 別 Work Item を誤って更新するリスクがあるため）。PR #41
+            # Copilot 4 回目指摘で title 必須化。
+            title = payload.get("title")
+            if not title:
+                logger.warning(
+                    "work_item_status_change で dedupe_key も title も無いため "
+                    "Work Item を同定できずスキップ: workflow_id=%s, phase=%s",
+                    payload.get("workflow_id"), payload.get("phase"),
+                )
+                return
             dedupe_key = build_dedupe_key(
                 workflow_id=payload.get("workflow_id"),
                 phase=payload.get("phase"),
-                title=str(payload.get("title") or ""),
+                title=str(title),
             )
 
         client = self._get_work_items_client(work_items_db_id)

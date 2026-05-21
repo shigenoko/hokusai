@@ -71,8 +71,11 @@ def extract_work_items(work_plan: str) -> list[dict]:
     numbered_items: list[dict] = []
 
     for raw_line in work_plan.splitlines():
-        # checkbox を優先判定（- [ ] の行も _NUMBERED_PATTERN にマッチする
-        # ケースがあるため）
+        # checkbox を先に判定。`_NUMBERED_PATTERN` は行頭が数字（または heading
+        # prefix + 数字）でないとマッチしないため `- [ ]` 自体は番号 pattern
+        # にはマッチしないが、両形式が同一 markdown 内に混在する場合は
+        # checkbox を優先採用する（より明示的に task と分かるため）という
+        # 全体ロジック上、行単位でも checkbox 判定を先に行う。
         cb_match = _CHECKBOX_PATTERN.match(raw_line)
         if cb_match:
             title = _normalize_title(cb_match.group(1))
