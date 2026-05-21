@@ -648,11 +648,25 @@ class NotionSyncDispatcher:
             # （`workflow_started` ↔ `review_issue_raised` と同じ deferred 戦略。
             # PR #41 Copilot 7 回目指摘で silent drop を防止）。
             workflow_id = payload.get("workflow_id")
-            pending_upsert = (
-                self._count_pending_work_item_upserts_for(workflow_id)
-                if workflow_id
-                else 0
-            )
+            # outbox に同 workflow の work_item_upsert が pending かを inline で
+            # 確認する。専用 helper にすると既存の count 系メソッド群と
+            # boilerplate 重複が増えて SonarCloud 重複行密度を押し上げるため
+            # （PR #41 SonarCloud 5 回目対応）、本処理は 1 箇所からしか呼ばれない
+            # ので inline で済ませる。失敗時は `0` として扱い defer をスキップ
+            # （安全側に倒すと「常に defer」になるが、本質は race 検出なので
+            # 検出不能なら genuine miss 側に倒す）。
+            pending_upsert = 0
+            if workflow_id and self._store is not None:
+                try:
+                    with self._store._connect() as conn:  # type: ignore[attr-defined]
+                        row = conn.execute(
+                            "SELECT COUNT(*) FROM notion_sync_outbox "
+                            "WHERE workflow_id = ? AND event_type = ?",
+                            (workflow_id, "work_item_upsert"),
+                        ).fetchone()
+                        pending_upsert = int(row[0]) if row else 0
+                except Exception:
+                    pending_upsert = 0
             if pending_upsert > 0:
                 raise NotionAPIError(
                     503,
@@ -670,24 +684,6 @@ class NotionSyncDispatcher:
             )
             return
         client.update_status(page_id, str(status))
-
-    def _count_pending_work_item_upserts_for(self, workflow_id: str) -> int:
-        """SQLite outbox 上の `work_item_upsert` 件数を返す（同 workflow_id 限定）。
-
-        `_handle_work_item_status_change` が race condition を検出するために使う。
-        """
-        if self._store is None:
-            return 0
-        try:
-            with self._store._connect() as conn:  # type: ignore[attr-defined]
-                row = conn.execute(
-                    "SELECT COUNT(*) FROM notion_sync_outbox "
-                    "WHERE workflow_id = ? AND event_type = ?",
-                    (workflow_id, "work_item_upsert"),
-                ).fetchone()
-                return int(row[0]) if row else 0
-        except Exception:
-            return 0
 
     def _enqueue_failure(
         self,
