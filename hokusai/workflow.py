@@ -300,9 +300,11 @@ class WorkflowRunner:
             # workflow/phase の全 Work Item で衝突し、別 Work Item を
             # 誤って更新するリスクがある（PR #41 Copilot 5 回目指摘）。
             # title が無ければ dedupe_key を生成せず、idempotency_key の
-            # 末尾は `_missing_title_<workflow_id>_<phase>` のような可視
-            # 値にして outbox 上で identification できるようにする
-            # （dispatch 側の handler が title 必須を再検査して skip する）。
+            # 末尾は `_missing_title_phase<N>` のような可視値にして outbox 上で
+            # identification できるようにする（workflow_id は idempotency_key
+            # 全体の prefix 側 `{wid}:work_item_*:` に既に入るのでここでは
+            # 重複させない）。dispatch 側の handler が title 必須を再検査して
+            # skip する。
             title_val = enriched.get("title")
             if title_val:
                 dkey = build_dedupe_key(
