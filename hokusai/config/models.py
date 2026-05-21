@@ -232,6 +232,29 @@ class NotionDashboardConfig:
 
 
 @dataclass
+class LLMGatewayConfig:
+    """LLM Gateway（送信前 governance layer）設定（#39 / v0.6.0〜）
+
+    docs/hokusai-llm-gateway-requirements.md §13.3 の rollout を段階導入する。
+    Phase 1 (本フィールド導入時点) は step 1（config schema）と step 8a
+    （Claude interceptor）のみ。decision は常に `log` のみで block しない。
+
+    - enabled: Gateway 全体の ON/OFF。False なら interceptor は no-op
+    - dry_run: 送信は行うが decision を「dry-run」として log する評価モード。
+      Phase 1 では `log_only=True` と同じ挙動（block しない）。Phase 5+ で
+      block 候補を試走するときに意味を持つ
+    - log_only: decision を block せず log のみとする（Phase 1 既定 True）。
+      Phase 5+ で False にすると block decision が有効化される
+    - audit_log_enabled: interceptor 通過時に構造化 log entry を残すか
+    """
+
+    enabled: bool = False
+    dry_run: bool = False
+    log_only: bool = True
+    audit_log_enabled: bool = True
+
+
+@dataclass
 class RepositoryConfig:
     """リポジトリ設定（複数リポジトリ対応）"""
 
@@ -316,6 +339,9 @@ class WorkflowConfig:
 
     # Notion メインダッシュボード同期設定
     notion_dashboard: NotionDashboardConfig = field(default_factory=NotionDashboardConfig)
+
+    # LLM Gateway（送信前 governance layer）設定（#39 / v0.6.0〜）
+    llm_gateway: LLMGatewayConfig = field(default_factory=LLMGatewayConfig)
 
     # HOKUSAI Web Dashboard（Operations Console）設定
     web_dashboard: WebDashboardConfig = field(default_factory=WebDashboardConfig)
