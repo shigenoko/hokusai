@@ -273,13 +273,6 @@ def _prepare_implementation(state: WorkflowState) -> tuple[WorkflowState, dict]:
     logger.info("Phase 5 開始: 自動実装")
     state = update_phase_status(state, 5, PhaseStatus.IN_PROGRESS)
 
-    # Work Items DB: Phase 4 で enqueue した Work Item を claim する
-    # （Workgraph Phase 3 / Issue #42）。Phase 5 自動実装で Claude Code が
-    # 取得した事実を Notion 側に反映し、lease を 1 時間張って並列衝突を
-    # 防ぐ。失敗時（タイムアウト / Phase 6 / 7 で revert）は lease を
-    # release しないことで期限切れ再割当を可能にする。
-    _enqueue_work_item_claims(state, claimed_by="claude_code")
-
     # 作業計画の解決（リトライモードの場合はスキップ可能）
     # state に既存の work_plan がある場合も検証し、不正なら他ソースにフォールバック
     if not is_retry:
@@ -313,6 +306,15 @@ def _prepare_implementation(state: WorkflowState) -> tuple[WorkflowState, dict]:
         state = _handle_missing_work_plan(state)
         prep_result["early_return"] = True
         return state, prep_result
+
+    # Work Items DB: Phase 4 で enqueue した Work Item を claim する
+    # （Workgraph Phase 3 / Issue #42）。**work_plan が解決・検証されて
+    # 続行可能になった時点で** Claude Code 取得を Notion 側に反映する。
+    # 失敗時（タイムアウト / Phase 6/7 で revert）は lease を release しない
+    # ことで期限切れ再割当を可能にする（要件 §6.6）。
+    # PR #43 Copilot 1 回目指摘で、_resolve_work_plan 前に呼んでいた配置を
+    # 後段に移動: state["work_plan"] が確定した後に claim する。
+    _enqueue_work_item_claims(state, claimed_by="claude_code")
 
     return state, prep_result
 

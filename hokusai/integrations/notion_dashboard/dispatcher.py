@@ -733,14 +733,21 @@ class NotionSyncDispatcher:
             return
         from .work_items_db import CLAIM_TYPE_AGENT, DEFAULT_LEASE_DURATION_SECONDS
 
+        # lease_duration_seconds は **None / 未指定のみ** DEFAULT にフォール
+        # バックする。`payload.get(...) or DEFAULT` だと payload が明示的に
+        # `0` を送ってきても DEFAULT に潰れて呼び出しミスを隠してしまうため
+        # （PR #43 Copilot 1 回目指摘）、None 判定で分岐し、0 / 負数は
+        # WorkItemsDBClient.claim_work_item 側の ValueError に任せる。
+        raw_duration = payload.get("lease_duration_seconds")
+        if raw_duration is None:
+            lease_duration_seconds = DEFAULT_LEASE_DURATION_SECONDS
+        else:
+            lease_duration_seconds = int(raw_duration)
         client.claim_work_item(
             page_id,
             claimed_by=str(claimed_by),
             claim_type=str(payload.get("claim_type") or CLAIM_TYPE_AGENT),
-            lease_duration_seconds=int(
-                payload.get("lease_duration_seconds")
-                or DEFAULT_LEASE_DURATION_SECONDS
-            ),
+            lease_duration_seconds=lease_duration_seconds,
         )
 
     def _handle_work_item_lease_release(self, payload: dict[str, Any]) -> None:

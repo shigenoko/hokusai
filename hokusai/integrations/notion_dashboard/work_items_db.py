@@ -206,10 +206,11 @@ class WorkItemsDBClient:
     ) -> dict:
         """Work Item に Lease を張って Agent / 人間が claim する。
 
-        既存 lease（active）の上書きはチェックしない。呼び出し側で
-        `should_claim_for_lease()` 等で active lease の有無を事前確認する前提
-        （ready 判定エンジン側で active lease のあるものは ready 対象から除外
-        するので、通常フローでは衝突しない）。
+        既存 lease（active）の上書きは **本 API ではチェックしない**。通常
+        フローでは ready_judgment.compute_ready_state() が active 未期限
+        lease を持つ Work Item を in_progress 相当として扱い、別 Agent が
+        新たに claim 候補に拾わないことで衝突を防ぐ（要件 §4.5）。期限切れ
+        lease や手動 release 後の Work Item を再 claim するのは正常動作。
 
         Args:
             page_id: Notion page id

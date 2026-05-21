@@ -129,7 +129,13 @@ def _has_active_unexpired_lease(work_item: Mapping[str, object]) -> bool:
         expires = datetime.fromisoformat(expires_raw)
     except (ValueError, TypeError):
         return False
-    return expires > datetime.now()
+    # Notion から返る ISO 文字列はタイムゾーン付き（`+00:00` 等）になり
+    # 得るため、tz-aware と tz-naive の混在比較で TypeError にならないよう、
+    # 比較時の `now` は `expires` の tzinfo に揃える（PR #43 Copilot 1
+    # 回目指摘）。`expires.tzinfo is None` のときは従来通り tz-naive
+    # `datetime.now()` で比較する。
+    now = datetime.now(expires.tzinfo) if expires.tzinfo else datetime.now()
+    return expires > now
 
 
 def _has_unblocking_dependency(

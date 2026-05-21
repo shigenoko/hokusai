@@ -314,3 +314,31 @@ def test_active_lease_overrides_dependency_ready():
     lookup = {"dep-1": {"status": "done"}}
     # 依存全 done でも active lease 優先 → in_progress
     assert compute_ready_state(wi, work_items_by_page_id=lookup) == "in_progress"
+
+
+def test_active_lease_with_tz_aware_expires_at_does_not_raise():
+    """lease_expires_at が tz-aware ISO（`...+00:00`）でも tz mismatch で
+    TypeError にならない（PR #43 Copilot 1 回目指摘）"""
+    from datetime import datetime, timedelta, timezone
+
+    future_utc = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    wi = {
+        "status": "pending",
+        "lease_status": "active",
+        "lease_expires_at": future_utc,
+    }
+    # 未期限なので in_progress を返す（TypeError で落ちないことが主目的）
+    assert compute_ready_state(wi) == "in_progress"
+
+
+def test_active_lease_with_tz_aware_expired_returns_pending():
+    """tz-aware で past の Expires At も期限切れ扱い → 通常判定"""
+    from datetime import datetime, timedelta, timezone
+
+    past_utc = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    wi = {
+        "status": "pending",
+        "lease_status": "active",
+        "lease_expires_at": past_utc,
+    }
+    assert compute_ready_state(wi) == "pending"
