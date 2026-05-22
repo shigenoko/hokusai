@@ -114,13 +114,15 @@ _WORKFLOW_GATES_DB_DESCRIPTION = (
     "workflow 進行条件を gate として管理します。dedupe_key は workflow_id + "
     "gate_type + required_by_phase + work_item_dedupe_key の sha256 hash 先頭 "
     "16 文字。Gate Type / Status / Required By Phase / Workflow / Pull Request "
-    "/ Work Item / Review Issue / Decision Reason / Due At / Last Updated を "
-    "HOKUSAI が書き込みます。Created At は新規作成時のみ書き込み Notion 側で "
-    "初回作成時刻を温存します。Status の手動編集（pending → open による承認 "
-    "等）は人間運用判断として HOKUSAI 上書き対象外です。pending / blocked の "
-    "gate がある対象 workflow は先に進めません（要件 §7.5）。詳細は GitHub "
-    "Issue #44 と HOKUSAI 運用ガイド（docs/notion-dashboard-operation-guide.md）"
-    "を参照。"
+    "/ Work Item / Review Issue / Approver / Decision Reason / Due At / "
+    "Last Updated を HOKUSAI が書き込みます（upsert_gate および update_status "
+    "の両方で Approver / Decision Reason を書き込み audit trail として残す、"
+    "要件 §7.5）。Created At は新規作成時のみ書き込み Notion 側で初回作成 "
+    "時刻を温存します。Status の手動編集（pending → open による承認等）は "
+    "人間運用判断として HOKUSAI 上書き対象外です。pending / blocked の gate "
+    "がある対象 workflow は先に進めません（要件 §7.5）。詳細は GitHub Issue "
+    "#44 と HOKUSAI 運用ガイド（docs/notion-dashboard-operation-guide.md）を "
+    "参照。"
 )
 
 _REVIEW_ISSUES_DB_DESCRIPTION = (

@@ -900,21 +900,39 @@ class NotionSyncDispatcher:
                 )
                 return
 
-        # **workflow_id 必須化**（PR #45 Copilot 3 回目指摘）: dedupe_key が
-        # 未指定で workflow_id も無い場合、build_dedupe_key が workflow_id を
-        # 空文字扱いにし、別 workflow 間で dedupe_key が衝突して誤った gate を
-        # 上書きするリスクがあるため、dedupe_key 自動生成パスでは workflow_id
-        # を必須にする。明示 dedupe_key 指定パスは呼び出し側が衝突回避責任を
-        # 持つ前提で skip しない。
+        # **workflow_id 必須化 + 型検証**（PR #45 Copilot 3/4 回目指摘）:
+        # dedupe_key が未指定で workflow_id も無い場合、build_dedupe_key が
+        # workflow_id を空文字扱いにし、別 workflow 間で dedupe_key が衝突
+        # するリスクがあるため、dedupe_key 自動生成パスでは workflow_id を
+        # 必須にする。さらに workflow_id / work_item_dedupe_key が str 以外
+        # （list/dict 等）だと build_dedupe_key の join で TypeError 経由
+        # poison message 化するため、型も検証する。明示 dedupe_key 指定パスは
+        # 呼び出し側が衝突回避責任を持つ前提で skip しない。
         workflow_id = payload.get("workflow_id")
-        if not dedupe_key and not workflow_id:
-            logger.warning(
-                "workflow_gate_upsert で dedupe_key も workflow_id も無いため "
-                "別 workflow 間 dedupe_key 衝突のリスクがありスキップ: "
-                "gate_type=%s, required_by_phase=%s",
-                gate_type, required_by_phase,
-            )
-            return
+        if not dedupe_key:
+            if not workflow_id:
+                logger.warning(
+                    "workflow_gate_upsert で dedupe_key も workflow_id も無い "
+                    "ため別 workflow 間 dedupe_key 衝突のリスクがありスキップ: "
+                    "gate_type=%s, required_by_phase=%s",
+                    gate_type, required_by_phase,
+                )
+                return
+            if not isinstance(workflow_id, str):
+                logger.warning(
+                    "workflow_gate_upsert で workflow_id が str でないため "
+                    "スキップ: %r",
+                    workflow_id,
+                )
+                return
+            raw_wi_dkey = payload.get("work_item_dedupe_key")
+            if raw_wi_dkey is not None and not isinstance(raw_wi_dkey, str):
+                logger.warning(
+                    "workflow_gate_upsert で work_item_dedupe_key が str で "
+                    "ないためスキップ: %r",
+                    raw_wi_dkey,
+                )
+                return
 
         client = self._get_workflow_gates_client(workflow_gates_db_id)
         client.upsert_gate(
@@ -997,15 +1015,31 @@ class NotionSyncDispatcher:
                     gate_type,
                 )
                 return
-            # **workflow_id 必須化**（PR #45 Copilot 3 回目指摘、upsert と同じ
-            # 理由）: dedupe_key 自動生成パスで workflow_id が無いと別
-            # workflow 間で衝突して誤更新するリスク。明示 dedupe_key パスは
-            # 呼び出し側責任で衝突回避するため skip しない。
+            # **workflow_id 必須化 + 型検証**（PR #45 Copilot 3/4 回目指摘、
+            # upsert と同じ理由）: dedupe_key 自動生成パスで workflow_id が
+            # 無いと別 workflow 間衝突。さらに workflow_id /
+            # work_item_dedupe_key が str 以外だと build_dedupe_key の join
+            # で TypeError → poison message 化するため、型も検証する。
             workflow_id_for_key = payload.get("workflow_id")
             if not workflow_id_for_key:
                 logger.warning(
                     "workflow_gate_status_change で dedupe_key も workflow_id "
                     "も無いため別 workflow 間衝突のリスクがありスキップ"
+                )
+                return
+            if not isinstance(workflow_id_for_key, str):
+                logger.warning(
+                    "workflow_gate_status_change で workflow_id が str で "
+                    "ないためスキップ: %r",
+                    workflow_id_for_key,
+                )
+                return
+            raw_wi_dkey = payload.get("work_item_dedupe_key")
+            if raw_wi_dkey is not None and not isinstance(raw_wi_dkey, str):
+                logger.warning(
+                    "workflow_gate_status_change で work_item_dedupe_key が "
+                    "str でないためスキップ: %r",
+                    raw_wi_dkey,
                 )
                 return
             # required_by_phase の型検証（upsert と同じ）

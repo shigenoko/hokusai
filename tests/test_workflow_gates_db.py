@@ -19,6 +19,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from hokusai.integrations.notion_dashboard.client import NotionAPIError
 from hokusai.integrations.notion_dashboard.workflow_gates_db import (
     BLOCKING_GATE_STATUSES,
     DEFAULT_GATE_STATUS,
@@ -288,3 +289,67 @@ def test_find_by_dedupe_key_returns_none_when_no_results():
     api = _FakeAPI()  # 空 results
     client = WorkflowGatesDBClient(api=api, database_id="wg-db")
     assert client.find_by_dedupe_key("nonexistent") is None
+
+
+# ---------------------------------------------------------------------------
+# property_not_found リトライ（_property_pruning helper 経由）
+# ---------------------------------------------------------------------------
+
+
+class _FakeAPIWithMissingProperty:
+    """create_page で 1 回だけ property_not_found を返す fake。
+    既存 review_issues_db / work_items_db のテストと同じパターン
+    （PR #45 Copilot 4 回目指摘で workflow_gates_db にも同等テストを追加）。"""
+
+    def __init__(self, missing_property: str):
+        self._missing_property = missing_property
+        self.create_calls: list[dict] = []
+        self.update_calls: list[tuple[str, dict]] = []
+        self.query_calls: list[tuple[str, dict | None]] = []
+        self._first_create_call = True
+
+    def query_database(self, database_id: str, *, filter_: dict | None = None) -> dict:
+        self.query_calls.append((database_id, filter_))
+        return {"results": []}
+
+    def create_page(self, payload: dict) -> dict:
+        self.create_calls.append(copy.deepcopy(payload))
+        if (
+            self._first_create_call
+            and self._missing_property in payload["properties"]
+        ):
+            self._first_create_call = False
+            raise NotionAPIError(
+                400,
+                f'"{self._missing_property}" is not a property that exists.',
+                code="validation_error",
+            )
+        return {"id": "new-gate-id", "properties": payload["properties"]}
+
+    def update_page(self, page_id: str, payload: dict) -> dict:
+        self.update_calls.append((page_id, copy.deepcopy(payload)))
+        return {"id": page_id, "properties": payload["properties"]}
+
+
+def test_property_not_found_retry_drops_missing_property():
+    """schema 未追加環境で Notion 側にプロパティが存在しなくても、該当
+    プロパティを除外して再試行することで同期が継続する。"""
+    api = _FakeAPIWithMissingProperty(missing_property="Decision Reason")
+    client = WorkflowGatesDBClient(api=api, database_id="wg-db")
+    result = client.upsert_gate(
+        name="Phase 5 approval",
+        gate_type=GATE_TYPE_HUMAN_APPROVAL,
+        workflow_id="wf-1",
+        required_by_phase=5,
+        decision_reason="will be dropped",
+    )
+    # 2 回 create_page される（1 回目で property_not_found、2 回目は除外後）
+    assert len(api.create_calls) == 2
+    # 1 回目は Decision Reason を含む
+    assert "Decision Reason" in api.create_calls[0]["properties"]
+    # 2 回目は Decision Reason が除外されている
+    assert "Decision Reason" not in api.create_calls[1]["properties"]
+    # 他のプロパティは温存される
+    assert "Name" in api.create_calls[1]["properties"]
+    assert "Gate Type" in api.create_calls[1]["properties"]
+    assert result["id"] == "new-gate-id"
