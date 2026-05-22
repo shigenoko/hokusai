@@ -19,7 +19,6 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from hokusai.integrations.notion_dashboard.client import NotionAPIError
 from hokusai.integrations.notion_dashboard.workflow_gates_db import (
     BLOCKING_GATE_STATUSES,
     DEFAULT_GATE_STATUS,
@@ -32,7 +31,6 @@ from hokusai.integrations.notion_dashboard.workflow_gates_db import (
     GATE_TYPE_CI_PASSED,
     GATE_TYPE_DESIGN_APPROVED,
     GATE_TYPE_HUMAN_APPROVAL,
-    GATE_TYPE_SECURITY_APPROVED,
     WorkflowGatesDBClient,
     build_dedupe_key,
 )

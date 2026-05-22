@@ -28,6 +28,7 @@ from .work_items_db import (
     STATUS_READY,
     STATUS_SKIPPED,
 )
+from .workflow_gates_db import BLOCKING_GATE_STATUSES
 
 # Review Issue の status enum。review_issues_db.STATUS_OPEN を直接参照する
 # ことで、Review Issues DB 側で enum 値が変わったときに自動追従する
@@ -50,6 +51,7 @@ def compute_ready_state(
     *,
     work_items_by_page_id: Mapping[str, Mapping[str, object]] | None = None,
     review_issues_by_page_id: Mapping[str, Mapping[str, object]] | None = None,
+    gates_by_page_id: Mapping[str, Mapping[str, object]] | None = None,
 ) -> str:
     """1 件の Work Item に対する判定 status を返す。
 
@@ -59,15 +61,22 @@ def compute_ready_state(
                 "status": str,
                 "dependency_page_ids": list[str],
                 "blocking_review_issue_page_ids": list[str],
+                "gate_page_ids": list[str],  # 関連 Workflow Gate page_ids（Phase 4 / #44）
             }
         work_items_by_page_id: 依存 Work Item を page_id で引ける lookup
         review_issues_by_page_id: blocking Review Issue を page_id で引ける
             lookup
+        gates_by_page_id: 関連 Workflow Gate を page_id で引ける lookup。
+            未指定なら gate チェックはスキップ（既存呼び出しの後方互換）。
+            指定された場合、`Lease Status == pending / blocked` の gate が
+            紐付いていれば blocked を返す（要件 §7.5）。
 
     Returns:
         ready / blocked / pending / (元の status をそのまま) のいずれか。
         - 現 status が in_progress / done / skipped / canceled なら元のまま
           を返す（再判定しない）
+        - active 未期限 lease があれば in_progress 相当（Phase 3 / #42）
+        - 関連 gate が pending/blocked なら blocked（Phase 4 / #44 / §7.5）
         - 依存に「done でないもの」または blocker に「open のもの」があれば
           blocked
         - 依存・blocker が一切無ければ pending を温存（依存追加前の初期状態
@@ -86,6 +95,14 @@ def compute_ready_state(
     # 防ぐ）。期限切れの active lease は無視（再割当可能な状態）。
     if _has_active_unexpired_lease(work_item):
         return STATUS_IN_PROGRESS
+
+    # **Workflow Gate check（Workgraph Phase 4 / Issue #44 / 要件 §7.5）**:
+    # 関連 gate のいずれかが `pending` または `blocked` なら、対象 Work Item は
+    # 先に進めない。`open` / `not_required` / `expired` / `canceled` は阻害
+    # しない（expired は再 claim 可能、canceled は不要扱い）。
+    gate_ids = _as_list(work_item.get("gate_page_ids"))
+    if gate_ids and _has_blocking_gate(gate_ids, gates_by_page_id):
+        return STATUS_BLOCKED
 
     dep_ids = _as_list(work_item.get("dependency_page_ids"))
     block_ids = _as_list(work_item.get("blocking_review_issue_page_ids"))
@@ -136,6 +153,39 @@ def _has_active_unexpired_lease(work_item: Mapping[str, object]) -> bool:
     # `datetime.now()` で比較する。
     now = datetime.now(expires.tzinfo) if expires.tzinfo else datetime.now()
     return expires > now
+
+
+def _has_blocking_gate(
+    gate_ids: list[str],
+    gates_by_page_id: Mapping[str, Mapping[str, object]] | None,
+) -> bool:
+    """関連 gate のいずれかが pending / blocked なら True を返す
+    （Workgraph Phase 4 / Issue #44 / 要件 §7.5）。
+
+    判定:
+    - gate_ids が空 → 常に False（gate 不要）
+    - gates_by_page_id 未指定 → 保守的に True を返す（gate 状態が分から
+      ない場合、進めるのは危険なので blocked 側に倒す）
+    - gate が lookup に無い → 状態不明 → True（blocked 扱い）
+    - lookup の gate の `status` が pending / blocked なら True
+    - その他（open / not_required / expired / canceled）は False
+    """
+    if not gate_ids:
+        return False
+    if gates_by_page_id is None:
+        # gate lookup 未提供 = ready 判定エンジンに gate 情報を渡していない
+        # 場合の保守的扱い: gate が紐付いているのに状態が分からないなら
+        # 「先に進めない」側に倒す（誤って ready に昇格させない）。
+        return True
+    for pid in gate_ids:
+        gate = gates_by_page_id.get(pid)
+        if gate is None:
+            # lookup に無い → 状態不明 → 阻害扱い
+            return True
+        status = str(gate.get("status") or "").lower()
+        if status in BLOCKING_GATE_STATUSES:
+            return True
+    return False
 
 
 def _has_unblocking_dependency(

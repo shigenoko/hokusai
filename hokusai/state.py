@@ -212,6 +212,24 @@ class WorkflowState(TypedDict):
     # 重複 enqueue は Notion 側の dedupe_key で抑止する。
     pending_work_items: list
 
+    # === Workflow Gates DB 同期キュー（Issue #44 / Workgraph Phase 4 / v0.9.0） ===
+    # 各 Phase node が gate（human_approval / ci_passed / design_approved 等）
+    # を Notion Workflow Gates DB へ送るためのキュー。各要素は dispatcher の
+    # workflow_gate_upsert / workflow_gate_status_change payload と同形式。
+    # `_event` marker（"status_change" 等）で event 名を切り替える drain
+    # パターンは Work Items DB と同じ。workflow.py の drain で送信後に clear。
+    pending_workflow_gates: list
+
+    # === Workflow Gate enforcement フラグ（Issue #44 / Workgraph Phase 4） ===
+    # 外部システム（Operations Console / CI hook / 人間オペレーター）が gate を
+    # 確認した結果、対象 workflow が pending / blocked な gate を持つと判定
+    # された場合、その理由を文字列で記録する。Phase 5 implement node は開始時
+    # に本フィールドをチェックし、None でなければ waiting_for_human で停止する。
+    # MVP では本フィールドの設定は外部 caller（hokusai CLI 等）の責任で、
+    # HOKUSAI 内部で自動更新するロジックは Phase 4 の後続段階で追加予定。
+    # 値が None / 空文字 なら gate enforcement は no-op。
+    workflow_gates_blocked_reason: Optional[str]
+
     # === 実行者（Issue #21 / v0.4.8〜） ===
     # workflow_started 時に resolve_operator_name() で確定し、それ以降の
     # 同期イベント（review_issue_raised 等）は state 上の値を再利用する。
@@ -388,6 +406,8 @@ def create_initial_state(
         final_review_by_repo={},
         pending_review_issues=[],
         pending_work_items=[],
+        pending_workflow_gates=[],
+        workflow_gates_blocked_reason=None,
         operator=None,
         research_result=None,
         design_result=None,

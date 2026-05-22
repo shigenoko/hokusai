@@ -230,6 +230,10 @@ class NotionDashboardConfig:
     # 保持する env 変数名。未設定なら work_item 系イベントは Notion 同期せず
     # no-op で drain（後方互換）。
     work_items_db_id_env: str = "HOKUSAI_NOTION_WORK_ITEMS_DB_ID"
+    # Workgraph Phase 4 / Issue #44 / v0.9.0〜。Workflow Gates DB の
+    # database_id を保持する env 変数名。未設定なら gate 系イベントは
+    # Notion 同期せず no-op で drain（後方互換）。
+    workflow_gates_db_id_env: str = "HOKUSAI_NOTION_WORKFLOW_GATES_DB_ID"
     sync_outbox: NotionSyncOutboxConfig = field(default_factory=NotionSyncOutboxConfig)
     retry: NotionSyncRetryConfig = field(default_factory=NotionSyncRetryConfig)
     rate_limit: NotionSyncRateLimitConfig = field(default_factory=NotionSyncRateLimitConfig)
