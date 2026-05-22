@@ -248,10 +248,10 @@ class WorkflowsDBClient:
             return None
         try:
             return self._find_page_id(workflow_id)
-        except Exception as e:
-            logger.debug(
-                f"find_workflow_page_id 失敗: workflow_id={workflow_id}, error={e}"
-            )
+        except Exception:
+            # 失敗内容は `_find_page_id` 側 logger.debug で既に出力済み。
+            # ここで再度 log を出すとログノイズになるので raise を握り潰すだけ
+            # （wrapper の責務は「例外を抑制して None を返す」のみ）。
             return None
 
     def _find_page_id(self, workflow_id: str) -> str | None:
