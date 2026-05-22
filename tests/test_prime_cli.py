@@ -786,7 +786,7 @@ def test_prime_injects_workgraph_context_when_all_db_ids_set(
     cfg.notion_dashboard.review_issues_db_id_env = "TEST_REVIEW_ISSUES_DB"
     cfg.notion_dashboard.workflow_gates_db_id_env = "TEST_WORKFLOW_GATES_DB"
 
-    _FakeAPI, _FakeWFClient, _FakeMemClient = _make_baseline_workgraph_fakes()
+    fake_api, fake_wf_client, fake_mem_client = _make_baseline_workgraph_fakes()
 
     class _FakeWIClient:
         def __init__(self, *, api, database_id):
@@ -812,7 +812,7 @@ def test_prime_injects_workgraph_context_when_all_db_ids_set(
         def list_pending_gates_for_workflow(self, page_id, **kwargs):
             return [{"id": "g-1", "properties": {"Name": {"title": [{"text": {"content": "Sec"}}]}, "Status": {"select": {"name": "pending"}}}}]
 
-    _apply_baseline_workgraph_patches(monkeypatch, _FakeAPI, _FakeWFClient, _FakeMemClient)
+    _apply_baseline_workgraph_patches(monkeypatch, fake_api, fake_wf_client, fake_mem_client)
     monkeypatch.setattr(
         "hokusai.integrations.notion_dashboard.work_items_db.WorkItemsDBClient", _FakeWIClient,
     )
@@ -851,9 +851,9 @@ def test_prime_skips_workgraph_context_when_db_ids_unset(
     cfg.notion_dashboard.review_issues_db_id_env = "TEST_REVIEW_ISSUES_DB"
     cfg.notion_dashboard.workflow_gates_db_id_env = "TEST_WORKFLOW_GATES_DB"
 
-    _FakeAPI, _FakeWFClient, _FakeMemClient = _make_baseline_workgraph_fakes()
+    fake_api, fake_wf_client, fake_mem_client = _make_baseline_workgraph_fakes()
     # 各 sub client は monkeypatch しない（呼ばれたらテスト fail）
-    _apply_baseline_workgraph_patches(monkeypatch, _FakeAPI, _FakeWFClient, _FakeMemClient)
+    _apply_baseline_workgraph_patches(monkeypatch, fake_api, fake_wf_client, fake_mem_client)
 
     args = _Args(workflow_id="wf-1", phase=None, memory_types=None, output="json")
     with redirect_stdout(out), redirect_stderr(err):
