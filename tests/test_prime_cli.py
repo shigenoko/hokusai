@@ -45,6 +45,7 @@ def _make_config(
             enabled=enabled,
             api_token_env="TEST_API_TOKEN",
             project_memory_db_id_env="TEST_MEMORY_DB",
+            workflows_db_id_env="TEST_WORKFLOWS_DB",
             rate_limit=NotionSyncRateLimitConfig(
                 requests_per_second=100, debounce_ms=0
             ),
@@ -348,3 +349,329 @@ def test_prime_passes_types_filter_to_client(tmp_path, monkeypatch, captured):
         rc = _handle_prime(args, cfg)
     assert rc == 0
     assert captured_types == [["project_rule", "avoidance"]]
+
+
+# ---------------------------------------------------------------------------
+# handover_note 世代遡及（Workgraph Phase 7 / Issue #52 / 要件 §8.4）
+# ---------------------------------------------------------------------------
+
+
+def test_prime_injects_handover_notes_via_supersedes_chain(
+    tmp_path, monkeypatch, captured
+):
+    """Supersedes を辿って旧 workflow の active handover_note を memories に append"""
+    out, err = captured
+    cfg = _make_config(tmp_path)
+    _seed_workflow(cfg, profile_name="acme")
+    monkeypatch.setenv("TEST_API_TOKEN", "t")
+    monkeypatch.setenv("TEST_MEMORY_DB", "pm-db")
+    monkeypatch.setenv("TEST_WORKFLOWS_DB", "wf-db")
+
+    class _FakeWFClient:
+        def __init__(self, *, api, database_id):
+            pass
+
+        def find_workflow_page_id(self, workflow_id):
+            return "wf-page-current"
+
+        def get_supersedes(self, page_id):
+            # 1 世代: current → prior
+            if page_id == "wf-page-current":
+                return ["wf-page-prior"]
+            return []
+
+    class _FakeMemClient:
+        def __init__(self, *, api, database_id):
+            pass
+
+        def list_active_memories(self, *, profile, phase, types, **kwargs):
+            return [
+                {"id": "m-base", "properties": {"Name": {"title": [{"text": {"content": "Base"}}]}, "Type": {"select": {"name": "project_rule"}}}},
+            ]
+
+        def find_handover_notes_for_workflow(self, page_id, *, profile=None, **kwargs):
+            assert page_id == "wf-page-prior"
+            assert profile == "acme"
+            return [
+                {"id": "m-handover", "properties": {"Name": {"title": [{"text": {"content": "Handover"}}]}, "Type": {"select": {"name": "handover_note"}}}},
+            ]
+
+    class _FakeAPI:
+        def __init__(self, *a, **kw):
+            pass
+
+    monkeypatch.setattr(
+        "hokusai.integrations.notion_dashboard.client.NotionAPIClient", _FakeAPI
+    )
+    monkeypatch.setattr(
+        "hokusai.integrations.notion_dashboard.project_memory_db.ProjectMemoryDBClient",
+        _FakeMemClient,
+    )
+    monkeypatch.setattr(
+        "hokusai.integrations.notion_dashboard.workflows_db.WorkflowsDBClient",
+        _FakeWFClient,
+    )
+
+    args = _Args(workflow_id="wf-1", phase=None, memory_types=None, output="json")
+    with redirect_stdout(out), redirect_stderr(err):
+        rc = _handle_prime(args, cfg)
+    assert rc == 0
+    payload = json.loads(out.getvalue())
+    ids = [m["id"] for m in payload["memories"]]
+    assert ids == ["m-base", "m-handover"]
+
+
+def test_prime_traverses_multiple_supersedes_generations(
+    tmp_path, monkeypatch, captured
+):
+    """A → A' → B のような多世代 chain で深さ 3 まで辿る"""
+    out, err = captured
+    cfg = _make_config(tmp_path)
+    _seed_workflow(cfg)
+    monkeypatch.setenv("TEST_API_TOKEN", "t")
+    monkeypatch.setenv("TEST_MEMORY_DB", "pm-db")
+    monkeypatch.setenv("TEST_WORKFLOWS_DB", "wf-db")
+
+    chain_map = {
+        "wf-page-current": ["wf-page-gen2"],
+        "wf-page-gen2": ["wf-page-gen3"],
+        "wf-page-gen3": [],
+    }
+    visited_handover: list[str] = []
+
+    class _FakeWFClient:
+        def __init__(self, *, api, database_id):
+            pass
+
+        def find_workflow_page_id(self, workflow_id):
+            return "wf-page-current"
+
+        def get_supersedes(self, page_id):
+            return chain_map.get(page_id, [])
+
+    class _FakeMemClient:
+        def __init__(self, *, api, database_id):
+            pass
+
+        def list_active_memories(self, **kwargs):
+            return []
+
+        def find_handover_notes_for_workflow(self, page_id, **kwargs):
+            visited_handover.append(page_id)
+            return [
+                {"id": f"m-{page_id}", "properties": {"Type": {"select": {"name": "handover_note"}}}},
+            ]
+
+    class _FakeAPI:
+        def __init__(self, *a, **kw):
+            pass
+
+    monkeypatch.setattr(
+        "hokusai.integrations.notion_dashboard.client.NotionAPIClient", _FakeAPI
+    )
+    monkeypatch.setattr(
+        "hokusai.integrations.notion_dashboard.project_memory_db.ProjectMemoryDBClient",
+        _FakeMemClient,
+    )
+    monkeypatch.setattr(
+        "hokusai.integrations.notion_dashboard.workflows_db.WorkflowsDBClient",
+        _FakeWFClient,
+    )
+
+    args = _Args(workflow_id="wf-1", phase=None, memory_types=None, output="json")
+    with redirect_stdout(out), redirect_stderr(err):
+        rc = _handle_prime(args, cfg)
+    assert rc == 0
+    # gen2 / gen3 を順番に訪問（current 自身は対象外）
+    assert visited_handover == ["wf-page-gen2", "wf-page-gen3"]
+
+
+def test_prime_skips_handover_lookup_when_workflows_db_id_unset(
+    tmp_path, monkeypatch, captured
+):
+    """Workflows DB ID 未設定なら handover_note 経路を skip（既存 prime 動作維持）"""
+    out, err = captured
+    cfg = _make_config(tmp_path)
+    _seed_workflow(cfg)
+    monkeypatch.setenv("TEST_API_TOKEN", "t")
+    monkeypatch.setenv("TEST_MEMORY_DB", "pm-db")
+    monkeypatch.delenv("TEST_WORKFLOWS_DB", raising=False)
+
+    handover_calls: list = []
+
+    class _FakeWFClient:
+        def __init__(self, *, api, database_id):
+            handover_calls.append("wf_client_created")
+
+        def find_workflow_page_id(self, workflow_id):
+            handover_calls.append("find_page")
+            return None
+
+        def get_supersedes(self, page_id):
+            return []
+
+    class _FakeMemClient:
+        def __init__(self, *, api, database_id):
+            pass
+
+        def list_active_memories(self, **kwargs):
+            return []
+
+    class _FakeAPI:
+        def __init__(self, *a, **kw):
+            pass
+
+    monkeypatch.setattr(
+        "hokusai.integrations.notion_dashboard.client.NotionAPIClient", _FakeAPI
+    )
+    monkeypatch.setattr(
+        "hokusai.integrations.notion_dashboard.project_memory_db.ProjectMemoryDBClient",
+        _FakeMemClient,
+    )
+    monkeypatch.setattr(
+        "hokusai.integrations.notion_dashboard.workflows_db.WorkflowsDBClient",
+        _FakeWFClient,
+    )
+
+    args = _Args(workflow_id="wf-1", phase=None, memory_types=None, output="json")
+    with redirect_stdout(out), redirect_stderr(err):
+        rc = _handle_prime(args, cfg)
+    assert rc == 0
+    # WorkflowsDBClient は生成すらされない
+    assert handover_calls == []
+
+
+def test_prime_handover_lookup_avoids_cycles(
+    tmp_path, monkeypatch, captured
+):
+    """Supersedes が環状（A → B → A）でも無限ループしない"""
+    out, err = captured
+    cfg = _make_config(tmp_path)
+    _seed_workflow(cfg)
+    monkeypatch.setenv("TEST_API_TOKEN", "t")
+    monkeypatch.setenv("TEST_MEMORY_DB", "pm-db")
+    monkeypatch.setenv("TEST_WORKFLOWS_DB", "wf-db")
+
+    visited: list[str] = []
+
+    class _FakeWFClient:
+        def __init__(self, *, api, database_id):
+            pass
+
+        def find_workflow_page_id(self, workflow_id):
+            return "wf-page-A"
+
+        def get_supersedes(self, page_id):
+            # A → B → A の環状参照
+            if page_id == "wf-page-A":
+                return ["wf-page-B"]
+            return ["wf-page-A"]  # B → A（環状）
+
+    class _FakeMemClient:
+        def __init__(self, *, api, database_id):
+            pass
+
+        def list_active_memories(self, **kwargs):
+            return []
+
+        def find_handover_notes_for_workflow(self, page_id, **kwargs):
+            visited.append(page_id)
+            return []
+
+    class _FakeAPI:
+        def __init__(self, *a, **kw):
+            pass
+
+    monkeypatch.setattr(
+        "hokusai.integrations.notion_dashboard.client.NotionAPIClient", _FakeAPI
+    )
+    monkeypatch.setattr(
+        "hokusai.integrations.notion_dashboard.project_memory_db.ProjectMemoryDBClient",
+        _FakeMemClient,
+    )
+    monkeypatch.setattr(
+        "hokusai.integrations.notion_dashboard.workflows_db.WorkflowsDBClient",
+        _FakeWFClient,
+    )
+
+    args = _Args(workflow_id="wf-1", phase=None, memory_types=None, output="json")
+    with redirect_stdout(out), redirect_stderr(err):
+        rc = _handle_prime(args, cfg)
+    assert rc == 0
+    # A は visited（current 自身）には含まれないが、chain では B のみ訪問して環状で停止
+    assert visited == ["wf-page-B"]
+
+
+def test_prime_dedupes_overlapping_memories():
+    """_merge_memories_dedup が id 重複を排除する（page id ベース）"""
+    from hokusai.cli_main import _merge_memories_dedup
+
+    base = [
+        {"id": "m1", "properties": {}},
+        {"id": "m2", "properties": {}},
+    ]
+    extra = [
+        {"id": "m2", "properties": {}},  # 重複
+        {"id": "m3", "properties": {}},
+    ]
+    result = _merge_memories_dedup(base, extra)
+    assert [m["id"] for m in result] == ["m1", "m2", "m3"]
+
+
+def test_prime_skips_handover_when_type_filter_excludes_it(
+    tmp_path, monkeypatch, captured
+):
+    """--type で handover_note を含めない場合は世代遡及自体を skip"""
+    out, err = captured
+    cfg = _make_config(tmp_path)
+    _seed_workflow(cfg)
+    monkeypatch.setenv("TEST_API_TOKEN", "t")
+    monkeypatch.setenv("TEST_MEMORY_DB", "pm-db")
+    monkeypatch.setenv("TEST_WORKFLOWS_DB", "wf-db")
+
+    handover_called: list = []
+
+    class _FakeWFClient:
+        def __init__(self, *, api, database_id):
+            handover_called.append("ctor")
+
+        def find_workflow_page_id(self, workflow_id):
+            return "wf-page"
+
+        def get_supersedes(self, page_id):
+            return []
+
+    class _FakeMemClient:
+        def __init__(self, *, api, database_id):
+            pass
+
+        def list_active_memories(self, **kwargs):
+            return []
+
+    class _FakeAPI:
+        def __init__(self, *a, **kw):
+            pass
+
+    monkeypatch.setattr(
+        "hokusai.integrations.notion_dashboard.client.NotionAPIClient", _FakeAPI
+    )
+    monkeypatch.setattr(
+        "hokusai.integrations.notion_dashboard.project_memory_db.ProjectMemoryDBClient",
+        _FakeMemClient,
+    )
+    monkeypatch.setattr(
+        "hokusai.integrations.notion_dashboard.workflows_db.WorkflowsDBClient",
+        _FakeWFClient,
+    )
+
+    args = _Args(
+        workflow_id="wf-1",
+        phase=None,
+        memory_types=["project_rule"],  # handover_note を除外
+        output="json",
+    )
+    with redirect_stdout(out), redirect_stderr(err):
+        rc = _handle_prime(args, cfg)
+    assert rc == 0
+    # WorkflowsDBClient は生成すらされない
+    assert handover_called == []

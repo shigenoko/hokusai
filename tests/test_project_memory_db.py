@@ -720,6 +720,80 @@ def test_list_active_memories_returns_empty_on_first_page_failure():
     assert result == []
 
 
+def test_find_handover_notes_for_workflow_returns_filtered_pages():
+    """Workflow contains で filter された handover_note を返す（Issue #52 / §8.4）"""
+    pages = [[
+        _make_memory_page(
+            page_id="m1",
+            name="Handover A",
+            memory_type=MEMORY_TYPE_HANDOVER_NOTE,
+        ),
+        _make_memory_page(
+            page_id="m2",
+            name="Handover B",
+            memory_type=MEMORY_TYPE_HANDOVER_NOTE,
+        ),
+    ]]
+    api = _PaginatedFakeAPI(pages)
+    client = ProjectMemoryDBClient(api=api, database_id="pm-db")
+    result = client.find_handover_notes_for_workflow("wf-prior-page-id")
+    assert [m["id"] for m in result] == ["m1", "m2"]
+    # filter に Status=active / Type=handover_note / Workflow relation が含まれる
+    call_filter = api.query_calls[0]["filter_"]
+    assert "and" in call_filter
+    status_clause = [c for c in call_filter["and"] if c.get("property") == "Status"]
+    assert status_clause[0]["select"]["equals"] == "active"
+    type_clause = [c for c in call_filter["and"] if c.get("property") == "Type"]
+    assert type_clause[0]["select"]["equals"] == MEMORY_TYPE_HANDOVER_NOTE
+    workflow_clause = [c for c in call_filter["and"] if c.get("property") == "Workflow"]
+    assert workflow_clause[0]["relation"]["contains"] == "wf-prior-page-id"
+
+
+def test_find_handover_notes_returns_empty_when_workflow_page_id_blank():
+    api = _PaginatedFakeAPI([])
+    client = ProjectMemoryDBClient(api=api, database_id="pm-db")
+    assert client.find_handover_notes_for_workflow("") == []
+    assert api.query_calls == []
+
+
+def test_find_handover_notes_filters_by_profile_with_global_passthrough():
+    pages = [[
+        _make_memory_page(
+            page_id="m1",
+            name="A",
+            memory_type=MEMORY_TYPE_HANDOVER_NOTE,
+            profile="acme",
+        ),
+        _make_memory_page(
+            page_id="m2",
+            name="B",
+            memory_type=MEMORY_TYPE_HANDOVER_NOTE,
+            profile="other",
+        ),
+        # profile 未設定の memory（global）
+        _make_memory_page(
+            page_id="m3",
+            name="C",
+            memory_type=MEMORY_TYPE_HANDOVER_NOTE,
+        ),
+    ]]
+    api = _PaginatedFakeAPI(pages)
+    client = ProjectMemoryDBClient(api=api, database_id="pm-db")
+    result = client.find_handover_notes_for_workflow(
+        "wf-prior", profile="acme"
+    )
+    assert [m["id"] for m in result] == ["m1", "m3"]
+
+
+def test_find_handover_notes_returns_empty_on_api_failure():
+    class _RaisingAPI:
+        def query_database(self, *args, **kwargs):
+            raise NotionAPIError(503, "service unavailable")
+
+    client = ProjectMemoryDBClient(api=_RaisingAPI(), database_id="pm-db")
+    assert client.find_handover_notes_for_workflow("wf-prior") == []
+
+
 def test_list_active_memories_preserves_partial_results_on_mid_failure():
     """途中ページで失敗 → 取得済み部分は保持して返す（docstring 仕様）"""
 

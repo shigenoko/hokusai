@@ -3060,6 +3060,43 @@ def test_set_cancel_reason_rejects_empty_args():
         client.set_cancel_reason("page", "")
 
 
+def test_find_workflow_page_id_returns_id_when_found():
+    """`find_workflow_page_id` は query 結果の最初の id を返す（Issue #52）"""
+
+    class _HitAPI:
+        def query_database(self, *args, **kwargs):
+            return {"results": [{"id": "wf-page-1"}]}
+
+    client = WorkflowsDBClient(api=_HitAPI(), database_id="wf-db")
+    assert client.find_workflow_page_id("wf-id") == "wf-page-1"
+
+
+def test_find_workflow_page_id_returns_none_when_no_match():
+    class _MissAPI:
+        def query_database(self, *args, **kwargs):
+            return {"results": []}
+
+    client = WorkflowsDBClient(api=_MissAPI(), database_id="wf-db")
+    assert client.find_workflow_page_id("wf-id") is None
+
+
+def test_find_workflow_page_id_returns_none_on_api_failure():
+    """read-only 経路として API 失敗時は None を返す（apply_event とは挙動が異なる）"""
+    from hokusai.integrations.notion_dashboard.client import NotionAPIError
+
+    class _RaisingAPI:
+        def query_database(self, *args, **kwargs):
+            raise NotionAPIError(503, "service unavailable")
+
+    client = WorkflowsDBClient(api=_RaisingAPI(), database_id="wf-db")
+    assert client.find_workflow_page_id("wf-id") is None
+
+
+def test_find_workflow_page_id_returns_none_for_empty_workflow_id():
+    client = WorkflowsDBClient(api=_SupersedesFakeAPI(), database_id="wf-db")
+    assert client.find_workflow_page_id("") is None
+
+
 def test_set_supersedes_raises_when_property_missing_after_pruning():
     """Supersedes プロパティが Notion 側に未追加（migrate 未実施環境）の場合、
     `_submit_with_property_pruning` は missing プロパティを除外して再試行する。

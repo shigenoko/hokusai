@@ -234,6 +234,26 @@ class WorkflowsDBClient:
         properties = {"Cancel Reason": _rich_text(str(reason))}
         return self._submit_with_property_pruning(page_id, properties)
 
+    def find_workflow_page_id(self, workflow_id: str) -> str | None:
+        """Workflow ID プロパティで Notion DB を検索し、page_id を返す
+        （Workgraph Phase 7 / Issue #52: handover_note 世代遡及で使用）。
+
+        `_find_page_id` と挙動は同じだが、本メソッドは外部呼び出し向けに
+        例外を抑制して None を返す（API 失敗 / 検索 miss いずれも None）。
+        prime CLI 等の read-only 経路は障害でフローを止めず memory 取得を
+        skip させる方が UX として望ましいため。書き込み経路（apply_event）
+        は内部 `_find_page_id` を引き続き使い、API 失敗を raise する。
+        """
+        if not workflow_id:
+            return None
+        try:
+            return self._find_page_id(workflow_id)
+        except Exception as e:
+            logger.debug(
+                f"find_workflow_page_id 失敗: workflow_id={workflow_id}, error={e}"
+            )
+            return None
+
     def _find_page_id(self, workflow_id: str) -> str | None:
         """Workflow ID プロパティで Notion DB を検索し、page_id を返す。"""
         try:

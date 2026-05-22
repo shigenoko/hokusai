@@ -355,6 +355,94 @@ class ProjectMemoryDBClient:
             )
         return results
 
+    def find_handover_notes_for_workflow(
+        self,
+        workflow_page_id: str,
+        *,
+        profile: str | None = None,
+        max_pages: int = 5,
+    ) -> list[dict]:
+        """指定 workflow page に紐づく active な `handover_note` を取得する
+        （Workgraph Phase 7 / Issue #52 / 要件 §8.4 lookup rule）。
+
+        サーバ側 filter は AND(Status=active, Type=handover_note, Workflow
+        contains workflow_page_id) で絞る（list_active_memories と異なり
+        Workflow relation 一致を強制）。profile は `_matches_memory_filters`
+        と同じく client-side で「一致 OR Profile 未設定（global）」を採用。
+
+        Args:
+            workflow_page_id: Notion 上の旧 workflow ページ id（Supersedes
+                経由で取得する）。空 / None なら空リスト即返却。
+            profile: 一致させる Profile 名。None なら profile フィルタ無し。
+            max_pages: ページネーション安全上限（`list_active_memories` と
+                同じく truncation 時は warning）。
+        Returns:
+            Notion page dict のリスト。API 失敗時は部分結果を保持して返す
+            （prime 注入で全消失より部分提供を優先する設計）。
+        """
+        if not workflow_page_id:
+            return []
+
+        results: list[dict] = []
+        start_cursor: str | None = None
+        truncated = False
+        for page_idx in range(max_pages):
+            try:
+                response = self._api.query_database(
+                    self._database_id,
+                    filter_={
+                        "and": [
+                            {
+                                "property": "Status",
+                                "select": {"equals": MEMORY_STATUS_ACTIVE},
+                            },
+                            {
+                                "property": "Type",
+                                "select": {
+                                    "equals": MEMORY_TYPE_HANDOVER_NOTE
+                                },
+                            },
+                            {
+                                "property": "Workflow",
+                                "relation": {"contains": workflow_page_id},
+                            },
+                        ]
+                    },
+                    start_cursor=start_cursor,
+                    page_size=100,
+                )
+            except Exception as e:
+                logger.warning(
+                    "Project Memory DB handover_note list 失敗 "
+                    "(部分結果 %d 件で続行): %s",
+                    len(results), e,
+                )
+                return results
+            for page in response.get("results") or []:
+                if _matches_memory_filters(
+                    page,
+                    profile=profile,
+                    phase=None,
+                    types={MEMORY_TYPE_HANDOVER_NOTE},
+                ):
+                    results.append(page)
+            if not response.get("has_more"):
+                break
+            start_cursor = response.get("next_cursor")
+            if not start_cursor:
+                break
+            if page_idx + 1 >= max_pages:
+                truncated = True
+                break
+
+        if truncated:
+            logger.warning(
+                "find_handover_notes_for_workflow が max_pages=%d で打ち切られました "
+                "（取得済み %d 件で返却）",
+                max_pages, len(results),
+            )
+        return results
+
     def find_by_dedupe_key(self, dedupe_key: str) -> str | None:
         """dedupe_key で既存レコードを検索する。"""
         if not dedupe_key:
