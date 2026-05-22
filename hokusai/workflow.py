@@ -124,6 +124,38 @@ def _resolve_workflow_gate_event_name(marker: object) -> str:
     return EVENT_GATE_UPSERT
 
 
+# Project Memory drain layer の event 名解決（Workgraph Phase 5 / Issue #46）。
+# Workflow Gates と同じく dispatcher 定数を直接 import して drift を防ぐ。
+def _build_project_memory_event_marker_map() -> dict[str, str]:
+    from .integrations.notion_dashboard.dispatcher import (
+        EVENT_PROJECT_MEMORY_STATUS_CHANGE,
+    )
+
+    return {
+        "status_change": EVENT_PROJECT_MEMORY_STATUS_CHANGE,
+    }
+
+
+_PROJECT_MEMORY_EVENT_NAME_BY_MARKER: dict[str, str] = (
+    _build_project_memory_event_marker_map()
+)
+
+
+def _resolve_project_memory_event_name(marker: object) -> str:
+    """payload の `_event` marker から Project Memory event 名を解決する。
+
+    marker が None / 未知の場合は既定の `project_memory_upsert`（新規作成）。
+    """
+    if isinstance(marker, str):
+        mapped = _PROJECT_MEMORY_EVENT_NAME_BY_MARKER.get(marker)
+        if mapped is not None:
+            return mapped
+    from .integrations.notion_dashboard.dispatcher import (
+        EVENT_PROJECT_MEMORY_UPSERT,
+    )
+    return EVENT_PROJECT_MEMORY_UPSERT
+
+
 class WorkflowRunner:
     """ワークフロー実行クラス"""
 
@@ -440,6 +472,112 @@ class WorkflowRunner:
                 # と同じ「明示 marker で識別 + dispatcher 側 guard で skip」
                 # パターンを使う。
                 dkey = "_missing_gate_type"
+        idempotency_key = (
+            f"{wid}:{event_for_key}:{dkey}"
+            if wid
+            else f"{event_for_key}:{dkey}"
+        )
+        return enriched, idempotency_key
+
+    def _drain_pending_project_memories(
+        self, state_values: dict, langgraph_config: dict
+    ) -> int:
+        """pending_project_memories に積まれた payload を Notion Project
+        Memory DB へ dispatch し、state からは clear する（Workgraph Phase 5
+        / Issue #46）。
+
+        Workflow Gates drain と同じパターン（per-item idempotency_key /
+        `_event` marker での event 名分岐 / store 永続化 / 例外抑制）。
+        `_event="status_change"` で project_memory_status_change、それ以外は
+        project_memory_upsert。
+
+        Returns:
+            dispatch 試行した memory 件数（0 = drain なし）
+        """
+        try:
+            pending = state_values.get("pending_project_memories") or []
+            if not pending:
+                return 0
+            operator = state_values.get("operator")
+            if not operator and self.notion_dispatcher.is_configured():
+                operator = resolve_operator_name()
+            for payload in pending:
+                enriched, idempotency_key = self._prepare_memory_dispatch(
+                    payload, operator
+                )
+                event_name = _resolve_project_memory_event_name(
+                    payload.get("_event")
+                )
+                self._safe_notion_dispatch(
+                    event_name,
+                    enriched,
+                    idempotency_key=idempotency_key,
+                )
+            self.compiled_workflow.update_state(
+                langgraph_config, {"pending_project_memories": []}
+            )
+            state_values["pending_project_memories"] = []
+            workflow_id = state_values.get("workflow_id")
+            if workflow_id:
+                try:
+                    self.store.save_workflow(workflow_id, state_values)
+                except Exception as save_err:
+                    logger.debug(
+                        f"project memories drain 後の store 保存で例外を抑制: "
+                        f"{save_err}"
+                    )
+            return len(pending)
+        except Exception as pm_err:
+            logger.debug(
+                f"Project Memory 同期 drain 中のエラーを抑制: {pm_err}"
+            )
+            return 0
+
+    @staticmethod
+    def _prepare_memory_dispatch(
+        payload: dict, operator: str | None
+    ) -> tuple[dict, str]:
+        """Project Memory 系イベントの payload を enrich し、idempotency_key
+        を組み立てる（Workgraph Phase 5 / Issue #46）。
+
+        - operator が指定されており payload に未含なら enrich
+        - dedupe_key 欠落時は build_dedupe_key で stable hash を生成
+          （workflow_id + memory_type + name）
+        - `_event` marker で event 名（upsert / status_change）を切り替える
+        - dedupe_key 自動生成では memory_type / name が必須。欠落時は
+          `_missing_memory_identity` marker で identify し、dispatcher 側
+          guard で skip させる
+        """
+        from .integrations.notion_dashboard.project_memory_db import (
+            build_dedupe_key,
+        )
+
+        enriched = dict(payload)
+        if operator and "operator" not in enriched:
+            enriched["operator"] = operator
+        wid = enriched.get("workflow_id") or ""
+        event_marker = enriched.pop("_event", None)
+        event_for_key = _resolve_project_memory_event_name(event_marker)
+        dkey = enriched.get("dedupe_key")
+        if not dkey:
+            memory_type = enriched.get("memory_type")
+            name = enriched.get("name")
+            # workflow_id が空のまま build_dedupe_key を呼ぶと None → "" に正規化
+            # されて別 workflow 間で dedupe_key が衝突するため、wid が無ければ
+            # 自動生成を skip して explicit marker を使う（Copilot 指摘 / PR #43
+            # の `_missing_work_item_title` と同じパターン）。これにより
+            # dispatcher 側の workflow_id 必須 guard とも整合する。
+            if memory_type and name and wid:
+                dkey = build_dedupe_key(
+                    workflow_id=wid,
+                    memory_type=str(memory_type),
+                    name=str(name),
+                )
+                enriched["dedupe_key"] = dkey
+            else:
+                # 同定情報欠落（memory_type/name 未設定 or workflow_id 未設定）
+                # 時の衝突回避 marker（他 DB と同じパターン）
+                dkey = "_missing_memory_identity"
         idempotency_key = (
             f"{wid}:{event_for_key}:{dkey}"
             if wid
@@ -1276,6 +1414,9 @@ class WorkflowRunner:
 
                 # Workflow Gates DB 同期キューの drain（Issue #44 / Workgraph Phase 4）
                 self._drain_pending_workflow_gates(current_state.values, config)
+
+                # Project Memory DB 同期キューの drain（Issue #46 / Workgraph Phase 5）
+                self._drain_pending_project_memories(current_state.values, config)
 
                 # ループ検出: 同じフェーズが繰り返されているか
                 if current_phase:

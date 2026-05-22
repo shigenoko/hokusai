@@ -2806,3 +2806,156 @@ def test_drain_pending_workflow_gates_swallows_exceptions():
         {"pending_workflow_gates": [{"name": "X", "gate_type": "human_approval", "workflow_id": "w"}]},
         {"thread": "x"},
     )
+
+
+# ---------------------------------------------------------------------------
+# WorkflowRunner._drain_pending_project_memories（Workgraph Phase 5 / Issue #46）
+# ---------------------------------------------------------------------------
+
+
+def test_drain_pending_project_memories_no_op_when_empty():
+    runner = _make_runner()
+    capt = _CapturingDispatch(runner)
+    runner.compiled_workflow = _FakeCompiledWorkflow()  # type: ignore[assignment]
+
+    n = runner._drain_pending_project_memories(
+        {"pending_project_memories": []}, {"thread": "x"}
+    )
+    assert n == 0
+    assert capt.calls == []
+
+
+def test_drain_pending_project_memories_dispatches_upsert_event_by_default():
+    """payload に `_event` marker が無ければ project_memory_upsert として dispatch"""
+    runner = _make_runner()
+    capt = _CapturingDispatch(runner)
+    runner.compiled_workflow = _FakeCompiledWorkflow()  # type: ignore[assignment]
+
+    pending = [
+        {
+            "workflow_id": "wf-1",
+            "name": "API tokens must not be in DB",
+            "memory_type": "project_rule",
+            "content": "Use env vars for API tokens.",
+        }
+    ]
+    runner._drain_pending_project_memories(
+        {"pending_project_memories": pending}, {"thread": "x"}
+    )
+    assert len(capt.calls) == 1
+    assert capt.calls[0]["event_type"] == "project_memory_upsert"
+    assert capt.calls[0]["idempotency_key"].startswith(
+        "wf-1:project_memory_upsert:"
+    )
+
+
+def test_drain_pending_project_memories_dispatches_status_change_when_marker_set():
+    """`_event="status_change"` marker があれば project_memory_status_change として dispatch"""
+    runner = _make_runner()
+    capt = _CapturingDispatch(runner)
+    runner.compiled_workflow = _FakeCompiledWorkflow()  # type: ignore[assignment]
+
+    pending = [
+        {
+            "workflow_id": "wf-1",
+            "memory_type": "project_rule",
+            "name": "API tokens must not be in DB",
+            "status": "active",
+            "_event": "status_change",
+        }
+    ]
+    runner._drain_pending_project_memories(
+        {"pending_project_memories": pending}, {"thread": "x"}
+    )
+    assert len(capt.calls) == 1
+    assert capt.calls[0]["event_type"] == "project_memory_status_change"
+    assert capt.calls[0]["idempotency_key"].startswith(
+        "wf-1:project_memory_status_change:"
+    )
+    # internal marker は dispatcher 向け payload からは除去
+    assert "_event" not in capt.calls[0]["payload"]
+
+
+def test_drain_pending_project_memories_marks_missing_memory_identity_in_idempotency_key():
+    """memory_type / name 欠落時は dedupe_key 生成を skip し、
+    `_missing_memory_identity` marker を idempotency_key 末尾に入れる（衝突回避）"""
+    runner = _make_runner()
+    capt = _CapturingDispatch(runner)
+    runner.compiled_workflow = _FakeCompiledWorkflow()  # type: ignore[assignment]
+
+    pending = [
+        {
+            "workflow_id": "wf-1",
+            "status": "active",
+            "_event": "status_change",
+            # memory_type / name 欠落
+        }
+    ]
+    runner._drain_pending_project_memories(
+        {"pending_project_memories": pending}, {"thread": "x"}
+    )
+    assert len(capt.calls) == 1
+    assert (
+        capt.calls[0]["idempotency_key"]
+        == "wf-1:project_memory_status_change:_missing_memory_identity"
+    )
+    # enriched payload には dedupe_key が含まれない（dispatcher 側 guard 用）
+    assert "dedupe_key" not in capt.calls[0]["payload"]
+
+
+def test_drain_pending_project_memories_persists_cleared_state_to_store():
+    """drain 後に self.store に clear 後の state を保存（Work Items と同パターン）"""
+    runner = _make_runner()
+    _CapturingDispatch(runner)
+    runner.compiled_workflow = _FakeCompiledWorkflow()  # type: ignore[assignment]
+
+    save_calls: list[tuple[str, dict]] = []
+    original_save = runner.store.save_workflow
+
+    def _spy_save(wid, st):
+        save_calls.append((wid, dict(st)))
+        return original_save(wid, st)
+
+    runner.store.save_workflow = _spy_save  # type: ignore[assignment]
+
+    state_values = {
+        "workflow_id": "wf-persist",
+        "pending_project_memories": [
+            {
+                "workflow_id": "wf-persist",
+                "name": "X",
+                "memory_type": "project_rule",
+                "content": "c",
+            }
+        ],
+    }
+    runner._drain_pending_project_memories(state_values, {"thread": "x"})
+    assert state_values["pending_project_memories"] == []
+    assert len(save_calls) >= 1
+    saved_wid, saved_state = save_calls[-1]
+    assert saved_wid == "wf-persist"
+    assert saved_state["pending_project_memories"] == []
+
+
+def test_drain_pending_project_memories_swallows_exceptions():
+    """drain 中の例外はワークフロー本体に伝播しない（best effort）"""
+    runner = _make_runner()
+    runner.compiled_workflow = _FakeCompiledWorkflow()  # type: ignore[assignment]
+
+    def raising(event_type, payload, **kwargs):
+        raise RuntimeError("boom")
+
+    runner._safe_notion_dispatch = raising  # type: ignore[method-assign]
+    runner._drain_pending_project_memories(
+        {
+            "pending_project_memories": [
+                {
+                    "name": "X",
+                    "memory_type": "project_rule",
+                    "content": "c",
+                    "workflow_id": "w",
+                }
+            ]
+        },
+        {"thread": "x"},
+    )

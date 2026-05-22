@@ -59,6 +59,11 @@ WORK_ITEMS_DB_TITLE = "Work Items DB"
 # 明示的な gate として管理する。pending / blocked な gate がある間は対象
 # workflow は先に進まない（要件 §7）。
 WORKFLOW_GATES_DB_TITLE = "Workflow Gates DB"
+# v0.10.0〜（Workgraph Phase 5 / Issue #46）。案件固有のルール / 設計判断 /
+# 避けるべき実装 / 運用注意点を Notion に保存し、後段で Agent prompt に
+# 要約注入する基盤（本 PR はストレージ層のみ、`hokusai prime` 等の注入
+# 機構は別 Issue）。
+PROJECT_MEMORY_DB_TITLE = "Project Memory DB"
 
 
 # 各 DB スキーマで共通利用するプロパティ名定数（重複文字列を一元化）
@@ -106,6 +111,22 @@ _WORK_ITEMS_DB_DESCRIPTION = (
     "lease は人間または Operations Console から再割当できます。詳細は GitHub "
     "Issue #38 / #42 と HOKUSAI 運用ガイド"
     "（docs/notion-dashboard-operation-guide.md）を参照。"
+)
+
+_PROJECT_MEMORY_DB_DESCRIPTION = (
+    "⚠️ HOKUSAI が自動管理する DB です（Workgraph Phase 5 / Issue #46）。"
+    "案件固有のルール / 設計判断 / 避けるべき実装 / 運用注意点 / handover note "
+    "等を保存し、後段で Agent prompt に要約注入する基盤です。dedupe_key は "
+    "workflow_id + type + name の sha256 hash 先頭 16 文字。"
+    "Type / Status / Profile / Content / Summary / Applies To / Workflow / "
+    "Pull Request / Approved By / Approved At / Expires At / Last Updated を "
+    "HOKUSAI が書き込みます（upsert_memory および update_status の両方で "
+    "Approved By / Approved At を audit trail として残す）。Created At は新規 "
+    "作成時のみ書き込み Notion 側で初回作成時刻を温存します。Status の手動 "
+    "編集（draft → active 承認 / deprecated 廃止等）は人間運用判断として "
+    "HOKUSAI 上書き対象外です。`draft` / `deprecated` / `rejected` memory は "
+    "Agent prompt に渡されず、`active` のみが対象です（要件 §8.5）。詳細は "
+    "GitHub Issue #46 と HOKUSAI 運用ガイドを参照。"
 )
 
 _WORKFLOW_GATES_DB_DESCRIPTION = (
@@ -511,6 +532,72 @@ def _add_work_items_dependencies_self_relation(
         )
 
 
+# ----- Project Memory DB プロパティ定義（Workgraph Phase 5 / Issue #46） -----
+# Type / Status は要件 §8.2 / §8.3 と完全一致させる。Workflow / Pull Request
+# への relation は single_property（Workflow Gates DB と同じく backref 不要）。
+# Applies To は multi-select で phase1-10 をオプションとして用意（実 phase 数
+# に追従するため柔軟性を持たせる）。Content / Summary は別フィールド: Content
+# は本文、Summary は Agent prompt 注入時の短い要約（要件 §8.4）。
+def _project_memory_db_properties(
+    workflows_db_id: str,
+    pull_requests_db_id: str,
+) -> dict[str, dict[str, Any]]:
+    return {
+        "Name": {"title": {}},
+        "Type": {
+            "select": {
+                "options": [
+                    {"name": "project_rule", "color": "blue"},
+                    {"name": "architecture_decision", "color": "purple"},
+                    {"name": "avoidance", "color": "red"},
+                    {"name": "domain_knowledge", "color": "green"},
+                    {"name": "operations_note", "color": "yellow"},
+                    {"name": "policy_note", "color": "orange"},
+                    {"name": "handover_note", "color": "pink"},
+                ]
+            }
+        },
+        "Status": {
+            "select": {
+                "options": [
+                    {"name": "draft", "color": "gray"},
+                    {"name": "active", "color": "green"},
+                    {"name": "deprecated", "color": "default"},
+                    {"name": "rejected", "color": "red"},
+                ]
+            }
+        },
+        "Profile": {"rich_text": {}},
+        "Content": {"rich_text": {}},
+        "Summary": {"rich_text": {}},
+        "Applies To": {
+            "multi_select": {
+                "options": [
+                    {"name": f"phase{i}"} for i in range(1, 11)
+                ]
+            }
+        },
+        "Workflow": {
+            "relation": {
+                "database_id": workflows_db_id,
+                "single_property": {},
+            }
+        },
+        "Pull Request": {
+            "relation": {
+                "database_id": pull_requests_db_id,
+                "single_property": {},
+            }
+        },
+        "Approved By": {"rich_text": {}},
+        "Approved At": {"date": {}},
+        "Expires At": {"date": {}},
+        "Dedupe Key": {"rich_text": {}},
+        _PROP_CREATED_AT: {"date": {}},
+        _PROP_LAST_UPDATED: {"date": {}},
+    }
+
+
 class NotionSetupError(Exception):
     """Notion セットアップ中の致命的エラー（呼び出し側へ伝搬する）"""
 
@@ -699,15 +786,45 @@ def setup_notion_workspace(
             "Workflow Gates DB の作成レスポンスに id が含まれません"
         )
 
+    # 7. Project Memory DB を作る（Workgraph Phase 5 / Issue #46）。Workflow /
+    # Pull Request への single_property relation のみ。Applies To は
+    # multi-select、Type / Status は要件 §8 と完全一致。
+    logger.info("Project Memory DB を作成中...")
+    try:
+        pm_db = api.create_database({
+            "parent": {"type": "page_id", "page_id": parent_page_id},
+            "title": [
+                {"type": "text", "text": {"content": PROJECT_MEMORY_DB_TITLE}}
+            ],
+            "description": [
+                {"type": "text", "text": {"content": _PROJECT_MEMORY_DB_DESCRIPTION}}
+            ],
+            "properties": _project_memory_db_properties(
+                workflows_db_id,
+                pull_requests_db_id,
+            ),
+        })
+    except Exception as e:
+        raise NotionSetupError(
+            f"Project Memory DB の作成に失敗: {type(e).__name__}: {e}"
+        ) from e
+
+    project_memory_db_id = pm_db.get("id")
+    if not project_memory_db_id:
+        raise NotionSetupError(
+            "Project Memory DB の作成レスポンスに id が含まれません"
+        )
+
     result: dict[str, Any] = {
         "workflows_db_id": workflows_db_id,
         "pull_requests_db_id": pull_requests_db_id,
         "review_issues_db_id": review_issues_db_id,
         "work_items_db_id": work_items_db_id,
         "workflow_gates_db_id": workflow_gates_db_id,
+        "project_memory_db_id": project_memory_db_id,
     }
 
-    # 7. scaffold（オプトイン）: 標準ドキュメントツリーを作成
+    # 8. scaffold（オプトイン）: 標準ドキュメントツリーを作成
     # DB 作成と異なり、scaffold 失敗は致命扱いしない（DB は既に作成済みのため）。
     # scaffold_notion_workspace は入力検証以外は raise せず、partial state を
     # 返り値に含めるため、ここでは error 用の fallback dict 構築は不要。
@@ -1137,6 +1254,7 @@ def persist_env_vars(
     review_issues_env_name: str = "HOKUSAI_NOTION_REVIEW_ISSUES_DB_ID",
     work_items_env_name: str = "HOKUSAI_NOTION_WORK_ITEMS_DB_ID",
     workflow_gates_env_name: str = "HOKUSAI_NOTION_WORKFLOW_GATES_DB_ID",
+    project_memory_env_name: str = "HOKUSAI_NOTION_PROJECT_MEMORY_DB_ID",
     profile_name: str | None = None,
     backup: bool = True,
 ) -> dict[str, Any]:
@@ -1182,6 +1300,9 @@ def persist_env_vars(
     _validate_env_var_name(
         workflow_gates_env_name, role="workflow_gates_env_name"
     )
+    _validate_env_var_name(
+        project_memory_env_name, role="project_memory_env_name"
+    )
 
     # profile 名指定時は profile 別マーカー、未指定時は従来マーカー
     if profile_name is not None:
@@ -1224,6 +1345,12 @@ def persist_env_vars(
     if workflow_gates_db_id:
         block_lines.append(
             f'export {workflow_gates_env_name}="{workflow_gates_db_id}"'
+        )
+    # Project Memory DB ID は v0.10.0（Issue #46 / Workgraph Phase 5）で追加。
+    project_memory_db_id = ids.get("project_memory_db_id")
+    if project_memory_db_id:
+        block_lines.append(
+            f'export {project_memory_env_name}="{project_memory_db_id}"'
         )
     block_lines.append(end_marker)
     new_block = "\n".join(block_lines) + "\n"

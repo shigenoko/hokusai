@@ -311,6 +311,10 @@ def _parse_notion_dashboard_config(config_dict: dict) -> NotionDashboardConfig:
         nd_raw.get("workflow_gates_db_id_env"),
         defaults.workflow_gates_db_id_env,
     )
+    project_memory_db_id_env = _str_or_default(
+        nd_raw.get("project_memory_db_id_env"),
+        defaults.project_memory_db_id_env,
+    )
 
     sync_outbox = _parse_sync_outbox(nd_raw.get("sync_outbox"))
     retry = _parse_retry(nd_raw.get("retry"))
@@ -324,6 +328,7 @@ def _parse_notion_dashboard_config(config_dict: dict) -> NotionDashboardConfig:
         review_issues_db_id_env=review_issues_db_id_env,
         work_items_db_id_env=work_items_db_id_env,
         workflow_gates_db_id_env=workflow_gates_db_id_env,
+        project_memory_db_id_env=project_memory_db_id_env,
         sync_outbox=sync_outbox,
         retry=retry,
         rate_limit=rate_limit,

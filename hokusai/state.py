@@ -230,6 +230,14 @@ class WorkflowState(TypedDict):
     # 値が None / 空文字 なら gate enforcement は no-op。
     workflow_gates_blocked_reason: Optional[str]
 
+    # === Project Memory DB 同期キュー（Issue #46 / Workgraph Phase 5 / v0.10.0） ===
+    # Agent / 人間が project memory（rule / decision / avoidance / handover
+    # note 等）を起こす際に Notion Project Memory DB へ送るためのキュー。
+    # 各要素は dispatcher の project_memory_upsert / project_memory_status_change
+    # payload と同形式。`_event` marker（"status_change"）で event 名を切り替える
+    # drain パターンは他 DB と同じ。workflow.py の drain で送信後に clear。
+    pending_project_memories: list
+
     # === 実行者（Issue #21 / v0.4.8〜） ===
     # workflow_started 時に resolve_operator_name() で確定し、それ以降の
     # 同期イベント（review_issue_raised 等）は state 上の値を再利用する。
@@ -408,6 +416,7 @@ def create_initial_state(
         pending_work_items=[],
         pending_workflow_gates=[],
         workflow_gates_blocked_reason=None,
+        pending_project_memories=[],
         operator=None,
         research_result=None,
         design_result=None,
