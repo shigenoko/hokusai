@@ -66,18 +66,23 @@ class _RecordingClient:
             substr, msg = fail_map[self._fail_on]
             if substr in title:
                 raise RuntimeError(msg)
-        # 同じ table から id を返す。マッチしない場合は最後の Project Memory。
+        # 同じ table から id を返す。Project Memory も明示的に id_map に含め、
+        # どれにもマッチしない場合は assertion で fail-fast（タイトルの typo /
+        # 変更をテストで早期検出するため、Copilot 指摘）。
         id_map = [
             ("Workflows", self._workflows_id),
             ("Pull Requests", self._pr_id),
             ("Review Issues", self._review_issues_id),
             ("Work Items", self._work_items_id),
             ("Workflow Gates", self._workflow_gates_id),
+            ("Project Memory", self._project_memory_id),
         ]
         for substr, db_id in id_map:
             if substr in title:
                 return {"id": db_id}
-        return {"id": self._project_memory_id}
+        raise AssertionError(
+            f"_RecordingClient.create_database: 未知の DB title={title!r}"
+        )
 
     def update_database(self, database_id: str, payload: dict) -> dict:
         # Work Items DB の Dependencies（self-relation）追加だけで呼ばれる

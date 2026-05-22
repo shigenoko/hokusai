@@ -387,6 +387,8 @@ class NotionSyncDispatcher:
           Work Items DB 関連（#38, #42）
         - `workflow_gate_*` (upsert / status_change): Workflow Gates DB
           関連（#44）
+        - `project_memory_*` (upsert / status_change): Project Memory DB
+          関連（#46）
         - `service_status_checked`: 廃止済の旧 Service Status sync
 
         exclude_key を渡せば、retry_pending() 経由で「これから削除される」
