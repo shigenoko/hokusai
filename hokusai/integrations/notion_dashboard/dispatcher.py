@@ -18,6 +18,7 @@ from typing import Any
 
 from ...logging_config import get_logger
 from .client import NotionAPIClient, NotionAPIError, NotionRateLimitError
+from .project_memory_db import ProjectMemoryDBClient
 from .pull_requests_db import PullRequestsDBClient
 from .review_issues_db import ReviewIssuesDBClient
 from .work_items_db import WorkItemsDBClient
@@ -60,6 +61,13 @@ EVENT_WORK_ITEM_LEASE_RELEASE = "work_item_lease_release"
 # `workflow_gate_status_change` で扱う（upsert は Status 温存）。
 EVENT_GATE_UPSERT = "workflow_gate_upsert"
 EVENT_GATE_STATUS_CHANGE = "workflow_gate_status_change"
+# Project Memory イベント（Workgraph Phase 5 / Issue #46）。Agent や人間が
+# project memory（rule / decision / avoidance / handover note 等）を起こす
+# 際に dispatch される。状態遷移（draft → active / deprecated / rejected）は
+# `project_memory_status_change` で扱う（upsert は Status 温存、要件 §8.5
+# の「Agent 自動生成は draft 起票」を保ったまま人間承認を巻き戻さない）。
+EVENT_PROJECT_MEMORY_UPSERT = "project_memory_upsert"
+EVENT_PROJECT_MEMORY_STATUS_CHANGE = "project_memory_status_change"
 
 
 class NotionSyncDispatcher:
@@ -79,6 +87,7 @@ class NotionSyncDispatcher:
         self._review_issues_db: ReviewIssuesDBClient | None = None
         self._work_items_db: WorkItemsDBClient | None = None
         self._workflow_gates_db: WorkflowGatesDBClient | None = None
+        self._project_memory_db: ProjectMemoryDBClient | None = None
         # workflow_id → page_id の positive-cache（PR #37 Copilot 7 回目指摘）。
         # Phase 6/7 drain で同一 workflow の review_issue を複数 dispatch する際、
         # 各 dispatch で Workflows DB に lookup query を投げないよう抑止する。
@@ -266,6 +275,14 @@ class NotionSyncDispatcher:
             self._handle_workflow_gate_status_change(payload)
             return
 
+        if event_type == EVENT_PROJECT_MEMORY_UPSERT:
+            self._handle_project_memory_upsert(payload)
+            return
+
+        if event_type == EVENT_PROJECT_MEMORY_STATUS_CHANGE:
+            self._handle_project_memory_status_change(payload)
+            return
+
         # 後方互換: 旧 Service Status sync が outbox に積んだ
         # service_status_checked エントリは Notion 連携廃止済みなので
         # no-op として扱い、retry_pending() で drain できるようにする。
@@ -388,6 +405,8 @@ class NotionSyncDispatcher:
             "work_item_lease_release",
             "workflow_gate_upsert",
             "workflow_gate_status_change",
+            "project_memory_upsert",
+            "project_memory_status_change",
             "service_status_checked",
         )
         try:
@@ -1081,6 +1100,206 @@ class NotionSyncDispatcher:
             decision_reason=payload.get("decision_reason"),
         )
 
+    def _handle_project_memory_upsert(self, payload: dict[str, Any]) -> None:
+        """Project Memory upsert イベント（Workgraph Phase 5 / Issue #46）。
+
+        必須 payload: name / memory_type / content。任意: workflow_id /
+        status / profile / summary / applies_to / workflow_page_id /
+        pull_request_page_id / approved_by / approved_at / expires_at /
+        dedupe_key.
+
+        入力検証（poison message 防止）:
+        - name / memory_type / content 必須、未指定なら warning + skip
+        - memory_type / status が enum 外なら warning + skip
+        - dedupe_key が str 以外なら warning + skip
+        - dedupe_key 未指定で workflow_id が空 / 非 str なら衝突防止で skip
+        """
+        from .project_memory_db import (
+            DEFAULT_MEMORY_STATUS,
+            is_valid_memory_status,
+            is_valid_memory_type,
+        )
+
+        project_memory_db_id = os.environ.get(
+            self._config.project_memory_db_id_env, ""
+        ).strip()
+        if not project_memory_db_id:
+            logger.debug(
+                "Project Memory DB ID 未設定のため project_memory_upsert をスキップ"
+            )
+            return
+
+        name = payload.get("name")
+        memory_type = payload.get("memory_type")
+        content = payload.get("content")
+        if not name or not memory_type or not content:
+            logger.warning(
+                "project_memory_upsert に name / memory_type / content の "
+                "いずれかが無いためスキップ"
+            )
+            return
+        if not is_valid_memory_type(memory_type):
+            logger.warning(
+                "project_memory_upsert の memory_type が enum 外なのでスキップ: %r",
+                memory_type,
+            )
+            return
+        status = payload.get("status") or DEFAULT_MEMORY_STATUS
+        if not is_valid_memory_status(status):
+            logger.warning(
+                "project_memory_upsert の status が enum 外なのでスキップ: %r",
+                status,
+            )
+            return
+
+        dedupe_key = payload.get("dedupe_key")
+        if dedupe_key is not None and not isinstance(dedupe_key, str):
+            logger.warning(
+                "project_memory_upsert の dedupe_key が str でないためスキップ: %r",
+                dedupe_key,
+            )
+            return
+
+        # dedupe_key 自動生成パスで workflow_id 必須化 + 型検証（PR #45 で
+        # 確立した workflow_gate と同じ guard 戦略）。明示 dedupe_key 指定
+        # パスは呼び出し側責任で衝突回避。
+        workflow_id = payload.get("workflow_id")
+        if not dedupe_key:
+            if not workflow_id:
+                logger.warning(
+                    "project_memory_upsert で dedupe_key も workflow_id も無い "
+                    "ため別 workflow 間 dedupe_key 衝突のリスクがありスキップ: "
+                    "memory_type=%s, name=%s",
+                    memory_type, name,
+                )
+                return
+            if not isinstance(workflow_id, str):
+                logger.warning(
+                    "project_memory_upsert で workflow_id が str でないため "
+                    "スキップ: %r",
+                    workflow_id,
+                )
+                return
+
+        client = self._get_project_memory_client(project_memory_db_id)
+        client.upsert_memory(
+            name=str(name),
+            memory_type=str(memory_type),
+            content=str(content),
+            summary=payload.get("summary"),
+            status=str(status),
+            profile=payload.get("profile"),
+            applies_to=payload.get("applies_to") or [],
+            workflow_id=workflow_id,
+            workflow_page_id=payload.get("workflow_page_id"),
+            pull_request_page_id=payload.get("pull_request_page_id"),
+            approved_by=payload.get("approved_by"),
+            approved_at=payload.get("approved_at"),
+            expires_at=payload.get("expires_at"),
+            dedupe_key=dedupe_key,
+        )
+
+    def _handle_project_memory_status_change(
+        self, payload: dict[str, Any]
+    ) -> None:
+        """Project Memory Status 遷移イベント（Workgraph Phase 5 / Issue #46）。
+
+        Agent / 人間が memory を承認 / 廃止 / 却下した際に dispatch される。
+        dedupe_key または (workflow_id, memory_type, name) で memory を同定し、
+        見つからなければ warning + skip。
+        """
+        from .project_memory_db import (
+            build_dedupe_key,
+            is_valid_memory_status,
+            is_valid_memory_type,
+        )
+
+        project_memory_db_id = os.environ.get(
+            self._config.project_memory_db_id_env, ""
+        ).strip()
+        if not project_memory_db_id:
+            logger.debug(
+                "Project Memory DB ID 未設定のため "
+                "project_memory_status_change をスキップ"
+            )
+            return
+
+        status = payload.get("status")
+        if not status:
+            logger.warning(
+                "project_memory_status_change に status が無いためスキップ"
+            )
+            return
+        if not is_valid_memory_status(status):
+            logger.warning(
+                "project_memory_status_change の status が enum 外なので "
+                "スキップ: %r",
+                status,
+            )
+            return
+
+        dedupe_key = payload.get("dedupe_key")
+        if dedupe_key is not None and not isinstance(dedupe_key, str):
+            logger.warning(
+                "project_memory_status_change の dedupe_key が str でない: %r",
+                dedupe_key,
+            )
+            return
+
+        if not dedupe_key:
+            memory_type = payload.get("memory_type")
+            name = payload.get("name")
+            if not memory_type or not name:
+                logger.warning(
+                    "project_memory_status_change で dedupe_key も "
+                    "memory_type/name も無いため同定不能スキップ"
+                )
+                return
+            if not is_valid_memory_type(memory_type):
+                logger.warning(
+                    "project_memory_status_change の memory_type が enum 外 "
+                    "なのでスキップ: %r",
+                    memory_type,
+                )
+                return
+            workflow_id_for_key = payload.get("workflow_id")
+            if not workflow_id_for_key:
+                logger.warning(
+                    "project_memory_status_change で dedupe_key も workflow_id "
+                    "も無いため別 workflow 間衝突のリスクがありスキップ"
+                )
+                return
+            if not isinstance(workflow_id_for_key, str):
+                logger.warning(
+                    "project_memory_status_change で workflow_id が str で "
+                    "ないためスキップ: %r",
+                    workflow_id_for_key,
+                )
+                return
+            dedupe_key = build_dedupe_key(
+                workflow_id=workflow_id_for_key,
+                memory_type=str(memory_type),
+                name=str(name),
+            )
+
+        client = self._get_project_memory_client(project_memory_db_id)
+        page_id = client.find_by_dedupe_key(dedupe_key)
+        if page_id is None:
+            logger.warning(
+                "project_memory_status_change の対象 page が見つからない: "
+                "workflow_id=%s, memory_type=%s, dedupe_key=%s...",
+                payload.get("workflow_id"),
+                payload.get("memory_type"),
+                dedupe_key[:8],
+            )
+            return
+        client.update_status(
+            page_id,
+            str(status),
+            approved_by=payload.get("approved_by"),
+            approved_at=payload.get("approved_at"),
+        )
+
     def _resolve_work_item_for_lease_event(
         self, payload: dict[str, Any], *, event_label: str
     ) -> tuple[str | None, Any]:
@@ -1320,6 +1539,16 @@ class NotionSyncDispatcher:
                 database_id=database_id,
             )
         return self._workflow_gates_db
+
+    def _get_project_memory_client(
+        self, database_id: str
+    ) -> ProjectMemoryDBClient:
+        if self._project_memory_db is None:
+            self._project_memory_db = ProjectMemoryDBClient(
+                api=self._get_api(),
+                database_id=database_id,
+            )
+        return self._project_memory_db
 
     def _get_api(self) -> NotionAPIClient:
         if self._api is None:
