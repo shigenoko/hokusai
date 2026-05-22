@@ -22,6 +22,7 @@ Notion に保存し、後段で Agent prompt に要約注入する基盤。本 m
 from __future__ import annotations
 
 import hashlib
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Iterable
 
@@ -89,6 +90,49 @@ ACTIVE_MEMORY_STATUSES = frozenset({MEMORY_STATUS_ACTIVE})
 DEFAULT_MEMORY_STATUS = MEMORY_STATUS_DRAFT
 
 
+# Applies To multi_select の許容値（要件 §8.3）。Notion は未知の multi_select
+# 値を自動作成してしまうため、ホワイトリストで弾いて DB schema の drift を
+# 防ぐ。Phase は HOKUSAI workflow の 10 段階に対応（setup.py と完全一致）。
+ALLOWED_APPLIES_TO_VALUES = frozenset(
+    {f"phase{i}" for i in range(1, 11)}
+)
+
+
+def _normalize_applies_to(value: object) -> list[str]:
+    """`applies_to` を `list[str]` に正規化する。
+
+    - `None` / 空 → `[]`
+    - `str` → 単一要素 `list`（`"phase1"` → `["phase1"]`）。素朴に
+      `list(applies_to or [])` すると 1 文字ずつの list になり Notion 側で
+      `Applies To` に大量の不正値を作ってしまう問題を防ぐ（Copilot 指摘）。
+    - その他 iterable → str 要素のみを抜き出し、`ALLOWED_APPLIES_TO_VALUES`
+      に含まれないものは除外して DB schema drift を防ぐ。
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        candidates: list[str] = [value]
+    elif isinstance(value, Iterable):
+        candidates = [item for item in value if isinstance(item, str)]
+    else:
+        return []
+    return [v for v in candidates if v in ALLOWED_APPLIES_TO_VALUES]
+
+
+@dataclass(frozen=True)
+class MemoryAudit:
+    """Project Memory の audit / lifecycle フィールドをまとめた値オブジェクト。
+
+    `upsert_memory` / `_build_properties` のパラメータ数を抑えるために導入
+    （SonarCloud max-param=13 対策）。Approved By / Approved At / Expires At
+    の意味的には audit log なので、まとめても可読性は下がらない。
+    """
+
+    approved_by: str | None = None
+    approved_at: str | None = None
+    expires_at: str | None = None
+
+
 def build_dedupe_key(
     *,
     workflow_id: str | None,
@@ -136,17 +180,21 @@ class ProjectMemoryDBClient:
         summary: str | None = None,
         status: str = DEFAULT_MEMORY_STATUS,
         profile: str | None = None,
-        applies_to: Iterable[str] | None = None,
+        applies_to: Iterable[str] | str | None = None,
         workflow_id: str | None = None,
         workflow_page_id: str | None = None,
         pull_request_page_id: str | None = None,
-        approved_by: str | None = None,
-        approved_at: str | None = None,
-        expires_at: str | None = None,
+        audit: MemoryAudit | None = None,
         dedupe_key: str | None = None,
     ) -> dict:
         """Project Memory を upsert する（status は新規作成時のみ書き込み、
-        update 時は温存）。"""
+        update 時は温存）。
+
+        `applies_to` は `str` / iterable / `None` を受け付け、内部で
+        `_normalize_applies_to` により phase1〜phase10 ホワイトリストへ正規化
+        される（Copilot 指摘: 単一 str を 1 文字ずつの list 化してしまう問題、
+        Notion 側 multi_select 自動作成による schema drift を回避）。
+        """
         if not is_valid_memory_type(memory_type):
             raise ValueError(f"Memory Type の値が不正です: {memory_type!r}")
         if not is_valid_memory_status(status):
@@ -171,12 +219,10 @@ class ProjectMemoryDBClient:
             profile=profile,
             content=content,
             summary=summary,
-            applies_to=list(applies_to or []),
+            applies_to=_normalize_applies_to(applies_to),
             workflow_page_id=workflow_page_id,
             pull_request_page_id=pull_request_page_id,
-            approved_by=approved_by,
-            approved_at=approved_at,
-            expires_at=expires_at,
+            audit=audit or MemoryAudit(),
             dedupe_key=dedupe_key,
             is_new=existing_page_id is None,
         )
@@ -260,9 +306,7 @@ class ProjectMemoryDBClient:
         applies_to: list[str],
         workflow_page_id: str | None,
         pull_request_page_id: str | None,
-        approved_by: str | None,
-        approved_at: str | None,
-        expires_at: str | None,
+        audit: MemoryAudit,
         dedupe_key: str,
         is_new: bool,
     ) -> dict:
@@ -293,12 +337,12 @@ class ProjectMemoryDBClient:
             props["Pull Request"] = {
                 "relation": [{"id": pull_request_page_id}]
             }
-        if approved_by:
-            props["Approved By"] = _rich_text(approved_by)
-        if approved_at:
-            props["Approved At"] = _date(approved_at)
-        if expires_at:
-            props["Expires At"] = _date(expires_at)
+        if audit.approved_by:
+            props["Approved By"] = _rich_text(audit.approved_by)
+        if audit.approved_at:
+            props["Approved At"] = _date(audit.approved_at)
+        if audit.expires_at:
+            props["Expires At"] = _date(audit.expires_at)
         return props
 
 

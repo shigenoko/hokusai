@@ -1181,6 +1181,8 @@ class NotionSyncDispatcher:
                 )
                 return
 
+        from .project_memory_db import MemoryAudit
+
         client = self._get_project_memory_client(project_memory_db_id)
         client.upsert_memory(
             name=str(name),
@@ -1189,13 +1191,15 @@ class NotionSyncDispatcher:
             summary=payload.get("summary"),
             status=str(status),
             profile=payload.get("profile"),
-            applies_to=payload.get("applies_to") or [],
+            applies_to=payload.get("applies_to"),
             workflow_id=workflow_id,
             workflow_page_id=payload.get("workflow_page_id"),
             pull_request_page_id=payload.get("pull_request_page_id"),
-            approved_by=payload.get("approved_by"),
-            approved_at=payload.get("approved_at"),
-            expires_at=payload.get("expires_at"),
+            audit=MemoryAudit(
+                approved_by=payload.get("approved_by"),
+                approved_at=payload.get("approved_at"),
+                expires_at=payload.get("expires_at"),
+            ),
             dedupe_key=dedupe_key,
         )
 
@@ -1238,49 +1242,11 @@ class NotionSyncDispatcher:
             )
             return
 
-        dedupe_key = payload.get("dedupe_key")
-        if dedupe_key is not None and not isinstance(dedupe_key, str):
-            logger.warning(
-                "project_memory_status_change の dedupe_key が str でない: %r",
-                dedupe_key,
-            )
+        dedupe_key = self._resolve_memory_status_dedupe_key(
+            payload, is_valid_memory_type, build_dedupe_key
+        )
+        if dedupe_key is None:
             return
-
-        if not dedupe_key:
-            memory_type = payload.get("memory_type")
-            name = payload.get("name")
-            if not memory_type or not name:
-                logger.warning(
-                    "project_memory_status_change で dedupe_key も "
-                    "memory_type/name も無いため同定不能スキップ"
-                )
-                return
-            if not is_valid_memory_type(memory_type):
-                logger.warning(
-                    "project_memory_status_change の memory_type が enum 外 "
-                    "なのでスキップ: %r",
-                    memory_type,
-                )
-                return
-            workflow_id_for_key = payload.get("workflow_id")
-            if not workflow_id_for_key:
-                logger.warning(
-                    "project_memory_status_change で dedupe_key も workflow_id "
-                    "も無いため別 workflow 間衝突のリスクがありスキップ"
-                )
-                return
-            if not isinstance(workflow_id_for_key, str):
-                logger.warning(
-                    "project_memory_status_change で workflow_id が str で "
-                    "ないためスキップ: %r",
-                    workflow_id_for_key,
-                )
-                return
-            dedupe_key = build_dedupe_key(
-                workflow_id=workflow_id_for_key,
-                memory_type=str(memory_type),
-                name=str(name),
-            )
 
         client = self._get_project_memory_client(project_memory_db_id)
         page_id = client.find_by_dedupe_key(dedupe_key)
@@ -1298,6 +1264,66 @@ class NotionSyncDispatcher:
             str(status),
             approved_by=payload.get("approved_by"),
             approved_at=payload.get("approved_at"),
+        )
+
+    @staticmethod
+    def _resolve_memory_status_dedupe_key(
+        payload: dict[str, Any],
+        is_valid_memory_type,
+        build_dedupe_key,
+    ) -> str | None:
+        """`project_memory_status_change` 用の dedupe_key 解決ヘルパー。
+
+        - payload に `dedupe_key` (str) があればそれを返す
+        - 無ければ (workflow_id, memory_type, name) から build_dedupe_key で生成
+        - 入力不正は warning ログ + None 返却（呼び出し側で early return）
+
+        `_handle_project_memory_status_change` の認知的複雑度を 15 以下に
+        保つために切り出したもの（SonarCloud 指摘）。
+        """
+        dedupe_key = payload.get("dedupe_key")
+        if dedupe_key is not None and not isinstance(dedupe_key, str):
+            logger.warning(
+                "project_memory_status_change の dedupe_key が str でない: %r",
+                dedupe_key,
+            )
+            return None
+        if dedupe_key:
+            return dedupe_key
+
+        memory_type = payload.get("memory_type")
+        name = payload.get("name")
+        if not memory_type or not name:
+            logger.warning(
+                "project_memory_status_change で dedupe_key も "
+                "memory_type/name も無いため同定不能スキップ"
+            )
+            return None
+        if not is_valid_memory_type(memory_type):
+            logger.warning(
+                "project_memory_status_change の memory_type が enum 外 "
+                "なのでスキップ: %r",
+                memory_type,
+            )
+            return None
+        workflow_id_for_key = payload.get("workflow_id")
+        if not workflow_id_for_key:
+            logger.warning(
+                "project_memory_status_change で dedupe_key も workflow_id "
+                "も無いため別 workflow 間衝突のリスクがありスキップ"
+            )
+            return None
+        if not isinstance(workflow_id_for_key, str):
+            logger.warning(
+                "project_memory_status_change で workflow_id が str で "
+                "ないためスキップ: %r",
+                workflow_id_for_key,
+            )
+            return None
+        return build_dedupe_key(
+            workflow_id=workflow_id_for_key,
+            memory_type=str(memory_type),
+            name=str(name),
         )
 
     def _resolve_work_item_for_lease_event(

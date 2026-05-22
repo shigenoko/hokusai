@@ -52,28 +52,31 @@ class _RecordingClient:
     def create_database(self, payload: dict) -> dict:
         self.calls.append(("create_database", payload))
         title = (payload.get("title") or [{}])[0].get("text", {}).get("content", "")
-        if self._fail_on == "workflows" and "Workflows" in title:
-            raise RuntimeError("workflows db creation failed")
-        if self._fail_on == "pull_requests" and "Pull Requests" in title:
-            raise RuntimeError("pr db creation failed")
-        if self._fail_on == "review_issues" and "Review Issues" in title:
-            raise RuntimeError("review issues db creation failed")
-        if self._fail_on == "work_items" and "Work Items" in title:
-            raise RuntimeError("work items db creation failed")
-        if self._fail_on == "workflow_gates" and "Workflow Gates" in title:
-            raise RuntimeError("workflow gates db creation failed")
-        if self._fail_on == "project_memory" and "Project Memory" in title:
-            raise RuntimeError("project memory db creation failed")
-        if "Workflows" in title:
-            return {"id": self._workflows_id}
-        if "Pull Requests" in title:
-            return {"id": self._pr_id}
-        if "Review Issues" in title:
-            return {"id": self._review_issues_id}
-        if "Work Items" in title:
-            return {"id": self._work_items_id}
-        if "Workflow Gates" in title:
-            return {"id": self._workflow_gates_id}
+        # fail_on key → DB タイトル substring の対応表。SonarCloud
+        # cognitive complexity 対策で if 連鎖を loop に展開。
+        fail_map = {
+            "workflows": ("Workflows", "workflows db creation failed"),
+            "pull_requests": ("Pull Requests", "pr db creation failed"),
+            "review_issues": ("Review Issues", "review issues db creation failed"),
+            "work_items": ("Work Items", "work items db creation failed"),
+            "workflow_gates": ("Workflow Gates", "workflow gates db creation failed"),
+            "project_memory": ("Project Memory", "project memory db creation failed"),
+        }
+        if self._fail_on in fail_map:
+            substr, msg = fail_map[self._fail_on]
+            if substr in title:
+                raise RuntimeError(msg)
+        # 同じ table から id を返す。マッチしない場合は最後の Project Memory。
+        id_map = [
+            ("Workflows", self._workflows_id),
+            ("Pull Requests", self._pr_id),
+            ("Review Issues", self._review_issues_id),
+            ("Work Items", self._work_items_id),
+            ("Workflow Gates", self._workflow_gates_id),
+        ]
+        for substr, db_id in id_map:
+            if substr in title:
+                return {"id": db_id}
         return {"id": self._project_memory_id}
 
     def update_database(self, database_id: str, payload: dict) -> dict:

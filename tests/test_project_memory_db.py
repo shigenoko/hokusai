@@ -24,6 +24,7 @@ from hokusai.integrations.notion_dashboard.project_memory_db import (
     ACTIVE_MEMORY_STATUSES,
     ALL_MEMORY_STATUSES,
     ALL_MEMORY_TYPES,
+    ALLOWED_APPLIES_TO_VALUES,
     DEFAULT_MEMORY_STATUS,
     MEMORY_STATUS_ACTIVE,
     MEMORY_STATUS_DEPRECATED,
@@ -36,6 +37,7 @@ from hokusai.integrations.notion_dashboard.project_memory_db import (
     MEMORY_TYPE_OPERATIONS_NOTE,
     MEMORY_TYPE_POLICY_NOTE,
     MEMORY_TYPE_PROJECT_RULE,
+    MemoryAudit,
     ProjectMemoryDBClient,
     build_dedupe_key,
     is_valid_memory_status,
@@ -205,9 +207,11 @@ def test_upsert_includes_optional_fields_when_provided():
         workflow_id="wf-1",
         workflow_page_id="wf-page",
         pull_request_page_id="pr-page",
-        approved_by="alice@example.com",
-        approved_at="2026-05-22T10:00:00",
-        expires_at="2026-12-31T23:59:59",
+        audit=MemoryAudit(
+            approved_by="alice@example.com",
+            approved_at="2026-05-22T10:00:00",
+            expires_at="2026-12-31T23:59:59",
+        ),
     )
     props = api.create_calls[0]["properties"]
     assert props["Summary"]["rich_text"][0]["text"]["content"] == "short summary"
@@ -220,6 +224,60 @@ def test_upsert_includes_optional_fields_when_provided():
     assert props["Approved By"]["rich_text"][0]["text"]["content"] == "alice@example.com"
     assert "Approved At" in props
     assert "Expires At" in props
+
+
+def test_upsert_normalizes_applies_to_string_into_single_value():
+    """applies_to に str を渡しても 1 文字ずつ split されない（Copilot 指摘）"""
+    api = _FakeAPI()
+    client = ProjectMemoryDBClient(api=api, database_id="pm-db")
+    client.upsert_memory(
+        name="X",
+        memory_type=MEMORY_TYPE_PROJECT_RULE,
+        content="c",
+        applies_to="phase3",
+        workflow_id="wf-1",
+    )
+    props = api.create_calls[0]["properties"]
+    names = [opt["name"] for opt in props["Applies To"]["multi_select"]]
+    assert names == ["phase3"]
+
+
+def test_upsert_filters_applies_to_out_of_whitelist():
+    """ALLOWED_APPLIES_TO_VALUES に含まれない値は黙って除外（DB schema drift 防止）"""
+    api = _FakeAPI()
+    client = ProjectMemoryDBClient(api=api, database_id="pm-db")
+    client.upsert_memory(
+        name="X",
+        memory_type=MEMORY_TYPE_PROJECT_RULE,
+        content="c",
+        applies_to=["phase4", "unknown_phase", "phase11", 42, "phase10"],
+        workflow_id="wf-1",
+    )
+    props = api.create_calls[0]["properties"]
+    names = [opt["name"] for opt in props["Applies To"]["multi_select"]]
+    assert names == ["phase4", "phase10"]
+
+
+def test_upsert_omits_applies_to_when_no_valid_values():
+    """全件 whitelist 外なら Applies To property 自体を含めない"""
+    api = _FakeAPI()
+    client = ProjectMemoryDBClient(api=api, database_id="pm-db")
+    client.upsert_memory(
+        name="X",
+        memory_type=MEMORY_TYPE_PROJECT_RULE,
+        content="c",
+        applies_to=["unknown_phase", "phase11"],
+        workflow_id="wf-1",
+    )
+    props = api.create_calls[0]["properties"]
+    assert "Applies To" not in props
+
+
+def test_allowed_applies_to_values_covers_phase1_through_phase10():
+    """phase1〜phase10 の 10 値が ALLOWED_APPLIES_TO_VALUES に含まれる"""
+    assert ALLOWED_APPLIES_TO_VALUES == frozenset(
+        {f"phase{i}" for i in range(1, 11)}
+    )
 
 
 def test_upsert_rejects_invalid_memory_type():
