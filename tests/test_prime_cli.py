@@ -101,7 +101,7 @@ def test_prime_returns_0_with_empty_memory_when_db_id_missing(
     assert rc == 0
     body = out.getvalue()
     assert "# HOKUSAI Prime Context — workflow `wf-1`" in body
-    assert "_active Project Memory はありません_" in body
+    assert "_active な workgraph context はありません_" in body
 
 
 def test_prime_resolves_profile_and_phase_from_state(
@@ -629,16 +629,22 @@ def test_prime_skips_handover_when_type_filter_excludes_it(
     monkeypatch.setenv("TEST_MEMORY_DB", "pm-db")
     monkeypatch.setenv("TEST_WORKFLOWS_DB", "wf-db")
 
-    handover_called: list = []
+    supersedes_called: list = []
+    handover_lookup_called: list = []
 
     class _FakeWFClient:
         def __init__(self, *, api, database_id):
-            handover_called.append("ctor")
+            pass
 
         def find_workflow_page_id(self, workflow_id):
             return "wf-page"
 
         def get_supersedes(self, page_id):
+            # handover 経路に入ったら呼ばれる。Issue #54 で workgraph context
+            # 統合のため WorkflowsDBClient 自体は --type 指定時も生成される
+            # が、_collect_handover_notes は呼ばれない（= get_supersedes に
+            # 来ない）ことで検証する。
+            supersedes_called.append("get_supersedes")
             return []
 
     class _FakeMemClient:
@@ -646,6 +652,10 @@ def test_prime_skips_handover_when_type_filter_excludes_it(
             pass
 
         def list_active_memories(self, **kwargs):
+            return []
+
+        def find_handover_notes_for_workflow(self, page_id, **kwargs):
+            handover_lookup_called.append(page_id)
             return []
 
     class _FakeAPI:
@@ -673,5 +683,162 @@ def test_prime_skips_handover_when_type_filter_excludes_it(
     with redirect_stdout(out), redirect_stderr(err):
         rc = _handle_prime(args, cfg)
     assert rc == 0
-    # WorkflowsDBClient は生成すらされない
-    assert handover_called == []
+    # handover note 取得経路は走らない（get_supersedes も find_handover も呼ばれない）
+    assert supersedes_called == []
+    assert handover_lookup_called == []
+
+
+# ---------------------------------------------------------------------------
+# workgraph context 統合（Issue #54 / 要件 §8.4 完成）
+# ---------------------------------------------------------------------------
+
+
+def test_prime_injects_workgraph_context_when_all_db_ids_set(
+    tmp_path, monkeypatch, captured
+):
+    """全 DB ID 設定済みなら work_items / review_issues / gates も prime に統合"""
+    out, err = captured
+    cfg = _make_config(tmp_path)
+    _seed_workflow(cfg)
+    monkeypatch.setenv("TEST_API_TOKEN", "t")
+    monkeypatch.setenv("TEST_MEMORY_DB", "pm-db")
+    monkeypatch.setenv("TEST_WORKFLOWS_DB", "wf-db")
+    monkeypatch.setenv("TEST_WORK_ITEMS_DB", "wi-db")
+    monkeypatch.setenv("TEST_REVIEW_ISSUES_DB", "ri-db")
+    monkeypatch.setenv("TEST_WORKFLOW_GATES_DB", "wg-db")
+
+    # cfg を拡張: 追加 env を解決可能に
+    cfg.notion_dashboard.work_items_db_id_env = "TEST_WORK_ITEMS_DB"
+    cfg.notion_dashboard.review_issues_db_id_env = "TEST_REVIEW_ISSUES_DB"
+    cfg.notion_dashboard.workflow_gates_db_id_env = "TEST_WORKFLOW_GATES_DB"
+
+    class _FakeWFClient:
+        def __init__(self, *, api, database_id):
+            pass
+
+        def find_workflow_page_id(self, workflow_id):
+            return "wf-page-1"
+
+        def get_supersedes(self, page_id):
+            return []
+
+    class _FakeMemClient:
+        def __init__(self, *, api, database_id):
+            pass
+
+        def list_active_memories(self, **kwargs):
+            return []
+
+        def find_handover_notes_for_workflow(self, page_id, **kwargs):
+            return []
+
+    class _FakeWIClient:
+        def __init__(self, *, api, database_id):
+            pass
+
+        def list_ready_work_items_for_workflow(self, page_id, **kwargs):
+            return [{"id": "wi-1", "properties": {"Title": {"title": [{"text": {"content": "Login"}}]}, "Status": {"select": {"name": "ready"}}}}]
+
+    class _FakeRIClient:
+        def __init__(self, *, api, database_id):
+            pass
+
+        def list_open_review_issues_for_workflow(self, page_id, **kwargs):
+            return [{"id": "ri-1", "properties": {"Title": {"title": [{"text": {"content": "Bug"}}]}, "Severity": {"select": {"name": "high"}}}}]
+
+    class _FakeWGClient:
+        def __init__(self, *, api, database_id):
+            pass
+
+        def list_pending_gates_for_workflow(self, page_id, **kwargs):
+            return [{"id": "g-1", "properties": {"Name": {"title": [{"text": {"content": "Sec"}}]}, "Status": {"select": {"name": "pending"}}}}]
+
+    class _FakeAPI:
+        def __init__(self, *a, **kw):
+            pass
+
+    monkeypatch.setattr("hokusai.integrations.notion_dashboard.client.NotionAPIClient", _FakeAPI)
+    monkeypatch.setattr(
+        "hokusai.integrations.notion_dashboard.project_memory_db.ProjectMemoryDBClient", _FakeMemClient,
+    )
+    monkeypatch.setattr(
+        "hokusai.integrations.notion_dashboard.workflows_db.WorkflowsDBClient", _FakeWFClient,
+    )
+    monkeypatch.setattr(
+        "hokusai.integrations.notion_dashboard.work_items_db.WorkItemsDBClient", _FakeWIClient,
+    )
+    monkeypatch.setattr(
+        "hokusai.integrations.notion_dashboard.review_issues_db.ReviewIssuesDBClient", _FakeRIClient,
+    )
+    monkeypatch.setattr(
+        "hokusai.integrations.notion_dashboard.workflow_gates_db.WorkflowGatesDBClient", _FakeWGClient,
+    )
+
+    args = _Args(workflow_id="wf-1", phase=None, memory_types=None, output="json")
+    with redirect_stdout(out), redirect_stderr(err):
+        rc = _handle_prime(args, cfg)
+    assert rc == 0
+    payload = json.loads(out.getvalue())
+    assert [w["id"] for w in payload["work_items"]] == ["wi-1"]
+    assert [r["id"] for r in payload["review_issues"]] == ["ri-1"]
+    assert [g["id"] for g in payload["gates"]] == ["g-1"]
+
+
+def test_prime_skips_workgraph_context_when_db_ids_unset(
+    tmp_path, monkeypatch, captured
+):
+    """各 DB ID 未設定なら該当 section は空配列（既存 prime 動作維持）"""
+    out, err = captured
+    cfg = _make_config(tmp_path)
+    _seed_workflow(cfg)
+    monkeypatch.setenv("TEST_API_TOKEN", "t")
+    monkeypatch.setenv("TEST_MEMORY_DB", "pm-db")
+    monkeypatch.setenv("TEST_WORKFLOWS_DB", "wf-db")
+    monkeypatch.delenv("TEST_WORK_ITEMS_DB", raising=False)
+    monkeypatch.delenv("TEST_REVIEW_ISSUES_DB", raising=False)
+    monkeypatch.delenv("TEST_WORKFLOW_GATES_DB", raising=False)
+    cfg.notion_dashboard.work_items_db_id_env = "TEST_WORK_ITEMS_DB"
+    cfg.notion_dashboard.review_issues_db_id_env = "TEST_REVIEW_ISSUES_DB"
+    cfg.notion_dashboard.workflow_gates_db_id_env = "TEST_WORKFLOW_GATES_DB"
+
+    class _FakeWFClient:
+        def __init__(self, *, api, database_id):
+            pass
+
+        def find_workflow_page_id(self, workflow_id):
+            return "wf-page-1"
+
+        def get_supersedes(self, page_id):
+            return []
+
+    class _FakeMemClient:
+        def __init__(self, *, api, database_id):
+            pass
+
+        def list_active_memories(self, **kwargs):
+            return []
+
+        def find_handover_notes_for_workflow(self, page_id, **kwargs):
+            return []
+
+    class _FakeAPI:
+        def __init__(self, *a, **kw):
+            pass
+
+    # 各 sub client は monkeypatch しない（呼ばれたらテスト fail）
+    monkeypatch.setattr("hokusai.integrations.notion_dashboard.client.NotionAPIClient", _FakeAPI)
+    monkeypatch.setattr(
+        "hokusai.integrations.notion_dashboard.project_memory_db.ProjectMemoryDBClient", _FakeMemClient,
+    )
+    monkeypatch.setattr(
+        "hokusai.integrations.notion_dashboard.workflows_db.WorkflowsDBClient", _FakeWFClient,
+    )
+
+    args = _Args(workflow_id="wf-1", phase=None, memory_types=None, output="json")
+    with redirect_stdout(out), redirect_stderr(err):
+        rc = _handle_prime(args, cfg)
+    assert rc == 0
+    payload = json.loads(out.getvalue())
+    assert payload["work_items"] == []
+    assert payload["review_issues"] == []
+    assert payload["gates"] == []

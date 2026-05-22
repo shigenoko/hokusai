@@ -1116,14 +1116,30 @@ def _handle_prime(args, config) -> int:
             notion_cfg.project_memory_db_id_env, ""
         ).strip()
 
-    # Workflows DB ID も Supersedes 世代遡及で使う（Issue #52 / 要件 §8.4）
+    # Workflows DB ID は handover_note 世代遡及 / workgraph context 統合で使う
+    # （Issue #52 / #54 / 要件 §8.4）
     workflows_db_id = ""
+    work_items_db_id = ""
+    review_issues_db_id = ""
+    workflow_gates_db_id = ""
     if notion_cfg is not None and getattr(notion_cfg, "enabled", False):
         workflows_db_id = os.environ.get(
             getattr(notion_cfg, "workflows_db_id_env", ""), ""
         ).strip()
+        work_items_db_id = os.environ.get(
+            getattr(notion_cfg, "work_items_db_id_env", ""), ""
+        ).strip()
+        review_issues_db_id = os.environ.get(
+            getattr(notion_cfg, "review_issues_db_id_env", ""), ""
+        ).strip()
+        workflow_gates_db_id = os.environ.get(
+            getattr(notion_cfg, "workflow_gates_db_id_env", ""), ""
+        ).strip()
 
     memories: list[dict] = []
+    work_items: list[dict] = []
+    review_issues: list[dict] = []
+    gates: list[dict] = []
     if api_token and db_id:
         try:
             api = NotionAPIClient(
@@ -1138,20 +1154,25 @@ def _handle_prime(args, config) -> int:
                 phase=resolved_phase,
                 types=memory_types,
             )
-            # handover_note 世代遡及（要件 §8.4 lookup rule）。Workflows DB ID
-            # 未設定 / API 障害なら skip（graceful degrade）。--type で
-            # handover_note を除外している場合も skip（呼び出し側意図を尊重）。
+            # handover_note 世代遡及 + workgraph context 統合（要件 §8.4）。
+            # Workflows DB ID 未設定 / API 障害なら handover skip（graceful
+            # degrade）。--type で handover_note を除外している場合も skip。
             inject_handover = bool(workflows_db_id) and (
                 memory_types is None
                 or "handover_note" in (memory_types or [])
             )
-            if inject_handover:
+            current_page_id = None
+            wf_client = None
+            if workflows_db_id:
                 from .integrations.notion_dashboard.workflows_db import (
                     WorkflowsDBClient,
                 )
                 wf_client = WorkflowsDBClient(
                     api=api, database_id=workflows_db_id
                 )
+                current_page_id = wf_client.find_workflow_page_id(workflow_id)
+
+            if inject_handover and wf_client is not None:
                 handover_memories = _collect_handover_notes(
                     wf_client=wf_client,
                     pm_client=client,
@@ -1159,10 +1180,44 @@ def _handle_prime(args, config) -> int:
                     profile=resolved_profile,
                 )
                 memories = _merge_memories_dedup(memories, handover_memories)
+
+            # workgraph context fetch（current workflow に紐づく ready Work Item /
+            # open Review Issue / pending Gate）。各 DB ID 未設定なら該当 section
+            # を skip（既存 graceful degrade と整合、Issue #54）。
+            if current_page_id and work_items_db_id:
+                from .integrations.notion_dashboard.work_items_db import (
+                    WorkItemsDBClient,
+                )
+                wi_client = WorkItemsDBClient(
+                    api=api, database_id=work_items_db_id
+                )
+                work_items = wi_client.list_ready_work_items_for_workflow(
+                    current_page_id
+                )
+            if current_page_id and review_issues_db_id:
+                from .integrations.notion_dashboard.review_issues_db import (
+                    ReviewIssuesDBClient,
+                )
+                ri_client = ReviewIssuesDBClient(
+                    api=api, database_id=review_issues_db_id
+                )
+                review_issues = ri_client.list_open_review_issues_for_workflow(
+                    current_page_id
+                )
+            if current_page_id and workflow_gates_db_id:
+                from .integrations.notion_dashboard.workflow_gates_db import (
+                    WorkflowGatesDBClient,
+                )
+                wg_client = WorkflowGatesDBClient(
+                    api=api, database_id=workflow_gates_db_id
+                )
+                gates = wg_client.list_pending_gates_for_workflow(
+                    current_page_id
+                )
         except Exception as e:
-            # 障害時は memory 0 件で続行（warning は stderr）
+            # 障害時は取得済みの部分結果で続行（warning は stderr）
             print(
-                f"⚠ Project Memory 取得に失敗（memory 無しで続行）: {e}",
+                f"⚠ Project Memory 取得に失敗（部分結果で続行）: {e}",
                 file=sys.stderr,
             )
 
@@ -1173,6 +1228,9 @@ def _handle_prime(args, config) -> int:
                 profile=resolved_profile,
                 current_phase=resolved_phase,
                 memories=memories,
+                work_items=work_items,
+                review_issues=review_issues,
+                gates=gates,
             )
         )
     else:
@@ -1182,6 +1240,9 @@ def _handle_prime(args, config) -> int:
                 profile=resolved_profile,
                 current_phase=resolved_phase,
                 memories=memories,
+                work_items=work_items,
+                review_issues=review_issues,
+                gates=gates,
             )
         )
     return 0

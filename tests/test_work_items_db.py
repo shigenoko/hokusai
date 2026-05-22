@@ -58,7 +58,14 @@ class _FakeAPI:
         self._first_create_call = True
         self._first_update_call = True
 
-    def query_database(self, database_id: str, *, filter_: dict | None = None) -> dict:
+    def query_database(
+        self,
+        database_id: str,
+        *,
+        filter_: dict | None = None,
+        start_cursor: str | None = None,
+        page_size: int | None = None,
+    ) -> dict:
         self.query_calls.append((database_id, filter_))
         if self._existing_id:
             return {"results": [{"id": self._existing_id}]}
@@ -440,3 +447,69 @@ def test_claim_then_release_lifecycle():
         api.update_calls[1][1]["properties"]["Lease Status"]["select"]["name"]
         == LEASE_STATUS_RELEASED
     )
+
+
+# ---------------------------------------------------------------------------
+# list_ready_work_items_for_workflow（Issue #54 / Workgraph 完成）
+# ---------------------------------------------------------------------------
+
+
+class _PaginatedAPI:
+    def __init__(self, pages: list[list[dict]]):
+        self._pages = pages
+        self.query_calls: list[dict] = []
+
+    def query_database(self, database_id, *, filter_=None, start_cursor=None, page_size=None):
+        self.query_calls.append({"filter": filter_, "start_cursor": start_cursor})
+        idx = 0 if start_cursor is None else int(start_cursor.replace("cursor-", ""))
+        results = self._pages[idx] if idx < len(self._pages) else []
+        has_more = idx < len(self._pages) - 1
+        return {
+            "results": results,
+            "has_more": has_more,
+            "next_cursor": f"cursor-{idx + 1}" if has_more else None,
+        }
+
+
+def test_list_ready_work_items_for_workflow_returns_pages():
+    api = _PaginatedAPI([[
+        {"id": "wi-1", "properties": {"Status": {"select": {"name": "ready"}}}},
+        {"id": "wi-2", "properties": {"Status": {"select": {"name": "in_progress"}}}},
+    ]])
+    client = WorkItemsDBClient(api=api, database_id="wi-db")
+    result = client.list_ready_work_items_for_workflow("wf-page")
+    assert [r["id"] for r in result] == ["wi-1", "wi-2"]
+    # filter: Status in {ready, in_progress} + Workflow contains
+    call_filter = api.query_calls[0]["filter"]
+    assert "and" in call_filter
+    or_clause = next(c for c in call_filter["and"] if "or" in c)
+    statuses = [c["select"]["equals"] for c in or_clause["or"]]
+    assert sorted(statuses) == ["in_progress", "ready"]
+    wf_clause = next(c for c in call_filter["and"] if c.get("property") == "Workflow")
+    assert wf_clause["relation"]["contains"] == "wf-page"
+
+
+def test_list_ready_work_items_for_workflow_returns_empty_for_blank_page_id():
+    api = _PaginatedAPI([])
+    client = WorkItemsDBClient(api=api, database_id="wi-db")
+    assert client.list_ready_work_items_for_workflow("") == []
+    assert client.list_ready_work_items_for_workflow(None) == []
+    assert api.query_calls == []
+
+
+def test_list_ready_work_items_returns_partial_on_api_failure():
+    """API 失敗時は取得済み部分結果を保持して返す"""
+
+    class _MidFailAPI:
+        def __init__(self):
+            self.calls = 0
+
+        def query_database(self, *args, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                return {"results": [{"id": "wi-1"}], "has_more": True, "next_cursor": "c1"}
+            raise NotionAPIError(503, "service unavailable")
+
+    client = WorkItemsDBClient(api=_MidFailAPI(), database_id="wi-db")
+    result = client.list_ready_work_items_for_workflow("wf-page")
+    assert [r["id"] for r in result] == ["wi-1"]

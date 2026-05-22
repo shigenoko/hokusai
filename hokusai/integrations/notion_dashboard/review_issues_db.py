@@ -185,6 +185,71 @@ class ReviewIssuesDBClient:
         )
         return self._submit_with_property_pruning(existing_page_id, properties)
 
+    def list_open_review_issues_for_workflow(
+        self,
+        workflow_page_id: str | None,
+        *,
+        max_pages: int = 5,
+    ) -> list[dict]:
+        """指定 workflow に紐づく open な Review Issue を取得する
+        （Workgraph 完成 / Issue #54 / 要件 §8.4 `hokusai prime` 統合表示）。
+
+        サーバ側 filter: AND(Status == open, Workflow contains workflow_page_id)。
+        Phase 6 verify / Phase 7 review の未解消指摘を prime 出力に含める用途。
+
+        API 失敗時は部分結果を保持して返す（`find_handover_notes_for_workflow`
+        と同じ graceful degrade パターン）。
+        """
+        if not workflow_page_id:
+            return []
+
+        results: list[dict] = []
+        start_cursor: str | None = None
+        truncated = False
+        for page_idx in range(max_pages):
+            try:
+                response = self._api.query_database(
+                    self._database_id,
+                    filter_={
+                        "and": [
+                            {
+                                "property": "Status",
+                                "select": {"equals": STATUS_OPEN},
+                            },
+                            {
+                                "property": "Workflow",
+                                "relation": {"contains": workflow_page_id},
+                            },
+                        ]
+                    },
+                    start_cursor=start_cursor,
+                    page_size=100,
+                )
+            except Exception as e:
+                logger.warning(
+                    "Review Issues DB list_open_review_issues_for_workflow 失敗 "
+                    "(部分結果 %d 件で続行): %s",
+                    len(results), e,
+                )
+                return results
+            results.extend(response.get("results") or [])
+            if not response.get("has_more"):
+                break
+            start_cursor = response.get("next_cursor")
+            if not start_cursor:
+                break
+            if page_idx + 1 >= max_pages:
+                truncated = True
+                break
+
+        if truncated:
+            logger.warning(
+                "list_open_review_issues_for_workflow が max_pages=%d で打ち切られました "
+                "(取得済み %d 件で返却)",
+                max_pages, len(results),
+            )
+        return results
+
     def find_by_dedupe_key(self, dedupe_key: str) -> str | None:
         """dedupe_key で既存レコードを検索する。"""
         if not dedupe_key:
