@@ -1141,7 +1141,7 @@ def _handle_prime(args, config) -> int:
             # handover_note 世代遡及（要件 §8.4 lookup rule）。Workflows DB ID
             # 未設定 / API 障害なら skip（graceful degrade）。--type で
             # handover_note を除外している場合も skip（呼び出し側意図を尊重）。
-            inject_handover = workflows_db_id and (
+            inject_handover = bool(workflows_db_id) and (
                 memory_types is None
                 or "handover_note" in (memory_types or [])
             )
@@ -1217,7 +1217,14 @@ def _collect_handover_notes(
     for _ in range(max_depth):
         try:
             priors = wf_client.get_supersedes(current_page_id)
-        except Exception:
+        except Exception as e:
+            # graceful degrade だが silent skip だと原因調査が困難になる
+            # （Copilot 指摘）。stderr に warning を出して chain を打ち切る。
+            print(
+                f"⚠ handover_note 世代遡及で get_supersedes が失敗（"
+                f"page_id={current_page_id[:8]}...）。chain 打ち切り: {e}",
+                file=sys.stderr,
+            )
             break
         if not priors:
             break
@@ -1251,7 +1258,7 @@ def _merge_memories_dedup(
     結果に同じ memory が含まれることがある（旧 workflow の active が現 workflow から
     手動でも参照されている場合等）。Notion page id で dedup する。
     """
-    seen: set = set()
+    seen: set[str] = set()
     out: list[dict] = []
     for src in (base, extra):
         for m in src:

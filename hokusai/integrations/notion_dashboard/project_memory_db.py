@@ -357,7 +357,7 @@ class ProjectMemoryDBClient:
 
     def find_handover_notes_for_workflow(
         self,
-        workflow_page_id: str,
+        workflow_page_id: str | None,
         *,
         profile: str | None = None,
         max_pages: int = 5,
