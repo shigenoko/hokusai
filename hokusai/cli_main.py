@@ -373,6 +373,42 @@ def _build_parser():
         help="listen port（省略時は profile registry の dashboard.port → 8765）",
     )
 
+    # prime コマンド: active Project Memory を Agent prompt へ要約注入する
+    # ためのテキストを出力する（Workgraph Phase 6 / Issue #48）
+    prime_parser = subparsers.add_parser(
+        "prime",
+        help="active Project Memory を Agent prompt 用に出力（Workgraph Phase 6）",
+        parents=[shared_options],
+    )
+    prime_parser.add_argument(
+        "workflow_id",
+        help="ワークフローID（state から current phase / profile を解決）",
+    )
+    prime_parser.add_argument(
+        "--phase",
+        default=None,
+        help=(
+            "対象 phase を上書き指定（例 phase5）。未指定なら workflow state の "
+            "current_phase を採用、それも無ければ phase フィルタ無し。"
+        ),
+    )
+    prime_parser.add_argument(
+        "--type",
+        action="append",
+        dest="memory_types",
+        default=None,
+        help=(
+            "対象 Memory Type を絞り込む（複数指定可: --type project_rule "
+            "--type avoidance）。未指定なら全 Type。"
+        ),
+    )
+    prime_parser.add_argument(
+        "--output",
+        choices=("markdown", "json"),
+        default="markdown",
+        help="出力形式（既定 markdown）",
+    )
+
     return parser, profile_parser, connect_parser
 
 
@@ -629,6 +665,10 @@ def main():
     # dashboard コマンド: config 解決後に起動（WorkflowRunner は不要）
     if args.command == "dashboard":
         sys.exit(_handle_dashboard(args, config))
+
+    # prime コマンド: active Project Memory を Agent prompt 用に出力
+    if args.command == "prime":
+        sys.exit(_handle_prime(args, config))
 
     # 環境設定チェック（start/continueコマンドの場合）
     if args.command in ("start", "continue"):
@@ -977,6 +1017,108 @@ def _handle_dashboard(args, config) -> int:
         else:
             print(f"エラー: port {port} の確認中に予期しない OS エラー: {e}")
         return 1
+
+
+def _handle_prime(args, config) -> int:
+    """`hokusai prime <workflow-id>` のハンドラ（Workgraph Phase 6 / Issue #48）。
+
+    active Project Memory を要約整形して stdout に出力する。
+
+    解決順序:
+    - profile: CLI 明示 (--profile) > workflow state["profile_name"]（後発で
+      上書きされた値）
+    - current_phase: CLI 明示 (--phase) > workflow state["current_phase"]
+    - Notion API token / Project Memory DB ID: profile config（既存
+      notion_dashboard config の解決則と同じ）
+
+    Project Memory DB が未設定 / Notion 未接続なら出力 0 件で gracefully
+    skip（exit 0、Agent prompt として「memory なし」状態を許容）。
+
+    Returns:
+        0: 正常出力 / 1: workflow_id が SQLite に無い等の致命エラー
+    """
+    import os
+
+    from .integrations.notion_dashboard.client import NotionAPIClient
+    from .integrations.notion_dashboard.prime_renderer import (
+        render_prime_json,
+        render_prime_markdown,
+    )
+    from .integrations.notion_dashboard.project_memory_db import (
+        ProjectMemoryDBClient,
+    )
+    from .persistence import SQLiteStore
+
+    workflow_id: str = args.workflow_id
+    cli_phase: str | None = getattr(args, "phase", None)
+    memory_types = getattr(args, "memory_types", None)
+    output_format: str = getattr(args, "output", "markdown")
+    profile_arg = getattr(args, "profile", None)
+
+    # workflow state を SQLite から取得（profile / current_phase の解決源）
+    store = SQLiteStore(config.database_path)
+    state = store.load_workflow(workflow_id)
+    if state is None:
+        print(
+            f"✗ workflow '{workflow_id}' が見つかりません",
+            file=sys.stderr,
+        )
+        return 1
+
+    resolved_profile = profile_arg or state.get("profile_name")
+    resolved_phase = cli_phase or state.get("current_phase")
+
+    # Project Memory DB が未設定なら memory 0 件の prime を返す（後方互換）
+    notion_cfg = getattr(config, "notion_dashboard", None)
+    api_token = ""
+    db_id = ""
+    if notion_cfg is not None and getattr(notion_cfg, "enabled", False):
+        api_token = os.environ.get(notion_cfg.api_token_env, "").strip()
+        db_id = os.environ.get(
+            notion_cfg.project_memory_db_id_env, ""
+        ).strip()
+
+    memories: list[dict] = []
+    if api_token and db_id:
+        try:
+            api = NotionAPIClient(
+                token=api_token,
+                requests_per_second=getattr(
+                    notion_cfg.rate_limit, "requests_per_second", 3.0
+                ),
+            )
+            client = ProjectMemoryDBClient(api=api, database_id=db_id)
+            memories = client.list_active_memories(
+                profile=resolved_profile,
+                phase=resolved_phase,
+                types=memory_types,
+            )
+        except Exception as e:
+            # 障害時は memory 0 件で続行（warning は stderr）
+            print(
+                f"⚠ Project Memory 取得に失敗（memory 無しで続行）: {e}",
+                file=sys.stderr,
+            )
+
+    if output_format == "json":
+        sys.stdout.write(
+            render_prime_json(
+                workflow_id=workflow_id,
+                profile=resolved_profile,
+                current_phase=resolved_phase,
+                memories=memories,
+            )
+        )
+    else:
+        sys.stdout.write(
+            render_prime_markdown(
+                workflow_id=workflow_id,
+                profile=resolved_profile,
+                current_phase=resolved_phase,
+                memories=memories,
+            )
+        )
+    return 0
 
 
 def _handle_notion_migrate_schema(args, config=None) -> int:
