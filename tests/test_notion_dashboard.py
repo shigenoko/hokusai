@@ -3029,14 +3029,20 @@ def test_get_supersedes_returns_empty_when_page_id_blank():
     assert api.calls == []
 
 
-def test_get_supersedes_returns_empty_on_api_failure():
+def test_get_supersedes_propagates_api_failure_to_caller():
+    """API 障害は呼び出し元に伝播（Copilot 指摘 / `find_workflow_page_id` と
+    責務統一: 「Supersedes 未設定 = 空リスト」と「Notion 障害 = 例外」を
+    区別可能にする。graceful degrade と warning は `_collect_handover_notes`
+    側で行う）"""
+    from hokusai.integrations.notion_dashboard.client import NotionAPIError
+
     class _RaisingAPI:
         def retrieve_page(self, page_id: str) -> dict:
-            from hokusai.integrations.notion_dashboard.client import NotionAPIError
             raise NotionAPIError(503, "service unavailable")
 
     client = WorkflowsDBClient(api=_RaisingAPI(), database_id="wf-db")
-    assert client.get_supersedes("page-new") == []
+    with pytest.raises(NotionAPIError):
+        client.get_supersedes("page-new")
 
 
 def test_set_cancel_reason_writes_rich_text():

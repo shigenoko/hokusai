@@ -1207,6 +1207,11 @@ def _collect_handover_notes(
     起点 workflow 自身は対象外（current workflow に handover_note を残すケース
     は無く、handover_note は「前任から渡される」もの: 要件 §8.6）。
     """
+    from .integrations.notion_dashboard.client import (
+        NotionAPIError,
+        NotionRateLimitError,
+    )
+
     start_page_id = wf_client.find_workflow_page_id(workflow_id)
     if not start_page_id:
         return []
@@ -1217,9 +1222,12 @@ def _collect_handover_notes(
     for _ in range(max_depth):
         try:
             priors = wf_client.get_supersedes(current_page_id)
-        except Exception as e:
-            # graceful degrade だが silent skip だと原因調査が困難になる
-            # （Copilot 指摘）。stderr に warning を出して chain を打ち切る。
+        except (NotionAPIError, NotionRateLimitError) as e:
+            # API 系例外のみ握り潰して graceful degrade。stderr に warning を
+            # 出して原因調査を可能にする（Copilot 指摘: 「Supersedes 未設定 =
+            # 空リスト」と「Notion 障害」を区別するため、`get_supersedes` 側で
+            # API 系例外を伝播させる設計に変更）。それ以外の例外は呼び出し元の
+            # 大きな try-except に任せる（バグ早期発見）。
             print(
                 f"⚠ handover_note 世代遡及で get_supersedes が失敗（"
                 f"page_id={current_page_id[:8]}...）。chain 打ち切り: {e}",

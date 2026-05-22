@@ -197,19 +197,20 @@ class WorkflowsDBClient:
     def get_supersedes(self, page_id: str) -> list[str]:
         """`Supersedes` リレーション値（旧 workflow の page_id リスト）を取得する。
 
-        次 PR（handover_note 世代遡及）で使用予定。Notion から返る
-        `relation` プロパティを抜き出して `[{"id": "..."}]` の id を平坦化する。
-        プロパティが存在しない / 失敗時は空リストを返す（部分結果保持の方針）。
+        handover_note 世代遡及（Workgraph Phase 7 / Issue #52）で使用。Notion
+        から返る `relation` プロパティを抜き出して `[{"id": "..."}]` の id を
+        平坦化する。プロパティが Notion 側に存在しない場合は空リストを返す。
+
+        API 系例外（`NotionAPIError` / `NotionRateLimitError`）は呼び出し元に
+        伝播させ、graceful degrade の判断と warning ログ責務は呼び出し元に
+        委ねる（`find_workflow_page_id` と同じ責務分割。Copilot 指摘:
+        `_collect_handover_notes` で「Supersedes 未設定」と「Notion 障害」を
+        区別できるようにするため）。それ以外の例外（想定外レスポンス形状 /
+        実装バグ等）はそのまま raise してバグの早期発見を可能にする。
         """
         if not page_id:
             return []
-        try:
-            page = self._api.retrieve_page(page_id)
-        except Exception as e:
-            logger.debug(
-                f"Workflows DB retrieve_page 失敗: page_id={page_id[:8]}..., error={e}"
-            )
-            return []
+        page = self._api.retrieve_page(page_id)
         prop = (page.get("properties") or {}).get("Supersedes") or {}
         relations = prop.get("relation") or []
         return [r.get("id") for r in relations if r.get("id")]
