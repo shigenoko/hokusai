@@ -18,6 +18,7 @@ from hokusai.integrations.notion_dashboard.setup import (
     PULL_REQUESTS_DB_TITLE,
     REVIEW_ISSUES_DB_TITLE,
     WORK_ITEMS_DB_TITLE,
+    WORKFLOW_GATES_DB_TITLE,
     WORKFLOWS_DB_TITLE,
     scaffold_notion_workspace,
     setup_notion_workspace,
@@ -34,6 +35,7 @@ class _RecordingClient:
         pr_id: str = "pr-db-id",
         review_issues_id: str = "ri-db-id",
         work_items_id: str = "wi-db-id",
+        workflow_gates_id: str = "wg-db-id",
         fail_on: str | None = None,
     ):
         self.calls: list[tuple[str, dict]] = []
@@ -41,6 +43,7 @@ class _RecordingClient:
         self._pr_id = pr_id
         self._review_issues_id = review_issues_id
         self._work_items_id = work_items_id
+        self._workflow_gates_id = workflow_gates_id
         self._fail_on = fail_on
 
     def create_database(self, payload: dict) -> dict:
@@ -54,13 +57,17 @@ class _RecordingClient:
             raise RuntimeError("review issues db creation failed")
         if self._fail_on == "work_items" and "Work Items" in title:
             raise RuntimeError("work items db creation failed")
+        if self._fail_on == "workflow_gates" and "Workflow Gates" in title:
+            raise RuntimeError("workflow gates db creation failed")
         if "Workflows" in title:
             return {"id": self._workflows_id}
         if "Pull Requests" in title:
             return {"id": self._pr_id}
         if "Review Issues" in title:
             return {"id": self._review_issues_id}
-        return {"id": self._work_items_id}
+        if "Work Items" in title:
+            return {"id": self._work_items_id}
+        return {"id": self._workflow_gates_id}
 
     def update_database(self, database_id: str, payload: dict) -> dict:
         # Work Items DB の Dependencies（self-relation）追加だけで呼ばれる
@@ -91,31 +98,30 @@ def test_setup_rejects_empty_parent_page_id():
 # ---------------------------------------------------------------------------
 
 
-def test_setup_creates_four_resources_in_order():
-    """Workflows → Pull Requests → Review Issues → Work Items の順で作成し、
-    Work Items DB 作成後に Dependencies（self-relation）を update で追加する
-    （Issue #38 / Workgraph Phase 2）。Review Issues DB 側の `Blocking Work
-    Items` プロパティは `Blocking Review Issues` を dual_property で作成する
-    ことで Notion が自動生成するため、HOKUSAI 側からの update_database は
-    Dependencies の 1 回のみ。"""
+def test_setup_creates_five_resources_in_order():
+    """Workflows → Pull Requests → Review Issues → Work Items → Workflow Gates
+    の順で作成し、Work Items 作成直後の Dependencies（self-relation）追加で
+    update_database を 1 回呼ぶ（Issue #38 + Issue #44）。"""
     client = _RecordingClient()
     result = setup_notion_workspace(
         "token", "parent-page-id", api_client=client
     )
 
     actions = [c[0] for c in client.calls]
-    # create_database x 4 + update_database x 1（Dependencies self-relation のみ）
+    # create_database x 5 + update_database x 1
     assert actions == [
         "create_database",
         "create_database",
         "create_database",
         "create_database",
-        "update_database",
+        "update_database",  # Work Items Dependencies self-relation
+        "create_database",  # Workflow Gates DB（Dependencies update の後）
     ]
     assert result["workflows_db_id"] == "wf-db-id"
     assert result["pull_requests_db_id"] == "pr-db-id"
     assert result["review_issues_db_id"] == "ri-db-id"
     assert result["work_items_db_id"] == "wi-db-id"
+    assert result["workflow_gates_db_id"] == "wg-db-id"
 
 
 def test_setup_workflows_db_payload_includes_description_warning():
@@ -420,6 +426,56 @@ def test_setup_work_items_dependencies_self_relation_added_after_create():
     deps = args["payload"]["properties"]["Dependencies"]
     # self-relation: database_id を自分自身（Work Items DB の id）に指定
     assert deps["relation"]["database_id"] == "wi-db-id"
+
+
+def test_setup_workflow_gates_db_payload_includes_relations():
+    """Workflow Gates DB 作成 payload に Workflow / PR / Review Issue の
+    single_property relation と Work Item の dual_property relation が含まれる
+    （Issue #44 / Workgraph Phase 4）。"""
+    client = _RecordingClient()
+    setup_notion_workspace("token", "parent", api_client=client)
+
+    # 5 番目 create_database が Workflow Gates DB
+    wg_payload = client.calls[4][1]  # index 4 = 5 番目（0-indexed）
+    # 注: Dependencies update が間に挟まるので実際は index 5
+    create_calls = [c for c in client.calls if c[0] == "create_database"]
+    assert len(create_calls) == 5
+    wg_payload = create_calls[4][1]
+    title_text = wg_payload["title"][0]["text"]["content"]
+    assert title_text == WORKFLOW_GATES_DB_TITLE
+    props = wg_payload["properties"]
+    # single_property relations
+    assert props["Workflow"]["relation"]["database_id"] == "wf-db-id"
+    assert "single_property" in props["Workflow"]["relation"]
+    assert props["Pull Request"]["relation"]["database_id"] == "pr-db-id"
+    assert "single_property" in props["Pull Request"]["relation"]
+    assert props["Review Issue"]["relation"]["database_id"] == "ri-db-id"
+    assert "single_property" in props["Review Issue"]["relation"]
+    # dual_property relation (Work Item → Gates synced backref)
+    work_item_rel = props["Work Item"]["relation"]
+    assert work_item_rel["database_id"] == "wi-db-id"
+    assert work_item_rel["dual_property"]["synced_property_name"] == "Gates"
+    # 主要プロパティ
+    for key in (
+        "Name",
+        "Gate Type",
+        "Status",
+        "Required By Phase",
+        "Approver",
+        "Decision Reason",
+        "Dedupe Key",
+        "Due At",
+        "Created At",
+        "Last Updated",
+    ):
+        assert key in props, f"Workflow Gates DB schema に {key} が含まれていない"
+
+
+def test_setup_raises_when_workflow_gates_db_fails():
+    """Workflow Gates DB 作成失敗時に NotionSetupError でラップされる"""
+    client = _RecordingClient(fail_on="workflow_gates")
+    with pytest.raises(NotionSetupError, match="Workflow Gates DB"):
+        setup_notion_workspace("token", "parent", api_client=client)
 
 
 def test_setup_does_not_manually_add_blocking_work_items_reverse_relation():
@@ -2133,10 +2189,11 @@ def test_setup_workspace_without_scaffold_does_not_create_pages():
     """scaffold=False（既定）なら DB のみ作成、ページは作らない"""
     client = _DBPlusScaffoldClient()
     result = setup_notion_workspace("token", "parent", api_client=client)
-    # Workflows + PR + Review Issues + Work Items = 4
-    assert client.create_database_calls == 4
-    # Dependencies self-relation のみ = 1（Blocking Work Items は dual_property
-    # により Notion が自動生成するので HOKUSAI 側からの update は不要）
+    # Workflows + PR + Review Issues + Work Items + Workflow Gates = 5
+    assert client.create_database_calls == 5
+    # Dependencies self-relation のみ = 1（Blocking Work Items / Gates は
+    # dual_property により Notion が自動生成するので HOKUSAI 側からの
+    # update は Dependencies のみ）
     assert client.update_database_calls == 1
     assert client.create_page_calls == []
     assert "scaffold" not in result
@@ -2148,7 +2205,7 @@ def test_setup_workspace_with_scaffold_creates_both():
     result = setup_notion_workspace(
         "token", "parent", scaffold=True, api_client=client
     )
-    assert client.create_database_calls == 4
+    assert client.create_database_calls == 5
     assert len(client.create_page_calls) == 4  # ハブ + サブ 3
     assert "scaffold" in result
     assert len(result["scaffold"]["created"]) == 4
