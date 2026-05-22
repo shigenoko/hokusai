@@ -707,48 +707,12 @@ class NotionSyncDispatcher:
         client = self._get_work_items_client(work_items_db_id)
         page_id = client.find_by_dedupe_key(dedupe_key)
         if page_id is None:
-            # Work Item が見つからない場合、対応する `work_item_upsert` が
-            # outbox に残っているかを確認する。残っていれば、Phase 4 の upsert
-            # が Notion 障害等で pending のまま Phase 5 の status_change が
-            # 先に走った race condition なので、deferして outbox 再送に任せる
-            # （`workflow_started` ↔ `review_issue_raised` と同じ deferred 戦略。
-            # PR #41 Copilot 7 回目指摘で silent drop を防止）。
             workflow_id = payload.get("workflow_id")
-            # outbox に **同じ dedupe_key の** work_item_upsert が pending かを
-            # inline で確認する（PR #41 Copilot 8 回目指摘で範囲を絞り込み）。
-            # 旧版は `workflow_id × event_type` で集計していたため、対象 Work
-            # Item と無関係な別 item の upsert が残っているだけで status_change
-            # が永久 defer されるリスクがあった。idempotency_key は
-            # `{wid}:work_item_upsert:{dedupe_key}` 形式なので exact match で
-            # 同定する（drain 層 `_prepare_work_item_dispatch` の生成則と一致）。
-            # 失敗時は `0` 扱いで defer をスキップし、genuine miss 側に倒す。
-            pending_upsert = 0
-            if workflow_id and self._store is not None:
-                expected_key = f"{workflow_id}:work_item_upsert:{dedupe_key}"
-                try:
-                    with self._store._connect() as conn:  # type: ignore[attr-defined]
-                        row = conn.execute(
-                            "SELECT COUNT(*) FROM notion_sync_outbox "
-                            "WHERE idempotency_key = ?",
-                            (expected_key,),
-                        ).fetchone()
-                        pending_upsert = int(row[0]) if row else 0
-                except Exception:
-                    pending_upsert = 0
-            if pending_upsert > 0:
-                raise NotionAPIError(
-                    503,
-                    f"work_item_upsert not yet synced for workflow_id={workflow_id}; "
-                    f"deferring work_item_status_change dispatch "
-                    f"({pending_upsert} pending work_item_upsert events)",
-                    code="work_item_upsert_pending",
-                )
-            # genuine miss（upsert も無く Notion 側にも page が存在しない）。
-            # 後続に影響しないので warning で skip。
-            logger.warning(
-                "Work Item の status 遷移先 page が見つからない: "
-                f"workflow_id={workflow_id}, "
-                f"title={payload.get('title')!r}, dedupe_key={dedupe_key[:8]}..."
+            self._defer_or_skip_missing_work_item(
+                workflow_id=workflow_id,
+                dedupe_key=dedupe_key,
+                event_label="work_item_status_change",
+                title=payload.get("title"),
             )
             return
         client.update_status(page_id, str(status))
@@ -1328,6 +1292,59 @@ class NotionSyncDispatcher:
             name=str(name),
         )
 
+    def _defer_or_skip_missing_work_item(
+        self,
+        *,
+        workflow_id: Any,
+        dedupe_key: str,
+        event_label: str,
+        title: Any,
+    ) -> None:
+        """`find_by_dedupe_key` が miss した際の共通 defer / skip ロジック。
+
+        Work Item が見つからない場合、対応する `work_item_upsert` が outbox
+        に残っているかを確認し、残っていれば 503 で defer して outbox 再送に
+        任せる（race condition: Phase 4 upsert が Notion 障害等で pending の
+        まま Phase 5 status_change が先行した場合）。残っていなければ genuine
+        miss として warning + skip する。
+
+        idempotency_key は `{wid}:work_item_upsert:{dedupe_key}` 形式で
+        drain 層 `_prepare_work_item_dispatch` の生成則と一致する。
+
+        SonarCloud duplication 対策で `_handle_work_item_status_change` /
+        `_resolve_work_item_for_lease_event` の重複ロジックを集約。失敗時は
+        `0` 扱いで defer をスキップし genuine miss 側に倒す。
+        """
+        pending_upsert = 0
+        if workflow_id and self._store is not None:
+            expected_key = f"{workflow_id}:work_item_upsert:{dedupe_key}"
+            try:
+                with self._store._connect() as conn:  # type: ignore[attr-defined]
+                    row = conn.execute(
+                        "SELECT COUNT(*) FROM notion_sync_outbox "
+                        "WHERE idempotency_key = ?",
+                        (expected_key,),
+                    ).fetchone()
+                    pending_upsert = int(row[0]) if row else 0
+            except Exception:
+                pending_upsert = 0
+        if pending_upsert > 0:
+            raise NotionAPIError(
+                503,
+                f"work_item_upsert not yet synced for workflow_id={workflow_id}; "
+                f"deferring {event_label} dispatch "
+                f"({pending_upsert} pending work_item_upsert events)",
+                code="work_item_upsert_pending",
+            )
+        logger.warning(
+            "%s の対象 page が見つからない: workflow_id=%s, "
+            "title=%r, dedupe_key=%s...",
+            event_label,
+            workflow_id,
+            title,
+            dedupe_key[:8],
+        )
+
     def _resolve_work_item_for_lease_event(
         self, payload: dict[str, Any], *, event_label: str
     ) -> tuple[str | None, Any]:
@@ -1420,34 +1437,11 @@ class NotionSyncDispatcher:
         page_id = client.find_by_dedupe_key(dedupe_key)
         if page_id is None:
             workflow_id = payload.get("workflow_id")
-            pending_upsert = 0
-            if workflow_id and self._store is not None:
-                expected_key = f"{workflow_id}:work_item_upsert:{dedupe_key}"
-                try:
-                    with self._store._connect() as conn:  # type: ignore[attr-defined]
-                        row = conn.execute(
-                            "SELECT COUNT(*) FROM notion_sync_outbox "
-                            "WHERE idempotency_key = ?",
-                            (expected_key,),
-                        ).fetchone()
-                        pending_upsert = int(row[0]) if row else 0
-                except Exception:
-                    pending_upsert = 0
-            if pending_upsert > 0:
-                raise NotionAPIError(
-                    503,
-                    f"work_item_upsert not yet synced for workflow_id="
-                    f"{workflow_id}; deferring {event_label} dispatch "
-                    f"({pending_upsert} pending work_item_upsert events)",
-                    code="work_item_upsert_pending",
-                )
-            logger.warning(
-                "%s の対象 page が見つからない: workflow_id=%s, "
-                "title=%r, dedupe_key=%s...",
-                event_label,
-                workflow_id,
-                payload.get("title"),
-                dedupe_key[:8],
+            self._defer_or_skip_missing_work_item(
+                workflow_id=workflow_id,
+                dedupe_key=dedupe_key,
+                event_label=event_label,
+                title=payload.get("title"),
             )
             return None, None
         return page_id, client

@@ -562,15 +562,21 @@ class WorkflowRunner:
         if not dkey:
             memory_type = enriched.get("memory_type")
             name = enriched.get("name")
-            if memory_type and name:
+            # workflow_id が空のまま build_dedupe_key を呼ぶと None → "" に正規化
+            # されて別 workflow 間で dedupe_key が衝突するため、wid が無ければ
+            # 自動生成を skip して explicit marker を使う（Copilot 指摘 / PR #43
+            # の `_missing_work_item_title` と同じパターン）。これにより
+            # dispatcher 側の workflow_id 必須 guard とも整合する。
+            if memory_type and name and wid:
                 dkey = build_dedupe_key(
-                    workflow_id=wid or None,
+                    workflow_id=wid,
                     memory_type=str(memory_type),
                     name=str(name),
                 )
                 enriched["dedupe_key"] = dkey
             else:
-                # 同定情報欠落時の衝突回避 marker（他 DB と同じパターン）
+                # 同定情報欠落（memory_type/name 未設定 or workflow_id 未設定）
+                # 時の衝突回避 marker（他 DB と同じパターン）
                 dkey = "_missing_memory_identity"
         idempotency_key = (
             f"{wid}:{event_for_key}:{dkey}"
