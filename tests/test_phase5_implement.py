@@ -502,3 +502,73 @@ class TestEnqueueWorkItemDoneTransitions:
         assert state["pending_work_items"][0]["title"] == "preexisting"
         assert state["pending_work_items"][1]["title"] == "new item"
         assert state["pending_work_items"][1]["status"] == "done"
+
+
+# ---------------------------------------------------------------------------
+# Work Item claim / lease release enqueue（Workgraph Phase 3 / Issue #42）
+# ---------------------------------------------------------------------------
+
+
+class TestEnqueueWorkItemClaims:
+    """_enqueue_work_item_claims のテスト"""
+
+    def test_enqueue_claim_event_for_each_work_item(self):
+        """work_plan の Work Item ごとに `_event="claim"` marker 付き payload を
+        pending_work_items に enqueue する"""
+        from hokusai.nodes.phase5_implement import _enqueue_work_item_claims
+
+        state = {
+            "workflow_id": "wf-1",
+            "work_plan": """\
+- [ ] implement login
+- [ ] add unit tests
+""",
+            "pending_work_items": [],
+        }
+        count = _enqueue_work_item_claims(state, claimed_by="claude_code")
+        assert count == 2
+        pending = state["pending_work_items"]
+        for item in pending:
+            assert item["workflow_id"] == "wf-1"
+            assert item["phase"] == 4
+            assert item["claimed_by"] == "claude_code"
+            assert item["claim_type"] == "agent"
+            assert item["_event"] == "claim"
+
+    def test_enqueue_claim_no_op_when_work_plan_empty(self):
+        from hokusai.nodes.phase5_implement import _enqueue_work_item_claims
+
+        state = {"workflow_id": "wf-1", "work_plan": "", "pending_work_items": []}
+        assert _enqueue_work_item_claims(state) == 0
+        assert state["pending_work_items"] == []
+
+
+class TestEnqueueWorkItemLeaseReleases:
+    """_enqueue_work_item_lease_releases のテスト"""
+
+    def test_enqueue_release_event_for_each_work_item(self):
+        """work_plan の Work Item ごとに `_event="lease_release"` marker 付き
+        payload を enqueue する"""
+        from hokusai.nodes.phase5_implement import (
+            _enqueue_work_item_lease_releases,
+        )
+
+        state = {
+            "workflow_id": "wf-1",
+            "work_plan": "- [ ] implement X\n- [ ] implement Y\n",
+            "pending_work_items": [],
+        }
+        count = _enqueue_work_item_lease_releases(state)
+        assert count == 2
+        for item in state["pending_work_items"]:
+            assert item["workflow_id"] == "wf-1"
+            assert item["phase"] == 4
+            assert item["_event"] == "lease_release"
+
+    def test_enqueue_release_no_op_when_no_work_items(self):
+        from hokusai.nodes.phase5_implement import (
+            _enqueue_work_item_lease_releases,
+        )
+
+        state = {"workflow_id": "wf-1", "work_plan": "ただの段落\n", "pending_work_items": []}
+        assert _enqueue_work_item_lease_releases(state) == 0

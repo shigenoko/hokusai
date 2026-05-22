@@ -14,10 +14,12 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Iterable, Mapping
 
 from .review_issues_db import STATUS_OPEN as REVIEW_ISSUE_STATUS_OPEN
 from .work_items_db import (
+    LEASE_STATUS_ACTIVE,
     STATUS_BLOCKED,
     STATUS_CANCELED,
     STATUS_DONE,
@@ -77,6 +79,14 @@ def compute_ready_state(
         # 既に進行中／完了側は再判定対象外（Phase 5 が決めた状態を温存）
         return current_status
 
+    # **Active lease check（Workgraph Phase 3 / Issue #42）**:
+    # 要件 §4.5 で「active な lease が存在しない」を ready 条件に含む。
+    # Lease Status=active かつ Lease Expires At > now の Work Item は
+    # 別 Agent が処理中とみなし、in_progress 相当として扱う（再 claim を
+    # 防ぐ）。期限切れの active lease は無視（再割当可能な状態）。
+    if _has_active_unexpired_lease(work_item):
+        return STATUS_IN_PROGRESS
+
     dep_ids = _as_list(work_item.get("dependency_page_ids"))
     block_ids = _as_list(work_item.get("blocking_review_issue_page_ids"))
 
@@ -91,6 +101,41 @@ def compute_ready_state(
             block_ids, review_issues_by_page_id
         ) else STATUS_BLOCKED
     return STATUS_BLOCKED
+
+
+def _has_active_unexpired_lease(work_item: Mapping[str, object]) -> bool:
+    """Work Item に active な未期限 lease があるかを返す（Workgraph Phase 3）。
+
+    判定:
+    - `lease_status` キーが `active`（LEASE_STATUS_ACTIVE）でない → False
+    - `lease_expires_at` が None / 空 / 不正 ISO → 「期限不明 = 期限切れ扱い」で False
+      （安全側に倒すと「lease あり扱い」だが、不明な lease で永久に in_progress
+      に固着するリスクを避けるため expire 側に倒す）
+    - `lease_expires_at` を ISO 8601 で parse、now より過去 → False
+    - now より未来 → True
+
+    呼び出し側（compute_ready_state）は work_item dict から直接渡される想定。
+    Notion 側プロパティは `Lease Status` / `Lease Expires At` だが、呼び出し
+    側が事前に `lease_status` / `lease_expires_at` の lowercase キーで dict 化
+    して渡す前提（Notion API レスポンスのパース層が責任を持つ）。
+    """
+    lease_status = str(work_item.get("lease_status") or "").lower()
+    if lease_status != LEASE_STATUS_ACTIVE:
+        return False
+    expires_raw = work_item.get("lease_expires_at")
+    if not expires_raw or not isinstance(expires_raw, str):
+        return False
+    try:
+        expires = datetime.fromisoformat(expires_raw)
+    except (ValueError, TypeError):
+        return False
+    # Notion から返る ISO 文字列はタイムゾーン付き（`+00:00` 等）になり
+    # 得るため、tz-aware と tz-naive の混在比較で TypeError にならないよう、
+    # 比較時の `now` は `expires` の tzinfo に揃える（PR #43 Copilot 1
+    # 回目指摘）。`expires.tzinfo is None` のときは従来通り tz-naive
+    # `datetime.now()` で比較する。
+    now = datetime.now(expires.tzinfo) if expires.tzinfo else datetime.now()
+    return expires > now
 
 
 def _has_unblocking_dependency(

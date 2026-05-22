@@ -438,3 +438,315 @@ def test_dispatcher_work_item_status_change_does_not_defer_on_unrelated_pending_
     result = _dispatch_status_change_for_test(disp)
     # 対象 dedupe_key と一致しないので defer は発生しない（success skip）
     assert result is True
+
+
+# ---------------------------------------------------------------------------
+# work_item_claim / work_item_lease_release イベント（Workgraph Phase 3 / #42）
+# ---------------------------------------------------------------------------
+
+
+def _build_lease_dispatcher_with_existing_page(
+    store: SQLiteStore, monkeypatch
+) -> tuple[NotionSyncDispatcher, _RecordingAPI]:
+    """claim / lease_release テスト共通 setup（page 存在シナリオ）"""
+    monkeypatch.setenv("TEST_TOKEN", "secret")
+    monkeypatch.setenv("TEST_DB", "wf-db")
+    monkeypatch.setenv("TEST_WORK_ITEMS_DB", "wi-db")
+
+    cfg = _make_config()
+    cfg.work_items_db_id_env = "TEST_WORK_ITEMS_DB"
+    # find_by_dedupe_key → 既存ページが見つかる
+    api = _RecordingAPI(query_result=[{"id": "existing-page"}])
+
+    class _Disp(NotionSyncDispatcher):
+        def _get_api(self):
+            return api  # type: ignore[return-value]
+
+    return _Disp(store=store, config=cfg), api
+
+
+def test_dispatcher_work_item_claim_writes_active_lease(
+    store: SQLiteStore, monkeypatch
+):
+    """claim イベントは Lease Status=active 等を Notion に書き込む"""
+    disp, api = _build_lease_dispatcher_with_existing_page(store, monkeypatch)
+    result = disp.dispatch("work_item_claim", {
+        "workflow_id": "wf-1",
+        "title": "implement login",
+        "phase": 4,
+        "claimed_by": "claude_code",
+        "lease_duration_seconds": 600,
+    })
+    assert result is True
+    updates = [c for c in api.calls if c[0] == "update"]
+    assert len(updates) == 1
+    props = updates[0][1]["properties"]
+    assert props["Lease Status"]["select"]["name"] == "active"
+    assert props["Claimed By"]["rich_text"][0]["text"]["content"] == "claude_code"
+    assert props["Claim Type"]["select"]["name"] == "agent"
+    assert "Lease Token" in props
+
+
+def test_dispatcher_work_item_claim_requires_claimed_by(
+    store: SQLiteStore, monkeypatch
+):
+    """claimed_by 欠落時は API を呼ばずに skip"""
+    disp, api = _build_lease_dispatcher_with_existing_page(store, monkeypatch)
+    result = disp.dispatch("work_item_claim", {
+        "workflow_id": "wf-1",
+        "title": "X",
+        "phase": 4,
+        # claimed_by 省略
+    })
+    assert result is True
+    updates = [c for c in api.calls if c[0] == "update"]
+    assert updates == []
+
+
+def test_dispatcher_work_item_lease_release_writes_released(
+    store: SQLiteStore, monkeypatch
+):
+    """lease_release イベントは Lease Status=released を書き込む"""
+    disp, api = _build_lease_dispatcher_with_existing_page(store, monkeypatch)
+    result = disp.dispatch("work_item_lease_release", {
+        "workflow_id": "wf-1",
+        "title": "X",
+        "phase": 4,
+    })
+    assert result is True
+    updates = [c for c in api.calls if c[0] == "update"]
+    assert len(updates) == 1
+    props = updates[0][1]["properties"]
+    assert props["Lease Status"]["select"]["name"] == "released"
+    # Claimed By / Lease Token は監査用に温存（payload に含まれない）
+    assert "Claimed By" not in props
+    assert "Lease Token" not in props
+
+
+def test_dispatcher_work_item_claim_skips_when_db_id_unset(
+    store: SQLiteStore, monkeypatch
+):
+    """Work Items DB ID 未設定なら no-op で成功扱い"""
+    monkeypatch.setenv("TEST_TOKEN", "secret")
+    monkeypatch.setenv("TEST_DB", "wf-db")
+    monkeypatch.delenv("TEST_WORK_ITEMS_DB", raising=False)
+
+    cfg = _make_config()
+    cfg.work_items_db_id_env = "TEST_WORK_ITEMS_DB"
+
+    api = _RecordingAPI()
+
+    class _Disp(NotionSyncDispatcher):
+        def _get_api(self):
+            return api  # type: ignore[return-value]
+
+    disp = _Disp(store=store, config=cfg)
+    result = disp.dispatch("work_item_claim", {
+        "workflow_id": "wf-1", "title": "X", "claimed_by": "x", "phase": 4,
+    })
+    assert result is True
+    assert api.calls == []
+
+
+def test_dispatcher_work_item_claim_defers_when_upsert_pending(
+    store: SQLiteStore, monkeypatch
+):
+    """page 未存在 + 同じ dedupe_key の upsert pending → 503 で defer"""
+    from hokusai.integrations.notion_dashboard.work_items_db import build_dedupe_key
+
+    monkeypatch.setenv("TEST_TOKEN", "secret")
+    monkeypatch.setenv("TEST_DB", "wf-db")
+    monkeypatch.setenv("TEST_WORK_ITEMS_DB", "wi-db")
+
+    cfg = _make_config()
+    cfg.work_items_db_id_env = "TEST_WORK_ITEMS_DB"
+    api = _RecordingAPI(query_result=[])  # 未存在
+    dkey = build_dedupe_key(workflow_id="wf-1", phase=4, title="X")
+    store.enqueue_notion_sync(
+        idempotency_key=f"wf-1:work_item_upsert:{dkey}",
+        workflow_id="wf-1",
+        event_type="work_item_upsert",
+        payload={"workflow_id": "wf-1", "title": "X", "phase": 4},
+    )
+
+    class _Disp(NotionSyncDispatcher):
+        def _get_api(self):
+            return api  # type: ignore[return-value]
+
+    disp = _Disp(store=store, config=cfg)
+    result = disp.dispatch("work_item_claim", {
+        "workflow_id": "wf-1",
+        "title": "X",
+        "phase": 4,
+        "claimed_by": "claude_code",
+    })
+    # outbox にキューイングで False
+    assert result is False
+
+
+def test_dispatcher_work_item_claim_skips_when_lease_duration_non_numeric(
+    store: SQLiteStore, monkeypatch
+):
+    """lease_duration_seconds が非数値 (str / list 等) なら warning + skip
+    （poison message 化防止、PR #43 Copilot 2 回目指摘）"""
+    disp, api = _build_lease_dispatcher_with_existing_page(store, monkeypatch)
+    result = disp.dispatch("work_item_claim", {
+        "workflow_id": "wf-1",
+        "title": "X",
+        "phase": 4,
+        "claimed_by": "claude_code",
+        "lease_duration_seconds": "abc",  # 非数値
+    })
+    assert result is True
+    # claim_work_item は呼ばれない
+    updates = [c for c in api.calls if c[0] == "update"]
+    assert updates == []
+
+
+def test_dispatcher_work_item_claim_skips_when_lease_duration_zero_or_negative(
+    store: SQLiteStore, monkeypatch
+):
+    """lease_duration_seconds が 0 以下なら warning + skip"""
+    disp, api = _build_lease_dispatcher_with_existing_page(store, monkeypatch)
+    result = disp.dispatch("work_item_claim", {
+        "workflow_id": "wf-1",
+        "title": "X",
+        "phase": 4,
+        "claimed_by": "claude_code",
+        "lease_duration_seconds": 0,
+    })
+    assert result is True
+    updates = [c for c in api.calls if c[0] == "update"]
+    assert updates == []
+
+    # 負数も同じ
+    disp2, api2 = _build_lease_dispatcher_with_existing_page(store, monkeypatch)
+    result2 = disp2.dispatch("work_item_claim", {
+        "workflow_id": "wf-1",
+        "title": "X",
+        "phase": 4,
+        "claimed_by": "claude_code",
+        "lease_duration_seconds": -100,
+    })
+    assert result2 is True
+    assert [c for c in api2.calls if c[0] == "update"] == []
+
+
+def test_dispatcher_work_item_claim_skips_when_claim_type_invalid(
+    store: SQLiteStore, monkeypatch
+):
+    """claim_type が agent/human 以外なら warning + skip"""
+    disp, api = _build_lease_dispatcher_with_existing_page(store, monkeypatch)
+    result = disp.dispatch("work_item_claim", {
+        "workflow_id": "wf-1",
+        "title": "X",
+        "phase": 4,
+        "claimed_by": "claude_code",
+        "claim_type": "bot",  # 不正
+    })
+    assert result is True
+    updates = [c for c in api.calls if c[0] == "update"]
+    assert updates == []
+
+
+def test_dispatcher_work_item_claim_skips_when_workflow_id_invalid_type(
+    store: SQLiteStore, monkeypatch
+):
+    """workflow_id が str/int 以外（list 等）なら warning + skip
+    （PR #43 Copilot 3 回目指摘の poison message 防止）"""
+    monkeypatch.setenv("TEST_TOKEN", "secret")
+    monkeypatch.setenv("TEST_DB", "wf-db")
+    monkeypatch.setenv("TEST_WORK_ITEMS_DB", "wi-db")
+
+    cfg = _make_config()
+    cfg.work_items_db_id_env = "TEST_WORK_ITEMS_DB"
+    api = _RecordingAPI(query_result=[])  # 未存在
+
+    class _Disp(NotionSyncDispatcher):
+        def _get_api(self):
+            return api  # type: ignore[return-value]
+
+    disp = _Disp(store=store, config=cfg)
+    result = disp.dispatch("work_item_claim", {
+        "workflow_id": ["bad", "type"],  # list は str/int でないので skip
+        "title": "X",
+        "phase": 4,
+        "claimed_by": "claude_code",
+    })
+    # poison message にならず success（no-op）
+    assert result is True
+
+
+def test_dispatcher_work_item_claim_accepts_int_workflow_id(
+    store: SQLiteStore, monkeypatch
+):
+    """workflow_id が int でも str に正規化されて build_dedupe_key 経由で動く"""
+    disp, api = _build_lease_dispatcher_with_existing_page(store, monkeypatch)
+    result = disp.dispatch("work_item_claim", {
+        "workflow_id": 12345,  # numeric ID
+        "title": "X",
+        "phase": 4,
+        "claimed_by": "claude_code",
+    })
+    # int は str() で正規化されて build_dedupe_key を通る
+    assert result is True
+    updates = [c for c in api.calls if c[0] == "update"]
+    assert len(updates) == 1
+
+
+def test_dispatcher_work_item_claim_skips_when_phase_invalid_type(
+    store: SQLiteStore, monkeypatch
+):
+    """phase が int に変換できない（非数値 str / dict 等）なら warning + skip"""
+    monkeypatch.setenv("TEST_TOKEN", "secret")
+    monkeypatch.setenv("TEST_DB", "wf-db")
+    monkeypatch.setenv("TEST_WORK_ITEMS_DB", "wi-db")
+
+    cfg = _make_config()
+    cfg.work_items_db_id_env = "TEST_WORK_ITEMS_DB"
+    api = _RecordingAPI(query_result=[])
+
+    class _Disp(NotionSyncDispatcher):
+        def _get_api(self):
+            return api  # type: ignore[return-value]
+
+    disp = _Disp(store=store, config=cfg)
+    result = disp.dispatch("work_item_claim", {
+        "workflow_id": "wf-1",
+        "title": "X",
+        "phase": {"bad": "type"},  # int 変換不能
+        "claimed_by": "claude_code",
+    })
+    assert result is True
+
+
+def test_dispatcher_work_item_claim_skips_when_dedupe_key_invalid_type(
+    store: SQLiteStore, monkeypatch
+):
+    """dedupe_key が str でない型（list / dict / int 等）なら warning + skip
+    （PR #43 Copilot 4 回目指摘の poison message 防止）"""
+    monkeypatch.setenv("TEST_TOKEN", "secret")
+    monkeypatch.setenv("TEST_DB", "wf-db")
+    monkeypatch.setenv("TEST_WORK_ITEMS_DB", "wi-db")
+
+    cfg = _make_config()
+    cfg.work_items_db_id_env = "TEST_WORK_ITEMS_DB"
+    api = _RecordingAPI(query_result=[])
+
+    class _Disp(NotionSyncDispatcher):
+        def _get_api(self):
+            return api  # type: ignore[return-value]
+
+    disp = _Disp(store=store, config=cfg)
+    # list を dedupe_key に渡す
+    result = disp.dispatch("work_item_claim", {
+        "workflow_id": "wf-1",
+        "title": "X",
+        "phase": 4,
+        "claimed_by": "claude_code",
+        "dedupe_key": ["bad", "type"],
+    })
+    assert result is True
+    # find_by_dedupe_key も呼ばれない
+    queries = [c for c in api.calls if c[0] == "query"]
+    assert queries == []

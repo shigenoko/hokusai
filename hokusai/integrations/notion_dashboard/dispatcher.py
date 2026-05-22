@@ -43,6 +43,16 @@ EVENT_WORK_ITEM_UPSERT = "work_item_upsert"
 # 同定し、Notion 側で見つからない場合は warning で skip する（race condition
 # で後段から発生したケースは Phase 5 完了時点で必ず Work Item が存在する前提）。
 EVENT_WORK_ITEM_STATUS_CHANGE = "work_item_status_change"
+# Work Item claim / lease release イベント（Workgraph Phase 3 / Issue #42）。
+# Phase 5 implement 開始時に claim を、正常完了時に release を enqueue する。
+# payload は (workflow_id / title / phase / dedupe_key / claimed_by /
+# claim_type / lease_duration_seconds)。Status 遷移と同じく find_by_dedupe_key
+# で Work Item を同定し、見つからない場合は race condition なら 503 defer、
+# それ以外は warning skip。失敗時に lease を残すことで期限切れ再割当を
+# 機能させる（要件 §6.6: lease が期限切れの場合、人間または HOKUSAI が再
+# 割当できる）。
+EVENT_WORK_ITEM_CLAIM = "work_item_claim"
+EVENT_WORK_ITEM_LEASE_RELEASE = "work_item_lease_release"
 
 
 class NotionSyncDispatcher:
@@ -232,6 +242,14 @@ class NotionSyncDispatcher:
             self._handle_work_item_status_change(payload)
             return
 
+        if event_type == EVENT_WORK_ITEM_CLAIM:
+            self._handle_work_item_claim(payload)
+            return
+
+        if event_type == EVENT_WORK_ITEM_LEASE_RELEASE:
+            self._handle_work_item_lease_release(payload)
+            return
+
         # 後方互換: 旧 Service Status sync が outbox に積んだ
         # service_status_checked エントリは Notion 連携廃止済みなので
         # no-op として扱い、retry_pending() で drain できるようにする。
@@ -343,6 +361,8 @@ class NotionSyncDispatcher:
             "review_issue_raised",
             "work_item_upsert",
             "work_item_status_change",
+            "work_item_claim",
+            "work_item_lease_release",
             "service_status_checked",
         )
         try:
@@ -686,6 +706,225 @@ class NotionSyncDispatcher:
             )
             return
         client.update_status(page_id, str(status))
+
+    def _handle_work_item_claim(self, payload: dict[str, Any]) -> None:
+        """Work Item の claim イベント（Workgraph Phase 3 / Issue #42）。
+
+        Phase 5 implement 開始時に Agent / 人間が Work Item を取得した事実を
+        Notion に書き込む。dedupe_key で Work Item を同定し、見つからない
+        場合は status_change と同じ defer / skip 戦略を適用する。
+
+        Args:
+            payload:
+                workflow_id / title / phase: Work Item 同定用（dedupe_key 省略時に使う）
+                dedupe_key: 省略時は build_dedupe_key で再生成
+                claimed_by: Claim 主体（"claude_code" / "alice@example.com" 等、必須）
+                claim_type: "agent" / "human"（既定 agent）
+                lease_duration_seconds: lease 期限（既定 3600）
+        """
+        page_id, client = self._resolve_work_item_for_lease_event(
+            payload, event_label="work_item_claim"
+        )
+        if page_id is None:
+            return
+        claimed_by = payload.get("claimed_by")
+        if not claimed_by:
+            logger.warning("work_item_claim に claimed_by が無いためスキップ")
+            return
+        from .work_items_db import (
+            CLAIM_TYPE_AGENT,
+            CLAIM_TYPE_HUMAN,
+            DEFAULT_LEASE_DURATION_SECONDS,
+        )
+
+        # **入力検証（poison message 防止）**:
+        # PR #43 Copilot 2 回目指摘で、不正な payload（非数値 lease_duration
+        # や enum 外の claim_type 等）が WorkItemsDBClient.claim_work_item の
+        # ValueError を引き起こすと、dispatch() の catch-all で outbox に積み
+        # 直されて永続リトライループになるリスクがあった。dispatcher 層で
+        # warning + skip して outbox に入れないよう先回りで検証する。
+
+        # claim_type: agent / human のみ許可
+        raw_claim_type = payload.get("claim_type")
+        if raw_claim_type is None:
+            claim_type = CLAIM_TYPE_AGENT
+        else:
+            claim_type_str = str(raw_claim_type)
+            if claim_type_str not in (CLAIM_TYPE_AGENT, CLAIM_TYPE_HUMAN):
+                logger.warning(
+                    "work_item_claim の claim_type が不正なのでスキップ: %r",
+                    raw_claim_type,
+                )
+                return
+            claim_type = claim_type_str
+
+        # lease_duration_seconds: None は DEFAULT。明示値は int 変換を
+        # 試み、失敗 / 0 以下なら warning + skip（client 側 ValueError を
+        # 待たない）。
+        raw_duration = payload.get("lease_duration_seconds")
+        if raw_duration is None:
+            lease_duration_seconds = DEFAULT_LEASE_DURATION_SECONDS
+        else:
+            try:
+                lease_duration_seconds = int(raw_duration)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "work_item_claim の lease_duration_seconds が非数値 "
+                    "なのでスキップ: %r",
+                    raw_duration,
+                )
+                return
+            if lease_duration_seconds <= 0:
+                logger.warning(
+                    "work_item_claim の lease_duration_seconds が 0 以下 "
+                    "なのでスキップ: %d",
+                    lease_duration_seconds,
+                )
+                return
+
+        client.claim_work_item(
+            page_id,
+            claimed_by=str(claimed_by),
+            claim_type=claim_type,
+            lease_duration_seconds=lease_duration_seconds,
+        )
+
+    def _handle_work_item_lease_release(self, payload: dict[str, Any]) -> None:
+        """Work Item の lease release イベント（Workgraph Phase 3 / Issue #42）。
+
+        Phase 5 implement の正常完了時に呼ばれ、Lease Status を `released` に
+        遷移させる。Claimed By / Lease Token は監査用に温存する。
+        """
+        page_id, client = self._resolve_work_item_for_lease_event(
+            payload, event_label="work_item_lease_release"
+        )
+        if page_id is None:
+            return
+        client.release_lease(page_id)
+
+    def _resolve_work_item_for_lease_event(
+        self, payload: dict[str, Any], *, event_label: str
+    ) -> tuple[str | None, Any]:
+        """claim / lease_release で共通する Work Item 同定ロジック。
+
+        - Work Items DB ID 未設定 → no-op で (None, None) を返す
+        - dedupe_key 自動生成（title 必須）
+        - find_by_dedupe_key が miss → status_change と同じ defer / skip 戦略
+          （同一 dedupe_key の work_item_upsert が outbox に pending なら 503
+          で defer、それ以外は warning + skip）
+
+        Returns:
+            (page_id, client) のタプル。page_id が None なら呼び出し側は早期 return。
+        """
+        from .work_items_db import build_dedupe_key
+
+        work_items_db_id = os.environ.get(
+            self._config.work_items_db_id_env, ""
+        ).strip()
+        if not work_items_db_id:
+            logger.debug(
+                "Work Items DB ID 未設定のため %s をスキップ", event_label
+            )
+            return None, None
+
+        dedupe_key = payload.get("dedupe_key")
+        # **dedupe_key の型検証**（PR #43 Copilot 4 回目指摘）: payload 経由で
+        # str 以外（list / dict / int 等）が渡ると後段の `find_by_dedupe_key`
+        # の query filter 構築で TypeError → dispatch() catch-all → outbox
+        # 再投入の poison message 化リスクがあるため、dispatcher 層で先に
+        # 型を検証する。明示指定があって str でなければ skip（自動生成パスに
+        # 落とさない: 「dedupe_key を明示したが型が間違っている」のは呼び出し
+        # 側のバグなのでサイレント補正せず明示的に skip + warning する）。
+        if dedupe_key is not None and not isinstance(dedupe_key, str):
+            logger.warning(
+                "%s で dedupe_key が str でないためスキップ: %r",
+                event_label, dedupe_key,
+            )
+            return None, None
+        if not dedupe_key:
+            title = payload.get("title")
+            if not title:
+                logger.warning(
+                    "%s で dedupe_key も title も無いため同定不能スキップ: "
+                    "workflow_id=%s, phase=%s",
+                    event_label,
+                    payload.get("workflow_id"),
+                    payload.get("phase"),
+                )
+                return None, None
+            # **workflow_id / phase の型検証**（PR #43 Copilot 3 回目指摘）:
+            # payload 由来の不正型（int の workflow_id / 非数値 phase 等）が
+            # build_dedupe_key の join で TypeError を投げると、dispatch() の
+            # catch-all 経由で outbox に poison message として残るため、
+            # dispatcher 層で先回り正規化 / 検証する。
+            raw_wid = payload.get("workflow_id")
+            workflow_id_for_key: str | None
+            if raw_wid is None:
+                workflow_id_for_key = None
+            elif isinstance(raw_wid, (str, int)):
+                # str はそのまま、int は文字列化（HOKUSAI ID は str 想定だが
+                # numeric な test fixture も許容する寛容な正規化）
+                workflow_id_for_key = str(raw_wid) or None
+            else:
+                logger.warning(
+                    "%s で workflow_id が str/int でないためスキップ: %r",
+                    event_label, raw_wid,
+                )
+                return None, None
+            raw_phase = payload.get("phase")
+            phase_for_key: int | None
+            if raw_phase is None:
+                phase_for_key = None
+            else:
+                try:
+                    phase_for_key = int(raw_phase)
+                except (TypeError, ValueError):
+                    logger.warning(
+                        "%s で phase を int に変換できないためスキップ: %r",
+                        event_label, raw_phase,
+                    )
+                    return None, None
+            dedupe_key = build_dedupe_key(
+                workflow_id=workflow_id_for_key,
+                phase=phase_for_key,
+                title=str(title),
+            )
+
+        client = self._get_work_items_client(work_items_db_id)
+        page_id = client.find_by_dedupe_key(dedupe_key)
+        if page_id is None:
+            workflow_id = payload.get("workflow_id")
+            pending_upsert = 0
+            if workflow_id and self._store is not None:
+                expected_key = f"{workflow_id}:work_item_upsert:{dedupe_key}"
+                try:
+                    with self._store._connect() as conn:  # type: ignore[attr-defined]
+                        row = conn.execute(
+                            "SELECT COUNT(*) FROM notion_sync_outbox "
+                            "WHERE idempotency_key = ?",
+                            (expected_key,),
+                        ).fetchone()
+                        pending_upsert = int(row[0]) if row else 0
+                except Exception:
+                    pending_upsert = 0
+            if pending_upsert > 0:
+                raise NotionAPIError(
+                    503,
+                    f"work_item_upsert not yet synced for workflow_id="
+                    f"{workflow_id}; deferring {event_label} dispatch "
+                    f"({pending_upsert} pending work_item_upsert events)",
+                    code="work_item_upsert_pending",
+                )
+            logger.warning(
+                "%s の対象 page が見つからない: workflow_id=%s, "
+                "title=%r, dedupe_key=%s...",
+                event_label,
+                workflow_id,
+                payload.get("title"),
+                dedupe_key[:8],
+            )
+            return None, None
+        return page_id, client
 
     def _enqueue_failure(
         self,

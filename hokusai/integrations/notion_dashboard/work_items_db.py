@@ -25,7 +25,8 @@ dependencies / blocking_review_issues を踏まえた ready 判定の根拠を N
 from __future__ import annotations
 
 import hashlib
-from datetime import datetime
+import uuid
+from datetime import datetime, timedelta
 from typing import Any, Iterable
 
 from ...logging_config import get_logger
@@ -54,6 +55,24 @@ STATUS_CANCELED = "canceled"
 # ready 判定エンジンが依存解決済みかつ blocking なしを検出した時点で
 # pending → ready に遷移する。
 DEFAULT_STATUS = STATUS_PENDING
+
+# Lease lifecycle 状態（Workgraph Phase 3 / Issue #42）。
+# - active: Agent が claim 中、Lease Expires At > now の場合のみ有効
+# - expired: lease 期限切れ。再 claim 可能（人間または Operations Console から）
+# - released: Agent が正常完了して明示的に lease を解放した
+LEASE_STATUS_ACTIVE = "active"
+LEASE_STATUS_EXPIRED = "expired"
+LEASE_STATUS_RELEASED = "released"
+
+# Claim 主体の種別（要件 §6.2）。agent は Claude Code / Codex / Gemini /
+# GitHub Copilot / external、human は人間オペレーター。
+CLAIM_TYPE_AGENT = "agent"
+CLAIM_TYPE_HUMAN = "human"
+
+# Lease 期限のデフォルト（秒）。Phase 5 implement の LLM 駆動実装は数分〜
+# 数十分かかるため、1 時間（3600 秒）を default にする。呼び出し側で
+# override 可能。
+DEFAULT_LEASE_DURATION_SECONDS = 3600
 
 
 def build_dedupe_key(
@@ -173,6 +192,84 @@ class WorkItemsDBClient:
             raise ValueError(f"Work Item Status の値が不正です: {status!r}")
         properties = {
             "Status": {"select": {"name": status}},
+            "Last Updated": _date(datetime.now().isoformat()),
+        }
+        return self._submit_with_property_pruning(page_id, properties)
+
+    def claim_work_item(
+        self,
+        page_id: str,
+        *,
+        claimed_by: str,
+        claim_type: str = CLAIM_TYPE_AGENT,
+        lease_duration_seconds: int = DEFAULT_LEASE_DURATION_SECONDS,
+    ) -> dict:
+        """Work Item に Lease を張って Agent / 人間が claim する。
+
+        既存 lease（active）の上書きは **本 API ではチェックしない**。通常
+        フローでは ready_judgment.compute_ready_state() が active 未期限
+        lease を持つ Work Item を in_progress 相当として扱い、別 Agent が
+        新たに claim 候補に拾わないことで衝突を防ぐ（要件 §4.5）。期限切れ
+        lease や手動 release 後の Work Item を再 claim するのは正常動作。
+
+        Args:
+            page_id: Notion page id
+            claimed_by: Claim 主体（"claude_code" / "codex" / "alice@example.com" 等）
+            claim_type: CLAIM_TYPE_AGENT または CLAIM_TYPE_HUMAN
+            lease_duration_seconds: lease 期限（既定 1 時間）
+
+        Returns:
+            Notion から返された更新後 page オブジェクト。`Lease Token` を含む
+            properties は呼び出し側で参照可能。token は呼び出し側でも保持して
+            `release_lease` 時に整合性確認に使う想定（MVP では確認はしない）。
+        """
+        if claim_type not in (CLAIM_TYPE_AGENT, CLAIM_TYPE_HUMAN):
+            raise ValueError(f"Claim Type の値が不正です: {claim_type!r}")
+        if not claimed_by:
+            raise ValueError("claimed_by は必須です")
+        if lease_duration_seconds <= 0:
+            raise ValueError(
+                f"lease_duration_seconds は正の整数: {lease_duration_seconds}"
+            )
+        now = datetime.now()
+        expires = now + timedelta(seconds=lease_duration_seconds)
+        # Lease Token は uuid4 で生成。HOKUSAI 内部で「この claim を作った
+        # 主体」を後段で確認するため。MVP では release_lease は token 確認
+        # せず page_id のみで release するが、将来の検証強化に備えて保存する。
+        token = uuid.uuid4().hex
+        properties = {
+            "Claimed By": _rich_text(claimed_by),
+            "Claim Type": {"select": {"name": claim_type}},
+            "Lease Status": {"select": {"name": LEASE_STATUS_ACTIVE}},
+            "Lease Started At": _date(now.isoformat()),
+            "Lease Expires At": _date(expires.isoformat()),
+            "Lease Token": _rich_text(token),
+            "Last Updated": _date(now.isoformat()),
+        }
+        return self._submit_with_property_pruning(page_id, properties)
+
+    def release_lease(self, page_id: str) -> dict:
+        """Agent が正常完了した時点で lease を解放する（要件 §6.6）。
+
+        Lease Status を `released` に変更し、Lease Expires At は **温存** する
+        （いつ release されたかは Last Updated で記録される）。Claimed By 等の
+        identity は監査用にそのまま残す。Lease Token も温存。
+        """
+        properties = {
+            "Lease Status": {"select": {"name": LEASE_STATUS_RELEASED}},
+            "Last Updated": _date(datetime.now().isoformat()),
+        }
+        return self._submit_with_property_pruning(page_id, properties)
+
+    def expire_lease(self, page_id: str) -> dict:
+        """Lease を期限切れマークする（人間 / Operations Console から呼ぶ）。
+
+        通常は Lease Expires At < now を検出した sweep ジョブが呼ぶ想定だが、
+        MVP では sweep は実装せず Operations Console からの手動 expire のみ
+        を想定する。
+        """
+        properties = {
+            "Lease Status": {"select": {"name": LEASE_STATUS_EXPIRED}},
             "Last Updated": _date(datetime.now().isoformat()),
         }
         return self._submit_with_property_pruning(page_id, properties)

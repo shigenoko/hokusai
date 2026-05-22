@@ -86,17 +86,21 @@ _PULL_REQUESTS_DB_DESCRIPTION = (
 )
 
 _WORK_ITEMS_DB_DESCRIPTION = (
-    "⚠️ HOKUSAI が自動管理する DB です（Workgraph Phase 2 / Issue #38）。"
-    "Phase 4 plan で生成された work_plan を構造化 Work Item として同期します。"
-    "dedupe_key は workflow_id + phase + title の sha256 hash 先頭 16 文字。"
-    "Status / Phase / Workflow / Dedupe Key / Operator / Description / "
-    "Dependencies / Blocking Review Issues / Last Updated を HOKUSAI が書き込み"
-    "ます。Created At は新規作成時のみ書き込み、Notion 側で初回作成時刻を温存"
-    "します。Status の手動編集（in_progress → done など）は HOKUSAI からの上書き"
-    "対象外とし、人間の運用判断を温存します（Review Issues DB と同じポリシー）。"
-    "詳細は GitHub Issue #38 と HOKUSAI 運用ガイド"
-    "（docs/notion-dashboard-operation-guide.md）を参照。Work Items DB 専用"
-    "セクションは Workgraph Phase 2 リリース時に追加予定。"
+    "⚠️ HOKUSAI が自動管理する DB です（Workgraph Phase 2 / Issue #38、"
+    "Phase 3 Agent Claim/Lease は #42）。Phase 4 plan で生成された work_plan を"
+    "構造化 Work Item として同期します。dedupe_key は workflow_id + phase + title "
+    "の sha256 hash 先頭 16 文字。Status / Phase / Workflow / Dedupe Key / "
+    "Operator / Description / Dependencies / Blocking Review Issues / Last "
+    "Updated を HOKUSAI が書き込みます。Created At は新規作成時のみ書き込み、"
+    "Notion 側で初回作成時刻を温存します。Status の手動編集（in_progress → done"
+    " など）は HOKUSAI からの上書き対象外とし、人間の運用判断を温存します"
+    "（Review Issues DB と同じポリシー）。Claimed By / Claim Type / Lease "
+    "Status / Lease Started At / Lease Expires At / Lease Token は Agent claim "
+    "/ lease のライフサイクルを表します。lease が active かつ未期限の Work Item "
+    "は別 Agent に再割当しないでください（並列実行衝突防止）。期限切れの "
+    "lease は人間または Operations Console から再割当できます。詳細は GitHub "
+    "Issue #38 / #42 と HOKUSAI 運用ガイド"
+    "（docs/notion-dashboard-operation-guide.md）を参照。"
 )
 
 _REVIEW_ISSUES_DB_DESCRIPTION = (
@@ -344,6 +348,32 @@ def _work_items_db_properties(
         "Dedupe Key": {"rich_text": {}},
         "Operator": {"rich_text": {}},
         "Description": {"rich_text": {}},
+        # Agent Claim / Lease（Workgraph Phase 3 / Issue #42 / v0.8.0〜）。
+        # 要件定義 §6.5 に従い、複数 Agent 並列実行時の競合制御に必要な
+        # claim 主体・lease 期限・token を表現する。Claim Type は将来人間
+        # 操作者も claim 主体に含めるため select 化。Lease Status は
+        # active / expired / released の 3 値で lease lifecycle を表す。
+        "Claimed By": {"rich_text": {}},
+        "Claim Type": {
+            "select": {
+                "options": [
+                    {"name": "agent", "color": "blue"},
+                    {"name": "human", "color": "green"},
+                ]
+            }
+        },
+        "Lease Status": {
+            "select": {
+                "options": [
+                    {"name": "active", "color": "yellow"},
+                    {"name": "expired", "color": "red"},
+                    {"name": "released", "color": "gray"},
+                ]
+            }
+        },
+        "Lease Started At": {"date": {}},
+        "Lease Expires At": {"date": {}},
+        "Lease Token": {"rich_text": {}},
         _PROP_CREATED_AT: {"date": {}},
         _PROP_LAST_UPDATED: {"date": {}},
     }

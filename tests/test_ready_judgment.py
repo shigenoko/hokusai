@@ -212,3 +212,133 @@ def test_blocking_review_issue_page_ids_dict_input_is_ignored():
         "blocking_review_issue_page_ids": {"ri-1": {"status": "open"}},
     }
     assert compute_ready_state(wi) == "pending"
+
+
+# ---------------------------------------------------------------------------
+# Active lease チェック（Workgraph Phase 3 / Issue #42 / 要件 §4.5）
+# ---------------------------------------------------------------------------
+
+
+def test_active_unexpired_lease_returns_in_progress():
+    """lease_status=active かつ Expires At > now → in_progress 相当"""
+    from datetime import datetime, timedelta
+
+    future = (datetime.now() + timedelta(hours=1)).isoformat()
+    wi = {
+        "status": "pending",
+        "lease_status": "active",
+        "lease_expires_at": future,
+        # 依存も blocker も無い（通常なら pending のまま）が、active lease で in_progress
+        "dependency_page_ids": [],
+        "blocking_review_issue_page_ids": [],
+    }
+    assert compute_ready_state(wi) == "in_progress"
+
+
+def test_expired_active_lease_treated_as_no_lease():
+    """lease_status=active でも Expires At < now なら期限切れ扱い → 通常判定にフォール
+    バック（依存無 blocker 無 → pending）"""
+    from datetime import datetime, timedelta
+
+    past = (datetime.now() - timedelta(hours=1)).isoformat()
+    wi = {
+        "status": "pending",
+        "lease_status": "active",
+        "lease_expires_at": past,
+        "dependency_page_ids": [],
+        "blocking_review_issue_page_ids": [],
+    }
+    # 期限切れなので lease は無視、通常判定 → pending
+    assert compute_ready_state(wi) == "pending"
+
+
+def test_released_lease_does_not_block_ready_judgement():
+    """lease_status=released は active ではないので通常判定に進む"""
+    from datetime import datetime, timedelta
+
+    future = (datetime.now() + timedelta(hours=1)).isoformat()
+    wi = {
+        "status": "pending",
+        "lease_status": "released",
+        "lease_expires_at": future,
+    }
+    # released は active 判定対象外 → 通常判定（依存も blocker も無い → pending）
+    assert compute_ready_state(wi) == "pending"
+
+
+def test_expired_lease_status_does_not_block():
+    """lease_status=expired（明示的に expired マークされた）も active ではない"""
+    from datetime import datetime, timedelta
+
+    future = (datetime.now() + timedelta(hours=1)).isoformat()
+    wi = {
+        "status": "pending",
+        "lease_status": "expired",
+        "lease_expires_at": future,
+    }
+    assert compute_ready_state(wi) == "pending"
+
+
+def test_active_lease_with_invalid_expires_at_falls_back_to_normal_judgement():
+    """lease_expires_at が parse できない → lease なし扱いで通常判定"""
+    wi = {
+        "status": "pending",
+        "lease_status": "active",
+        "lease_expires_at": "not-an-iso-date",
+    }
+    assert compute_ready_state(wi) == "pending"
+
+
+def test_active_lease_with_missing_expires_at_falls_back_to_normal_judgement():
+    """lease_status=active でも lease_expires_at が無ければ lease なし扱い"""
+    wi = {
+        "status": "pending",
+        "lease_status": "active",
+        # lease_expires_at 欠落
+    }
+    assert compute_ready_state(wi) == "pending"
+
+
+def test_active_lease_overrides_dependency_ready():
+    """active lease がある場合は、依存が全 done でも in_progress を返す
+    （別 Agent が claim 済みなので新たに ready に再昇格させない）"""
+    from datetime import datetime, timedelta
+
+    future = (datetime.now() + timedelta(hours=1)).isoformat()
+    wi = {
+        "status": "pending",
+        "lease_status": "active",
+        "lease_expires_at": future,
+        "dependency_page_ids": ["dep-1"],
+    }
+    lookup = {"dep-1": {"status": "done"}}
+    # 依存全 done でも active lease 優先 → in_progress
+    assert compute_ready_state(wi, work_items_by_page_id=lookup) == "in_progress"
+
+
+def test_active_lease_with_tz_aware_expires_at_does_not_raise():
+    """lease_expires_at が tz-aware ISO（`...+00:00`）でも tz mismatch で
+    TypeError にならない（PR #43 Copilot 1 回目指摘）"""
+    from datetime import datetime, timedelta, timezone
+
+    future_utc = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    wi = {
+        "status": "pending",
+        "lease_status": "active",
+        "lease_expires_at": future_utc,
+    }
+    # 未期限なので in_progress を返す（TypeError で落ちないことが主目的）
+    assert compute_ready_state(wi) == "in_progress"
+
+
+def test_active_lease_with_tz_aware_expired_returns_pending():
+    """tz-aware で past の Expires At も期限切れ扱い → 通常判定"""
+    from datetime import datetime, timedelta, timezone
+
+    past_utc = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    wi = {
+        "status": "pending",
+        "lease_status": "active",
+        "lease_expires_at": past_utc,
+    }
+    assert compute_ready_state(wi) == "pending"
