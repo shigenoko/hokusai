@@ -1137,9 +1137,12 @@ def _handle_prime(args, config) -> int:
         ).strip()
 
     memories: list[dict] = []
-    work_items: list[dict] = []
-    review_issues: list[dict] = []
-    gates: list[dict] = []
+    # workgraph context 3 カテゴリは「未取得（DB ID 未設定 / fetch skip）」と
+    # 「取得済み 0 件」を JSON 出力で区別するため None で初期化（Copilot 指摘）。
+    # 各 DB ID が設定されて実際に fetch を試みた場合のみ list に切り替える。
+    work_items: list[dict] | None = None
+    review_issues: list[dict] | None = None
+    gates: list[dict] | None = None
     if api_token and db_id:
         try:
             api = NotionAPIClient(
@@ -1215,9 +1218,11 @@ def _handle_prime(args, config) -> int:
                     current_page_id
                 )
         except Exception as e:
-            # 障害時は取得済みの部分結果で続行（warning は stderr）
+            # Notion fetch（Memory / Workflows / Work Items / Review Issues /
+            # Gates いずれか）で例外が出た場合、取得済みの部分結果で続行
+            # （Copilot 指摘で「Project Memory」固有メッセージ → generic 化）。
             print(
-                f"⚠ Project Memory 取得に失敗（部分結果で続行）: {e}",
+                f"⚠ prime context（Notion）取得で失敗（部分結果で続行）: {e}",
                 file=sys.stderr,
             )
 

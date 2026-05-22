@@ -46,6 +46,10 @@ MEMORY_TYPE_HEADINGS: dict[str, str] = {
     MEMORY_TYPE_POLICY_NOTE: "Policy Notes（コンプライアンス）",
 }
 
+# title / status の欠落表示（SonarCloud 文字列重複対策: 定数化）
+_UNTITLED = "(untitled)"
+_UNKNOWN_STATUS = "(unknown)"
+
 
 def render_prime_markdown(
     *,
@@ -72,6 +76,8 @@ def render_prime_markdown(
     Returns:
         UTF-8 Markdown 文字列。
     """
+    # Markdown 側は「未取得」と「空」を区別する必要がないため None を [] に
+    # 正規化（JSON renderer は None / [] を区別保持、Copilot 指摘）。
     work_items = work_items or []
     review_issues = review_issues or []
     gates = gates or []
@@ -122,9 +128,9 @@ def render_prime_markdown(
                 lines.extend(_render_memory_entry(entry, mtype))
                 lines.append("")
 
-    # Work Items
+    # Work Items（ready / in_progress 両方を含む。Copilot 指摘で見出しを実態に整合）
     if work_items:
-        lines.append("## Ready Work Items（Phase 5 で Agent に渡せる候補）")
+        lines.append("## Work Items（ready / in_progress）")
         lines.append("")
         for wi in work_items:
             lines.extend(_render_work_item_entry(wi))
@@ -138,9 +144,9 @@ def render_prime_markdown(
             lines.extend(_render_review_issue_entry(issue))
             lines.append("")
 
-    # Gates
+    # Gates（pending / blocked / open を含む。Copilot 指摘で見出しを実態に整合）
     if gates:
-        lines.append("## Pending Gates（次に必要な人間判断 / ブロッキング）")
+        lines.append("## Workflow Gates（pending / blocked / open）")
         lines.append("")
         for gate in gates:
             lines.extend(_render_gate_entry(gate))
@@ -163,20 +169,34 @@ def render_prime_json(
     する（Workgraph 完成 / Issue #54）。
 
     Markdown 版との差分: 表示順 / 整形を行わず、各カテゴリ配列に raw 抜き出し
-    dict を入れる。空入力カテゴリは空配列で出力（呼び出し側で「未取得」と
-    「空」を区別できるよう常に key を含める）。
+    dict を入れる。
+
+    「未取得」（DB ID 未設定 / 取得 skip）と「取得済みだが 0 件」を呼び出し
+    側で区別できるよう、`None` は JSON 上 `null` として保持し、`[]` は空配列
+    として保持する（Copilot 指摘: 以前は `or []` で両者を潰していた）。
+    呼び出し側が「未取得」を「未対応領域」として扱うか「0 件」と同等に扱うか
+    を選択できる。
     """
-    work_items = work_items or []
-    review_issues = review_issues or []
-    gates = gates or []
     payload: dict[str, Any] = {
         "workflow_id": workflow_id,
         "profile": profile,
         "current_phase": current_phase,
         "memories": [_extract_memory_dict(page) for page in memories],
-        "work_items": [_extract_work_item_dict(p) for p in work_items],
-        "review_issues": [_extract_review_issue_dict(p) for p in review_issues],
-        "gates": [_extract_gate_dict(p) for p in gates],
+        "work_items": (
+            [_extract_work_item_dict(p) for p in work_items]
+            if work_items is not None
+            else None
+        ),
+        "review_issues": (
+            [_extract_review_issue_dict(p) for p in review_issues]
+            if review_issues is not None
+            else None
+        ),
+        "gates": (
+            [_extract_gate_dict(p) for p in gates]
+            if gates is not None
+            else None
+        ),
     }
     return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
 
@@ -187,7 +207,7 @@ def render_prime_json(
 
 
 def _render_memory_entry(page: dict, memory_type: str) -> list[str]:
-    name = _extract_title(page, "Name") or "(untitled)"
+    name = _extract_title(page, "Name") or _UNTITLED
     applies = _extract_multi_select(page, "Applies To")
     summary = _extract_rich_text(page, "Summary")
     content = _extract_rich_text(page, "Content")
@@ -214,8 +234,8 @@ def _render_memory_entry(page: dict, memory_type: str) -> list[str]:
 
 
 def _render_work_item_entry(page: dict) -> list[str]:
-    title = _extract_title(page, "Title") or "(untitled)"
-    status = _extract_select_name(page, "Status") or "(unknown)"
+    title = _extract_title(page, "Title") or _UNTITLED
+    status = _extract_select_name(page, "Status") or _UNKNOWN_STATUS
     phase = _extract_select_name(page, "Phase")
     out: list[str] = [f"### {title}"]
     meta = [f"**Status:** `{status}`"]
@@ -230,8 +250,8 @@ def _render_work_item_entry(page: dict) -> list[str]:
 
 
 def _render_review_issue_entry(page: dict) -> list[str]:
-    title = _extract_title(page, "Title") or "(untitled)"
-    severity = _extract_select_name(page, "Severity") or "(unknown)"
+    title = _extract_title(page, "Title") or _UNTITLED
+    severity = _extract_select_name(page, "Severity") or _UNKNOWN_STATUS
     source = _extract_select_name(page, "Source")
     rule_id = _extract_rich_text(page, "Rule ID")
     file_path = _extract_rich_text(page, "File Path")
@@ -252,8 +272,8 @@ def _render_review_issue_entry(page: dict) -> list[str]:
 
 
 def _render_gate_entry(page: dict) -> list[str]:
-    name = _extract_title(page, "Name") or "(untitled)"
-    status = _extract_select_name(page, "Status") or "(unknown)"
+    name = _extract_title(page, "Name") or _UNTITLED
+    status = _extract_select_name(page, "Status") or _UNKNOWN_STATUS
     gate_type = _extract_select_name(page, "Gate Type")
     required_phase = _extract_rich_text(page, "Required By Phase")
     out: list[str] = [f"### {name}"]

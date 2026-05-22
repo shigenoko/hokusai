@@ -177,7 +177,7 @@ def test_markdown_includes_work_items_section():
         memories=[],
         work_items=work_items,
     )
-    assert "## Ready Work Items" in out
+    assert "## Work Items" in out
     assert "### Implement login" in out
     assert "**Status:** `ready`" in out
     assert "**Phase:** `phase5`" in out
@@ -233,7 +233,7 @@ def test_markdown_includes_gates_section():
         memories=[],
         gates=gates,
     )
-    assert "## Pending Gates" in out
+    assert "## Workflow Gates" in out
     assert "### Security review" in out
     assert "**Status:** `pending`" in out
     assert "**Type:** `human_approval`" in out
@@ -256,9 +256,9 @@ def test_markdown_section_order_handover_memory_workitems_issues_gates():
     )
     pos_h = out.find("Handover Notes")
     pos_rule = out.find("Project Rules")
-    pos_wi = out.find("Ready Work Items")
+    pos_wi = out.find("Work Items")
     pos_ri = out.find("Open Review Issues")
-    pos_g = out.find("Pending Gates")
+    pos_g = out.find("Workflow Gates")
     assert -1 < pos_h < pos_rule < pos_wi < pos_ri < pos_g
 
 
