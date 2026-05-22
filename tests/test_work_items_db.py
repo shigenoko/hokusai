@@ -11,7 +11,6 @@ work_items_db.py の以下を検証する:
 
 from __future__ import annotations
 
-import copy
 import sys
 from pathlib import Path
 
@@ -37,10 +36,7 @@ from hokusai.integrations.notion_dashboard.work_items_db import (
     WorkItemsDBClient,
     build_dedupe_key,
 )
-
-
 from tests._notion_test_helpers import FakeNotionAPIWithPruning as _FakeAPI
-
 
 # ---------------------------------------------------------------------------
 # build_dedupe_key

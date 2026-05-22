@@ -35,10 +35,7 @@ from hokusai.integrations.notion_dashboard.workflow_gates_db import (
     WorkflowGatesDBClient,
     build_dedupe_key,
 )
-
-
 from tests._notion_test_helpers import FakeNotionAPIWithPruning as _FakeAPI
-
 
 # ---------------------------------------------------------------------------
 # build_dedupe_key
