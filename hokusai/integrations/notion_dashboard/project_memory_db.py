@@ -558,27 +558,14 @@ def _matches_memory_filters(
 
 
 def _join_rich_text_text(items: list[dict]) -> str:
-    """rich_text array の全要素から plain_text / text.content を連結する。
+    """rich_text array の全要素から plain_text / text.content を連結する
+    （共通 helper 経由）。
 
-    `_matches_memory_filters` の Profile 比較で使う。複数 element 分割 /
-    mention / equation 対応（Copilot 指摘）。prime_renderer 側にも同等の
-    `_join_rich_text_items` があるが、依存方向（client → renderer）を逆に
-    したくないので本 module 内に独立して持つ。
+    SonarCloud duplication 対策で `_text_helpers.join_rich_text_items` に
+    実装を集約し、本モジュールでは wrapper として呼び出す。
     """
-    parts: list[str] = []
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        plain = item.get("plain_text")
-        if isinstance(plain, str) and plain:
-            parts.append(plain)
-            continue
-        text = item.get("text")
-        if isinstance(text, dict):
-            content = text.get("content")
-            if isinstance(content, str) and content:
-                parts.append(content)
-    return "".join(parts)
+    from ._text_helpers import join_rich_text_items
+    return join_rich_text_items(items)
 
 
 def _title(text: str) -> dict:

@@ -348,28 +348,14 @@ def _extract_rich_text(page: dict, prop_name: str) -> str:
 
 
 def _join_rich_text_items(items: list[dict]) -> str:
-    """Notion の rich_text / title array の全要素を連結して 1 つの文字列にする。
+    """Notion rich_text / title array の全要素を連結する（共通 helper 経由）。
 
-    Notion は装飾 / メンション / リンクで rich_text を複数 element に分割する
-    ため、先頭要素だけ読むと後続のテキストが欠落する。各 element は
-    `plain_text` をまず採用し、無ければ `text.content` でフォールバック
-    （mention / equation 等で `text` キーが無いケースに耐性を持たせる）。
-    Copilot 指摘。
+    SonarCloud duplication 対策で `_text_helpers.join_rich_text_items` に
+    実装を集約し、本モジュールでは wrapper として呼び出す。詳細は同 module
+    の docstring 参照。
     """
-    parts: list[str] = []
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        plain = item.get("plain_text")
-        if isinstance(plain, str) and plain:
-            parts.append(plain)
-            continue
-        text = item.get("text")
-        if isinstance(text, dict):
-            content = text.get("content")
-            if isinstance(content, str) and content:
-                parts.append(content)
-    return "".join(parts)
+    from ._text_helpers import join_rich_text_items
+    return join_rich_text_items(items)
 
 
 def _extract_select_name(page: dict, prop_name: str) -> str | None:
