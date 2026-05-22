@@ -25,7 +25,6 @@ from .project_memory_db import (
     MEMORY_TYPE_PROJECT_RULE,
 )
 
-
 # Markdown section の表示順（要件 §8.2 の重要度 + handover_note を冒頭優先）
 MEMORY_TYPE_DISPLAY_ORDER: tuple[str, ...] = (
     MEMORY_TYPE_HANDOVER_NOTE,
