@@ -37,33 +37,7 @@ from hokusai.integrations.notion_dashboard.workflow_gates_db import (
 )
 
 
-class _FakeAPI:
-    def __init__(self, *, existing_id: str | None = None):
-        self._existing_id = existing_id
-        self.query_calls: list[tuple[str, dict | None]] = []
-        self.create_calls: list[dict] = []
-        self.update_calls: list[tuple[str, dict]] = []
-
-    def query_database(
-        self,
-        database_id: str,
-        *,
-        filter_: dict | None = None,
-        start_cursor: str | None = None,
-        page_size: int | None = None,
-    ) -> dict:
-        self.query_calls.append((database_id, filter_))
-        if self._existing_id:
-            return {"results": [{"id": self._existing_id}]}
-        return {"results": []}
-
-    def create_page(self, payload: dict) -> dict:
-        self.create_calls.append(copy.deepcopy(payload))
-        return {"id": "new-gate-id", "properties": payload["properties"]}
-
-    def update_page(self, page_id: str, payload: dict) -> dict:
-        self.update_calls.append((page_id, copy.deepcopy(payload)))
-        return {"id": page_id, "properties": payload["properties"]}
+from tests._notion_test_helpers import FakeNotionAPIWithPruning as _FakeAPI
 
 
 # ---------------------------------------------------------------------------
