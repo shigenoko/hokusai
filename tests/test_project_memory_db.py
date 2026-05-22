@@ -52,8 +52,15 @@ class _FakeAPI:
         self.create_calls: list[dict] = []
         self.update_calls: list[tuple[str, dict]] = []
 
-    def query_database(self, database_id: str, *, filter_: dict | None = None) -> dict:
-        self.query_calls.append((database_id, filter_))
+    def query_database(
+        self,
+        database_id: str,
+        *,
+        filter_: dict | None = None,
+        start_cursor: str | None = None,
+        page_size: int | None = None,
+    ) -> dict:
+        self.query_calls.append((database_id, filter_, start_cursor, page_size))
         if self._existing_id:
             return {"results": [{"id": self._existing_id}]}
         return {"results": []}
@@ -429,7 +436,14 @@ class _FakeAPIWithMissingProperty:
         self.query_calls: list[tuple[str, dict | None]] = []
         self._first_create_call = True
 
-    def query_database(self, database_id: str, *, filter_: dict | None = None) -> dict:
+    def query_database(
+        self,
+        database_id: str,
+        *,
+        filter_: dict | None = None,
+        start_cursor: str | None = None,
+        page_size: int | None = None,
+    ) -> dict:
         self.query_calls.append((database_id, filter_))
         return {"results": []}
 
@@ -471,3 +485,174 @@ def test_property_not_found_retry_drops_missing_property():
     assert "Name" in api.create_calls[1]["properties"]
     assert "Type" in api.create_calls[1]["properties"]
     assert result["id"] == "new-memory-id"
+
+
+# ---------------------------------------------------------------------------
+# list_active_memories（Workgraph Phase 6 / Issue #48 / `hokusai prime`）
+# ---------------------------------------------------------------------------
+
+
+class _PaginatedFakeAPI:
+    """list_active_memories のページネーション検証用 fake API。
+
+    pages = [<page list 1>, <page list 2>, ...] で順次返す。最後のページは
+    has_more=False、それ以外は next_cursor を順番に付与する。
+    """
+
+    def __init__(self, pages: list[list[dict]]):
+        self._pages = pages
+        self.query_calls: list[dict] = []
+
+    def query_database(
+        self,
+        database_id: str,
+        *,
+        filter_: dict | None = None,
+        start_cursor: str | None = None,
+        page_size: int | None = None,
+    ) -> dict:
+        self.query_calls.append({
+            "filter_": filter_,
+            "start_cursor": start_cursor,
+            "page_size": page_size,
+        })
+        idx = 0 if start_cursor is None else int(start_cursor.replace("cursor-", ""))
+        results = self._pages[idx] if idx < len(self._pages) else []
+        has_more = idx < len(self._pages) - 1
+        return {
+            "results": results,
+            "has_more": has_more,
+            "next_cursor": f"cursor-{idx + 1}" if has_more else None,
+        }
+
+
+def _make_memory_page(
+    *,
+    page_id: str,
+    name: str,
+    memory_type: str = MEMORY_TYPE_PROJECT_RULE,
+    status: str = MEMORY_STATUS_ACTIVE,
+    profile: str | None = None,
+    applies_to: list[str] | None = None,
+    summary: str | None = None,
+    content: str = "body",
+) -> dict:
+    """Notion page 形式のテスト fixture を組み立てる。"""
+    props: dict = {
+        "Name": {"title": [{"text": {"content": name}}]},
+        "Type": {"select": {"name": memory_type}},
+        "Status": {"select": {"name": status}},
+        "Content": {"rich_text": [{"text": {"content": content}}]},
+    }
+    if profile is not None:
+        props["Profile"] = {"rich_text": [{"text": {"content": profile}}]}
+    if applies_to is not None:
+        props["Applies To"] = {
+            "multi_select": [{"name": p} for p in applies_to]
+        }
+    if summary is not None:
+        props["Summary"] = {"rich_text": [{"text": {"content": summary}}]}
+    return {"id": page_id, "properties": props}
+
+
+def test_list_active_memories_returns_all_when_no_filter():
+    pages = [[
+        _make_memory_page(page_id="m1", name="A"),
+        _make_memory_page(page_id="m2", name="B"),
+    ]]
+    api = _PaginatedFakeAPI(pages)
+    client = ProjectMemoryDBClient(api=api, database_id="pm-db")
+    result = client.list_active_memories()
+    assert [m["id"] for m in result] == ["m1", "m2"]
+    # サーバ side filter は Status == active のみ
+    assert api.query_calls[0]["filter_"] == {
+        "property": "Status",
+        "select": {"equals": "active"},
+    }
+
+
+def test_list_active_memories_filters_by_type():
+    pages = [[
+        _make_memory_page(page_id="m1", name="A", memory_type=MEMORY_TYPE_PROJECT_RULE),
+        _make_memory_page(page_id="m2", name="B", memory_type=MEMORY_TYPE_AVOIDANCE),
+        _make_memory_page(page_id="m3", name="C", memory_type=MEMORY_TYPE_HANDOVER_NOTE),
+    ]]
+    api = _PaginatedFakeAPI(pages)
+    client = ProjectMemoryDBClient(api=api, database_id="pm-db")
+    result = client.list_active_memories(
+        types={MEMORY_TYPE_PROJECT_RULE, MEMORY_TYPE_HANDOVER_NOTE}
+    )
+    assert [m["id"] for m in result] == ["m1", "m3"]
+
+
+def test_list_active_memories_skips_when_all_types_invalid():
+    api = _PaginatedFakeAPI([])
+    client = ProjectMemoryDBClient(api=api, database_id="pm-db")
+    result = client.list_active_memories(types={"unknown_type"})
+    assert result == []
+    # サーバへも問い合わせない（早期 return）
+    assert api.query_calls == []
+
+
+def test_list_active_memories_filters_by_profile_with_global_passthrough():
+    pages = [[
+        _make_memory_page(page_id="m1", name="A", profile="acme"),
+        _make_memory_page(page_id="m2", name="B", profile="other-client"),
+        # profile 未設定の memory（global）
+        _make_memory_page(page_id="m3", name="C"),
+    ]]
+    api = _PaginatedFakeAPI(pages)
+    client = ProjectMemoryDBClient(api=api, database_id="pm-db")
+    result = client.list_active_memories(profile="acme")
+    assert [m["id"] for m in result] == ["m1", "m3"]
+
+
+def test_list_active_memories_filters_by_phase_with_global_passthrough():
+    pages = [[
+        _make_memory_page(page_id="m1", name="A", applies_to=["phase5"]),
+        _make_memory_page(page_id="m2", name="B", applies_to=["phase3", "phase4"]),
+        # Applies To 未設定の memory（global）
+        _make_memory_page(page_id="m3", name="C"),
+    ]]
+    api = _PaginatedFakeAPI(pages)
+    client = ProjectMemoryDBClient(api=api, database_id="pm-db")
+    result = client.list_active_memories(phase="phase5")
+    assert [m["id"] for m in result] == ["m1", "m3"]
+
+
+def test_list_active_memories_paginates_until_has_more_false():
+    pages = [
+        [_make_memory_page(page_id="m1", name="A")],
+        [_make_memory_page(page_id="m2", name="B")],
+        [_make_memory_page(page_id="m3", name="C")],
+    ]
+    api = _PaginatedFakeAPI(pages)
+    client = ProjectMemoryDBClient(api=api, database_id="pm-db")
+    result = client.list_active_memories()
+    assert [m["id"] for m in result] == ["m1", "m2", "m3"]
+    # ページ 3 つ全て探索
+    assert len(api.query_calls) == 3
+    assert api.query_calls[0]["start_cursor"] is None
+    assert api.query_calls[1]["start_cursor"] == "cursor-1"
+    assert api.query_calls[2]["start_cursor"] == "cursor-2"
+
+
+def test_list_active_memories_respects_max_pages_safety_limit():
+    pages = [
+        [_make_memory_page(page_id=f"m{i}", name=f"M{i}")] for i in range(5)
+    ]
+    api = _PaginatedFakeAPI(pages)
+    client = ProjectMemoryDBClient(api=api, database_id="pm-db")
+    result = client.list_active_memories(max_pages=2)
+    assert [m["id"] for m in result] == ["m0", "m1"]
+    assert len(api.query_calls) == 2
+
+
+def test_list_active_memories_returns_empty_on_api_failure():
+    class _RaisingAPI:
+        def query_database(self, *args, **kwargs):
+            raise NotionAPIError(503, "service unavailable")
+
+    client = ProjectMemoryDBClient(api=_RaisingAPI(), database_id="pm-db")
+    result = client.list_active_memories()
+    assert result == []

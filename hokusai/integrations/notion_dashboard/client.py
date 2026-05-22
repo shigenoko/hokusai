@@ -71,10 +71,32 @@ class NotionAPIClient:
         self._timeout = timeout
         self._last_request_at: float = 0.0
 
-    def query_database(self, database_id: str, *, filter_: dict | None = None) -> dict:
-        return self._request("POST", f"/databases/{database_id}/query", body={
-            "filter": filter_,
-        } if filter_ else None)
+    def query_database(
+        self,
+        database_id: str,
+        *,
+        filter_: dict | None = None,
+        start_cursor: str | None = None,
+        page_size: int | None = None,
+    ) -> dict:
+        """Notion DB に対して filter / cursor 付き query を発行する。
+
+        `start_cursor` / `page_size` は Notion API v1 の pagination 引数で、
+        `has_more=True` / `next_cursor` のループ越え取得に使う。`page_size`
+        の許容上限は API 仕様で 100。
+        """
+        body: dict = {}
+        if filter_:
+            body["filter"] = filter_
+        if start_cursor:
+            body["start_cursor"] = start_cursor
+        if page_size is not None:
+            body["page_size"] = page_size
+        return self._request(
+            "POST",
+            f"/databases/{database_id}/query",
+            body=body or None,
+        )
 
     def create_page(self, payload: dict) -> dict:
         return self._request("POST", "/pages", body=payload)

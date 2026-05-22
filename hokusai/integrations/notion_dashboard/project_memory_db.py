@@ -262,6 +262,74 @@ class ProjectMemoryDBClient:
             properties["Approved At"] = _date(approved_at)
         return self._submit_with_property_pruning(page_id, properties)
 
+    def list_active_memories(
+        self,
+        *,
+        profile: str | None = None,
+        phase: str | None = None,
+        types: Iterable[str] | None = None,
+        max_pages: int = 10,
+    ) -> list[dict]:
+        """Status == active な Memory レコードを fetch する（Workgraph Phase 6
+        / Issue #48: `hokusai prime` 用）。
+
+        サーバ側 filter は `Status == active` のみで絞り、profile / phase /
+        types は client-side で post-process する（Applies To multi_select の
+        「空配列 OR phase を含む」OR 条件を Notion filter で組むと複雑で API
+        制約に当たりやすいため、シンプルさを優先）。
+
+        Args:
+            profile: 一致させる Profile 名。指定時は `Profile == profile`
+                **または `Profile` 未設定** な memory を採用（global memory）。
+            phase: 一致させる Applies To 値（例 `phase5`）。指定時は
+                `Applies To` が空 **または `phase` を含む** memory を採用。
+            types: 採用する Memory Type の集合。None なら全 Type を採用。
+                ALL_MEMORY_TYPES に含まれない値は黙って除外する。
+            max_pages: ページネーション安全上限。各 100 件 × 10 ページで
+                通常案件はカバーできる想定（大量 active memory が想定外で
+                溜まった場合の暴走防止）。
+
+        Returns:
+            Notion page dict のリスト（`id` / `properties` を含む）。
+            空ならゼロ件 / 取得失敗ならゼロ件（warning は debug log のみ）。
+        """
+        valid_types = None
+        if types is not None:
+            valid_types = {t for t in types if t in ALL_MEMORY_TYPES}
+            if not valid_types:
+                # types を渡したのに 1 つも valid でなければ空が期待動作
+                return []
+
+        results: list[dict] = []
+        start_cursor: str | None = None
+        for _ in range(max_pages):
+            try:
+                response = self._api.query_database(
+                    self._database_id,
+                    filter_={
+                        "property": "Status",
+                        "select": {"equals": MEMORY_STATUS_ACTIVE},
+                    },
+                    start_cursor=start_cursor,
+                    page_size=100,
+                )
+            except Exception as e:
+                logger.debug(
+                    f"Project Memory DB list 失敗: error={e}"
+                )
+                return results
+            for page in response.get("results") or []:
+                if _matches_memory_filters(
+                    page, profile=profile, phase=phase, types=valid_types
+                ):
+                    results.append(page)
+            if not response.get("has_more"):
+                break
+            start_cursor = response.get("next_cursor")
+            if not start_cursor:
+                break
+        return results
+
     def find_by_dedupe_key(self, dedupe_key: str) -> str | None:
         """dedupe_key で既存レコードを検索する。"""
         if not dedupe_key:
@@ -350,6 +418,52 @@ class ProjectMemoryDBClient:
         if audit.expires_at:
             props["Expires At"] = _date(audit.expires_at)
         return props
+
+
+def _matches_memory_filters(
+    page: dict,
+    *,
+    profile: str | None,
+    phase: str | None,
+    types: set[str] | None,
+) -> bool:
+    """`list_active_memories` の client-side filter helper。
+
+    - `profile` 指定時: Profile == profile **または Profile が空**（global memory）
+    - `phase` 指定時: Applies To が空 **または phase を含む**（global memory）
+    - `types` 指定時: Type が types に含まれる
+
+    profile / phase が空時の memory は「全範囲適用」とみなして採用する仕様
+    （要件 §8.3: Applies To は「省略時 global」の意味付け）。
+    """
+    props = page.get("properties") or {}
+
+    if types is not None:
+        type_value = (
+            (props.get("Type") or {}).get("select") or {}
+        ).get("name")
+        if type_value not in types:
+            return False
+
+    if profile is not None:
+        profile_rt = (props.get("Profile") or {}).get("rich_text") or []
+        page_profile = (
+            profile_rt[0].get("text", {}).get("content", "")
+            if profile_rt
+            else ""
+        ).strip()
+        if page_profile and page_profile != profile:
+            return False
+
+    if phase is not None:
+        applies = (
+            (props.get("Applies To") or {}).get("multi_select") or []
+        )
+        if applies:
+            names = {opt.get("name") for opt in applies}
+            if phase not in names:
+                return False
+    return True
 
 
 def _title(text: str) -> dict:
