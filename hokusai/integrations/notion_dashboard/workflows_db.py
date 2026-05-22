@@ -20,7 +20,7 @@ from datetime import datetime
 from typing import Any
 
 from ...logging_config import get_logger
-from .client import NotionAPIClient, NotionAPIError
+from .client import NotionAPIClient, NotionAPIError, NotionRateLimitError
 
 logger = get_logger("integrations.notion_dashboard.workflows_db")
 
@@ -248,10 +248,12 @@ class WorkflowsDBClient:
             return None
         try:
             return self._find_page_id(workflow_id)
-        except Exception:
-            # 失敗内容は `_find_page_id` 側 logger.debug で既に出力済み。
-            # ここで再度 log を出すとログノイズになるので raise を握り潰すだけ
-            # （wrapper の責務は「例外を抑制して None を返す」のみ）。
+        except (NotionAPIError, NotionRateLimitError):
+            # API 系例外（rate limit / HTTP error 等）のみ握り潰して None を
+            # 返す（read-only 経路の graceful degrade）。それ以外（想定外
+            # レスポンス形状 / 実装バグ等）は再 raise して呼び出し側で気付
+            # けるようにする（Copilot 指摘）。失敗内容は `_find_page_id`
+            # 側 logger.debug で既に出力済みなので二重ログは出さない。
             return None
 
     def _find_page_id(self, workflow_id: str) -> str | None:
