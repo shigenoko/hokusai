@@ -227,6 +227,12 @@ _WORKFLOWS_DB_PROPERTIES: dict[str, dict[str, Any]] = {
     # whoami → "(unknown)" の順で解決して書き込む。以降の event では上書きしない
     # （Notion 側の既存値を温存）。
     "Operator": {"rich_text": {}},
+    # Workgraph Phase 7 / Issue #50 / 要件 §9.3.3: 引き継ぎ運用（A → B）。
+    # `Cancel Reason` は Status=Canceled 時の理由（任意、引き継ぎ時は推奨）。
+    # `Supersedes`（self-link relation）は create_database 時点で自身の id が
+    # 引けないため、後段の `_add_workflows_supersedes_self_relation` で update_database
+    # 経由で追加する（Work Items DB の Dependencies と同パターン）。
+    "Cancel Reason": {"rich_text": {}},
 }
 
 
@@ -502,6 +508,39 @@ def _workflow_gates_db_properties(
     }
 
 
+def _add_workflows_supersedes_self_relation(
+    api: NotionAPIClient, workflows_db_id: str
+) -> None:
+    """Workflows DB の `Supersedes`（self-link relation）を作成後に追加する。
+
+    引き継ぎ運用（要件 §9.3.3）で新 workflow から旧 workflow を指すリレーション。
+    Notion API は create_database 時点で自身の id を引けないため update_database
+    経由で後付けする（Work Items DB の Dependencies と同パターン）。失敗しても
+    setup 全体を fail させない（warning ログのみ）。`single_property` を使うため
+    Notion 側 `Superseded By` の synced backref は表示されない（要件 §9.3.3 で
+    片方向相当として許容、双方向は audit log で補完）。
+    """
+    try:
+        api.update_database(
+            workflows_db_id,
+            {
+                "properties": {
+                    "Supersedes": {
+                        "relation": {
+                            "database_id": workflows_db_id,
+                            "single_property": {},
+                        }
+                    }
+                }
+            },
+        )
+    except Exception as e:
+        logger.warning(
+            "Workflows DB の Supersedes（self-relation）追加に失敗: %s: %s",
+            type(e).__name__, str(e),
+        )
+
+
 def _add_work_items_dependencies_self_relation(
     api: NotionAPIClient, work_items_db_id: str
 ) -> None:
@@ -668,6 +707,10 @@ def setup_notion_workspace(
         raise NotionSetupError(
             "Workflows DB の作成レスポンスに id が含まれません"
         )
+
+    # Supersedes（self-link relation）を update_database で後付け追加
+    # （Issue #50 / Workgraph Phase 7 引き継ぎ運用、§9.3.3）
+    _add_workflows_supersedes_self_relation(api, workflows_db_id)
 
     # 2. Pull Requests DB を作る（Workflow → Workflows DB の relation を含める）
     logger.info("Pull Requests DB を作成中...")

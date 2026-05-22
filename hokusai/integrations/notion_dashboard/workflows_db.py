@@ -167,6 +167,73 @@ class WorkflowsDBClient:
             return None
         return results[0].get("url")
 
+    def set_supersedes(
+        self, page_id: str, prior_workflow_page_id: str
+    ) -> dict:
+        """`Supersedes`（self-link relation）を設定する（Workgraph Phase 7
+        / Issue #50 / 要件 §9.3.3）。
+
+        新 workflow（wf-B）から旧 workflow（wf-A）への引き継ぎリレーション。
+        `single_property` 採用のため Notion 側 `Superseded By` の synced
+        backref は表示されない。
+
+        本メソッドは単一プロパティ（`Supersedes` のみ）を書き込むため、Notion
+        側に `Supersedes` が未追加（migrate 未実施環境）だと `_submit_with_property_pruning`
+        が該当プロパティを除外した結果 payload が空になり `NotionAPIError`
+        を raise する。呼び出し側は「`hokusai notion-migrate-schema` 実施
+        必要」のシグナルとして扱う想定（silent no-op で同期破壊が見えなく
+        なるのを避ける）。複数プロパティ書き込みの apply_event 経路とは
+        挙動が異なる点に注意。
+        """
+        if not page_id:
+            raise ValueError("page_id は必須です")
+        if not prior_workflow_page_id:
+            raise ValueError("prior_workflow_page_id は必須です")
+        properties = {
+            "Supersedes": {"relation": [{"id": prior_workflow_page_id}]}
+        }
+        return self._submit_with_property_pruning(page_id, properties)
+
+    def get_supersedes(self, page_id: str) -> list[str]:
+        """`Supersedes` リレーション値（旧 workflow の page_id リスト）を取得する。
+
+        次 PR（handover_note 世代遡及）で使用予定。Notion から返る
+        `relation` プロパティを抜き出して `[{"id": "..."}]` の id を平坦化する。
+        プロパティが存在しない / 失敗時は空リストを返す（部分結果保持の方針）。
+        """
+        if not page_id:
+            return []
+        try:
+            page = self._api.retrieve_page(page_id)
+        except Exception as e:
+            logger.debug(
+                f"Workflows DB retrieve_page 失敗: page_id={page_id[:8]}..., error={e}"
+            )
+            return []
+        prop = (page.get("properties") or {}).get("Supersedes") or {}
+        relations = prop.get("relation") or []
+        return [r.get("id") for r in relations if r.get("id")]
+
+    def set_cancel_reason(self, page_id: str, reason: str) -> dict:
+        """`Cancel Reason`（rich_text）を設定する（Workgraph Phase 7 / Issue #50）。
+
+        Status=Canceled 時の理由。引き継ぎ運用（要件 §9.3.2）では推奨。
+        引数 `page_id` / `reason` が空 / None なら `ValueError` を raise する
+        （silent no-op は呼び出し側のバグを隠すため、明示的に拒否する方針）。
+
+        単一プロパティ書き込みのため、Notion 側に `Cancel Reason` が未追加
+        （migrate 未実施環境）だと `_submit_with_property_pruning` が pruning
+        した結果 payload が空になり `NotionAPIError` を raise する。呼び出し
+        側は「`hokusai notion-migrate-schema` 実施必要」のシグナルとして扱う
+        想定（`set_supersedes` と同じ方針）。
+        """
+        if not page_id:
+            raise ValueError("page_id は必須です")
+        if not reason:
+            raise ValueError("reason は必須です")
+        properties = {"Cancel Reason": _rich_text(str(reason))}
+        return self._submit_with_property_pruning(page_id, properties)
+
     def _find_page_id(self, workflow_id: str) -> str | None:
         """Workflow ID プロパティで Notion DB を検索し、page_id を返す。"""
         try:
