@@ -6,21 +6,19 @@ B-3-3: is_retry フラグ設定のテスト
 B-4-4: リポジトリ単位の成功判定のテスト
 """
 
-import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
-from hokusai.state import (
-    WorkflowState,
-    PhaseStatus,
-    VerificationErrorEntry,
-)
 from hokusai.nodes.phase5_implement import (
-    _prepare_implementation,
-    _resolve_work_plan,
-    _build_retry_prompt,
     _build_implementation_prompt,
+    _build_retry_prompt,
     _extract_completed_steps,
     _extract_steps_from_work_plan,
+    _prepare_implementation,
+    _resolve_work_plan,
+)
+from hokusai.state import (
+    VerificationErrorEntry,
+    WorkflowState,
 )
 
 
@@ -572,3 +570,58 @@ class TestEnqueueWorkItemLeaseReleases:
 
         state = {"workflow_id": "wf-1", "work_plan": "ただの段落\n", "pending_work_items": []}
         assert _enqueue_work_item_lease_releases(state) == 0
+
+
+# ---------------------------------------------------------------------------
+# Workflow Gate enforcement (Workgraph Phase 4 / Issue #44 / 要件 §7.5)
+# ---------------------------------------------------------------------------
+
+
+class TestPhase5WorkflowGateEnforcement:
+    """Phase 5 開始時の gate enforcement テスト"""
+
+    def test_gate_blocked_reason_set_triggers_waiting_for_human(self):
+        """workflow_gates_blocked_reason が set されていれば Phase 5 は実装
+        を開始せず waiting_for_human で停止する"""
+        from hokusai.nodes.phase5_implement import _prepare_implementation
+        from hokusai.state import create_initial_state
+
+        state = create_initial_state(task_url="https://example.com/task")
+        state["workflow_id"] = "wf-1"
+        state["workflow_gates_blocked_reason"] = (
+            "Phase 5 human approval gate is pending"
+        )
+
+        state, prep_result = _prepare_implementation(state)
+
+        assert prep_result["early_return"] is True
+        assert state["waiting_for_human"] is True
+        assert "gate" in state["human_input_request"].lower()
+        assert "Phase 5 human approval gate is pending" in state["human_input_request"]
+
+    def test_gate_blocked_reason_none_proceeds_normally(self):
+        """workflow_gates_blocked_reason が None なら enforcement は no-op
+        （他のフローでも継続）"""
+        from hokusai.state import create_initial_state
+
+        state = create_initial_state(task_url="https://example.com/task")
+        state["workflow_id"] = "wf-1"
+        # workflow_gates_blocked_reason は init_state で None 初期化される
+        assert state["workflow_gates_blocked_reason"] is None
+
+    def test_gate_blocked_reason_empty_string_proceeds_normally(self):
+        """workflow_gates_blocked_reason が空文字 (falsy) なら no-op"""
+        from hokusai.nodes.phase5_implement import _prepare_implementation
+        from hokusai.state import create_initial_state
+
+        state = create_initial_state(task_url="https://example.com/task")
+        state["workflow_id"] = "wf-1"
+        state["workflow_gates_blocked_reason"] = ""
+
+        state, prep_result = _prepare_implementation(state)
+
+        # gate enforcement は no-op で次のステップへ（work_plan resolve 等で
+        # 別 early_return する可能性はあるがそれは別件）
+        # ここでは gate 起因の waiting_for_human は無いことを確認
+        if state.get("waiting_for_human"):
+            assert "gate" not in (state.get("human_input_request") or "").lower()

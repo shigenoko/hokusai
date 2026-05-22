@@ -374,3 +374,17 @@ def _extract_missing_property(message: str, current_props: dict) -> str | None:
             return name
 
     return None
+
+
+
+# ----- Public API: property error helpers（PR #45 Copilot 3 回目対応） -----
+# `_is_property_not_found` / `_extract_missing_property` は当初本 module の
+# 内部実装として private 命名で導入したが、後段で他 client（review_issues_db
+# / work_items_db / workflow_gates_db / _property_pruning helper）が同 helper
+# を必要とすることが判明し、現状 4 module から参照される共有実装になっている。
+# 名前の private prefix を外して公開 API 化することで、依存方向の不安定さ
+# （private 名のリファクタで他 module が壊れる）を解消する。
+# 既存 private 名は本 module の内部利用のため残し、新規参照側は public 名を
+# 使う方針。
+is_property_not_found = _is_property_not_found
+extract_missing_property = _extract_missing_property

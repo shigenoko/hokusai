@@ -273,6 +273,35 @@ def _prepare_implementation(state: WorkflowState) -> tuple[WorkflowState, dict]:
     logger.info("Phase 5 開始: 自動実装")
     state = update_phase_status(state, 5, PhaseStatus.IN_PROGRESS)
 
+    # **Workflow Gate enforcement（Workgraph Phase 4 / Issue #44 / 要件 §7.5）**:
+    # 対象 workflow に pending / blocked な gate（human_approval / ci_passed /
+    # security_approved 等）があれば Phase 5 は実装を開始しない。
+    # `workflow_gates_blocked_reason` は外部 caller（CLI / Operations Console
+    # / CI hook）が gate 状況を確認して設定する想定（MVP では HOKUSAI 内部の
+    # 自動 fetch は実装しない）。値が set されていれば人間判断待ちで停止。
+    gate_blocked_reason = state.get("workflow_gates_blocked_reason")
+    if gate_blocked_reason:
+        logger.info(
+            f"Phase 5 開始時に gate enforcement: blocked={gate_blocked_reason}"
+        )
+        state["waiting_for_human"] = True
+        state["human_input_request"] = (
+            "Workflow Gates が pending または blocked のため Phase 5 を開始"
+            "できません。\n\n"
+            f"理由: {gate_blocked_reason}\n\n"
+            "対処方法:\n"
+            "1. Notion Workflow Gates DB で対象 gate を確認・open に遷移"
+            "（または canceled / expired にして無効化）\n"
+            "2. `workflow_gates_blocked_reason` を None / 空文字に更新\n"
+            "3. workflow continue <workflow_id> で再開\n"
+        )
+        state = add_audit_log(
+            state, 5, "workflow_gates_blocked", "warning",
+            details={"reason": gate_blocked_reason},
+        )
+        prep_result["early_return"] = True
+        return state, prep_result
+
     # 作業計画の解決（リトライモードの場合はスキップ可能）
     # state に既存の work_plan がある場合も検証し、不正なら他ソースにフォールバック
     if not is_retry:

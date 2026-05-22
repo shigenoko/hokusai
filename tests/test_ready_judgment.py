@@ -342,3 +342,128 @@ def test_active_lease_with_tz_aware_expired_returns_pending():
         "lease_expires_at": past_utc,
     }
     assert compute_ready_state(wi) == "pending"
+
+
+# ---------------------------------------------------------------------------
+# Workflow Gate-aware ready 判定（Workgraph Phase 4 / Issue #44 / 要件 §7.5）
+# ---------------------------------------------------------------------------
+
+
+def test_pending_gate_blocks_work_item():
+    """pending gate が紐付いていれば blocked"""
+    wi = {
+        "status": "pending",
+        "gate_page_ids": ["gate-1"],
+    }
+    gates_lookup = {"gate-1": {"status": "pending"}}
+    assert (
+        compute_ready_state(wi, gates_by_page_id=gates_lookup) == "blocked"
+    )
+
+
+def test_blocked_gate_blocks_work_item():
+    wi = {
+        "status": "pending",
+        "gate_page_ids": ["gate-1"],
+    }
+    gates_lookup = {"gate-1": {"status": "blocked"}}
+    assert (
+        compute_ready_state(wi, gates_by_page_id=gates_lookup) == "blocked"
+    )
+
+
+def test_open_gate_does_not_block_work_item():
+    """open gate なら gate チェックを通過し、通常判定（依存無 blocker 無 → pending）"""
+    wi = {
+        "status": "pending",
+        "gate_page_ids": ["gate-1"],
+        "dependency_page_ids": [],
+        "blocking_review_issue_page_ids": [],
+    }
+    gates_lookup = {"gate-1": {"status": "open"}}
+    assert compute_ready_state(wi, gates_by_page_id=gates_lookup) == "pending"
+
+
+def test_not_required_gate_does_not_block():
+    """not_required な gate は阻害しない"""
+    wi = {
+        "status": "pending",
+        "gate_page_ids": ["gate-1"],
+    }
+    gates_lookup = {"gate-1": {"status": "not_required"}}
+    assert compute_ready_state(wi, gates_by_page_id=gates_lookup) == "pending"
+
+
+def test_expired_or_canceled_gate_does_not_block():
+    """expired / canceled gate は阻害しない"""
+    for status in ("expired", "canceled"):
+        wi = {
+            "status": "pending",
+            "gate_page_ids": ["gate-1"],
+        }
+        gates_lookup = {"gate-1": {"status": status}}
+        assert (
+            compute_ready_state(wi, gates_by_page_id=gates_lookup) == "pending"
+        )
+
+
+def test_multiple_gates_blocked_if_any_pending():
+    """複数 gate のうち 1 つでも pending なら blocked"""
+    wi = {
+        "status": "pending",
+        "gate_page_ids": ["gate-1", "gate-2"],
+    }
+    gates_lookup = {
+        "gate-1": {"status": "open"},
+        "gate-2": {"status": "pending"},
+    }
+    assert (
+        compute_ready_state(wi, gates_by_page_id=gates_lookup) == "blocked"
+    )
+
+
+def test_gate_missing_from_lookup_treated_as_blocking():
+    """gate が lookup に無い場合は保守的に blocked（誤 ready 化防止）"""
+    wi = {
+        "status": "pending",
+        "gate_page_ids": ["gate-missing"],
+    }
+    assert compute_ready_state(wi, gates_by_page_id={}) == "blocked"
+
+
+def test_no_gates_lookup_provided_with_gate_ids_treated_as_blocked():
+    """gate_page_ids があるのに gates_by_page_id 未提供 → 状態不明 → blocked"""
+    wi = {
+        "status": "pending",
+        "gate_page_ids": ["gate-1"],
+    }
+    assert compute_ready_state(wi) == "blocked"
+
+
+def test_no_gate_ids_does_not_require_gates_lookup():
+    """gate_page_ids が空 / 未指定なら gates_by_page_id 不要"""
+    wi = {
+        "status": "pending",
+        # gate_page_ids 省略
+        "dependency_page_ids": [],
+    }
+    # gates_by_page_id 渡さなくても pending を返す（gate チェック対象外）
+    assert compute_ready_state(wi) == "pending"
+
+
+def test_gate_check_runs_after_lease_check():
+    """active lease が優先（gate ペンディングでも lease 中なら in_progress）"""
+    from datetime import datetime, timedelta
+
+    future = (datetime.now() + timedelta(hours=1)).isoformat()
+    wi = {
+        "status": "pending",
+        "lease_status": "active",
+        "lease_expires_at": future,
+        "gate_page_ids": ["gate-1"],
+    }
+    gates_lookup = {"gate-1": {"status": "pending"}}
+    # lease が優先される
+    assert (
+        compute_ready_state(wi, gates_by_page_id=gates_lookup) == "in_progress"
+    )

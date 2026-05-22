@@ -54,6 +54,11 @@ REVIEW_ISSUES_DB_TITLE = "Review Issues DB"
 # Review Issue を踏まえた ready 判定の根拠を Notion 側で人間が確認できる
 # ようにする。
 WORK_ITEMS_DB_TITLE = "Work Items DB"
+# v0.9.0〜（Workgraph Phase 4 / Issue #44）。Human Approval / CI passed /
+# Design approved / Security approved 等の workflow 進行条件を Notion 上の
+# 明示的な gate として管理する。pending / blocked な gate がある間は対象
+# workflow は先に進まない（要件 §7）。
+WORKFLOW_GATES_DB_TITLE = "Workflow Gates DB"
 
 
 # 各 DB スキーマで共通利用するプロパティ名定数（重複文字列を一元化）
@@ -101,6 +106,23 @@ _WORK_ITEMS_DB_DESCRIPTION = (
     "lease は人間または Operations Console から再割当できます。詳細は GitHub "
     "Issue #38 / #42 と HOKUSAI 運用ガイド"
     "（docs/notion-dashboard-operation-guide.md）を参照。"
+)
+
+_WORKFLOW_GATES_DB_DESCRIPTION = (
+    "⚠️ HOKUSAI が自動管理する DB です（Workgraph Phase 4 / Issue #44）。"
+    "Human Approval / CI passed / Design approved / Security approved 等の "
+    "workflow 進行条件を gate として管理します。dedupe_key は workflow_id + "
+    "gate_type + required_by_phase + work_item_dedupe_key の sha256 hash 先頭 "
+    "16 文字。Gate Type / Status / Required By Phase / Workflow / Pull Request "
+    "/ Work Item / Review Issue / Approver / Decision Reason / Due At / "
+    "Last Updated を HOKUSAI が書き込みます（upsert_gate および update_status "
+    "の両方で Approver / Decision Reason を書き込み audit trail として残す、"
+    "要件 §7.5）。Created At は新規作成時のみ書き込み Notion 側で初回作成 "
+    "時刻を温存します。Status の手動編集（pending → open による承認等）は "
+    "人間運用判断として HOKUSAI 上書き対象外です。pending / blocked の gate "
+    "がある対象 workflow は先に進めません（要件 §7.5）。詳細は GitHub Issue "
+    "#44 と HOKUSAI 運用ガイド（docs/notion-dashboard-operation-guide.md）を "
+    "参照。"
 )
 
 _REVIEW_ISSUES_DB_DESCRIPTION = (
@@ -379,6 +401,86 @@ def _work_items_db_properties(
     }
 
 
+# ----- Workflow Gates DB プロパティ定義（Workgraph Phase 4 / Issue #44） -----
+# Gate Type / Status は要件 §7.2 / §7.3 と完全一致させる。Work Item への
+# relation は dual_property で Work Items DB 側に `Gates` 逆 relation を Notion
+# が自動生成する形にする（Work Items ↔ Review Issues 同様の bidirectional
+# パターン、ready 判定エンジンが Work Item から関連 gate を引きやすくするため）。
+# Workflow / Pull Request / Review Issue は single_property（backref 不要）。
+def _workflow_gates_db_properties(
+    workflows_db_id: str,
+    pull_requests_db_id: str,
+    review_issues_db_id: str,
+    work_items_db_id: str,
+) -> dict[str, dict[str, Any]]:
+    return {
+        "Name": {"title": {}},
+        "Gate Type": {
+            "select": {
+                "options": [
+                    {"name": "human_approval", "color": "yellow"},
+                    {"name": "ci_passed", "color": "green"},
+                    {"name": "design_approved", "color": "purple"},
+                    {"name": "security_approved", "color": "red"},
+                    {"name": "policy_waiver_approved", "color": "orange"},
+                    {"name": "dependency_risk_accepted", "color": "brown"},
+                    {"name": "timer", "color": "blue"},
+                    {"name": "external", "color": "default"},
+                ]
+            }
+        },
+        "Status": {
+            "select": {
+                "options": [
+                    {"name": "not_required", "color": "default"},
+                    {"name": "pending", "color": "yellow"},
+                    {"name": "open", "color": "green"},
+                    {"name": "blocked", "color": "red"},
+                    {"name": "expired", "color": "gray"},
+                    {"name": "canceled", "color": "brown"},
+                ]
+            }
+        },
+        "Required By Phase": {"number": {"format": "number"}},
+        "Workflow": {
+            "relation": {
+                "database_id": workflows_db_id,
+                "single_property": {},
+            }
+        },
+        "Pull Request": {
+            "relation": {
+                "database_id": pull_requests_db_id,
+                "single_property": {},
+            }
+        },
+        "Review Issue": {
+            "relation": {
+                "database_id": review_issues_db_id,
+                "single_property": {},
+            }
+        },
+        "Work Item": {
+            "relation": {
+                "database_id": work_items_db_id,
+                # dual_property で synced backref を作る。Notion 側で Work
+                # Items DB 上に `Gates` プロパティが自動生成され、Work Item
+                # から関連 gate を辿れる（ready 判定で gate-aware に動かす
+                # ための双方向ナビゲーション）。
+                "dual_property": {
+                    "synced_property_name": "Gates",
+                },
+            }
+        },
+        "Approver": {"rich_text": {}},
+        "Decision Reason": {"rich_text": {}},
+        "Dedupe Key": {"rich_text": {}},
+        "Due At": {"date": {}},
+        _PROP_CREATED_AT: {"date": {}},
+        _PROP_LAST_UPDATED: {"date": {}},
+    }
+
+
 def _add_work_items_dependencies_self_relation(
     api: NotionAPIClient, work_items_db_id: str
 ) -> None:
@@ -564,14 +666,48 @@ def setup_notion_workspace(
     # なってしまう問題を回避するため dual_property に統一した）。
     _add_work_items_dependencies_self_relation(api, work_items_db_id)
 
+    # 6. Workflow Gates DB を作る（Workgraph Phase 4 / Issue #44）。
+    # Workflow / Pull Request / Review Issue への single_property relation +
+    # Work Item への dual_property relation（Work Items DB 側に `Gates` 逆
+    # relation が Notion 自動生成される）。これにより ready 判定エンジンが
+    # Work Item から関連 gate を引けるようになる（要件 §7.5）。
+    logger.info("Workflow Gates DB を作成中...")
+    try:
+        wg_db = api.create_database({
+            "parent": {"type": "page_id", "page_id": parent_page_id},
+            "title": [
+                {"type": "text", "text": {"content": WORKFLOW_GATES_DB_TITLE}}
+            ],
+            "description": [
+                {"type": "text", "text": {"content": _WORKFLOW_GATES_DB_DESCRIPTION}}
+            ],
+            "properties": _workflow_gates_db_properties(
+                workflows_db_id,
+                pull_requests_db_id,
+                review_issues_db_id,
+                work_items_db_id,
+            ),
+        })
+    except Exception as e:
+        raise NotionSetupError(
+            f"Workflow Gates DB の作成に失敗: {type(e).__name__}: {e}"
+        ) from e
+
+    workflow_gates_db_id = wg_db.get("id")
+    if not workflow_gates_db_id:
+        raise NotionSetupError(
+            "Workflow Gates DB の作成レスポンスに id が含まれません"
+        )
+
     result: dict[str, Any] = {
         "workflows_db_id": workflows_db_id,
         "pull_requests_db_id": pull_requests_db_id,
         "review_issues_db_id": review_issues_db_id,
         "work_items_db_id": work_items_db_id,
+        "workflow_gates_db_id": workflow_gates_db_id,
     }
 
-    # 6. scaffold（オプトイン）: 標準ドキュメントツリーを作成
+    # 7. scaffold（オプトイン）: 標準ドキュメントツリーを作成
     # DB 作成と異なり、scaffold 失敗は致命扱いしない（DB は既に作成済みのため）。
     # scaffold_notion_workspace は入力検証以外は raise せず、partial state を
     # 返り値に含めるため、ここでは error 用の fallback dict 構築は不要。
@@ -1000,6 +1136,7 @@ def persist_env_vars(
     pull_requests_env_name: str = "HOKUSAI_NOTION_PR_DB_ID",
     review_issues_env_name: str = "HOKUSAI_NOTION_REVIEW_ISSUES_DB_ID",
     work_items_env_name: str = "HOKUSAI_NOTION_WORK_ITEMS_DB_ID",
+    workflow_gates_env_name: str = "HOKUSAI_NOTION_WORKFLOW_GATES_DB_ID",
     profile_name: str | None = None,
     backup: bool = True,
 ) -> dict[str, Any]:
@@ -1019,6 +1156,10 @@ def persist_env_vars(
         work_items_env_name: Work Items DB ID を保持する env 変数名（Issue #38 /
             v0.7.0〜）。Review Issues と同じく ids に work_items_db_id が含まれ
             ない旧呼び出しでも行を省略する後方互換 fallback を持つ。
+        workflow_gates_env_name: Workflow Gates DB ID を保持する env 変数名
+            （Issue #44 / Workgraph Phase 4 / v0.9.0〜）。ids に
+            workflow_gates_db_id が含まれない旧呼び出しでも行を省略する
+            後方互換 fallback。
         profile_name: profile 名（指定時は profile 別マーカーを使う）。
             `None` の場合は v0.4.0 以前の従来マーカーを使い、後方互換を維持する。
         backup: True なら書き込み前に <rc_path>.hokusai.bak を作成
@@ -1038,6 +1179,9 @@ def persist_env_vars(
     _validate_env_var_name(pull_requests_env_name, role="pull_requests_env_name")
     _validate_env_var_name(review_issues_env_name, role="review_issues_env_name")
     _validate_env_var_name(work_items_env_name, role="work_items_env_name")
+    _validate_env_var_name(
+        workflow_gates_env_name, role="workflow_gates_env_name"
+    )
 
     # profile 名指定時は profile 別マーカー、未指定時は従来マーカー
     if profile_name is not None:
@@ -1073,6 +1217,13 @@ def persist_env_vars(
     if work_items_db_id:
         block_lines.append(
             f'export {work_items_env_name}="{work_items_db_id}"'
+        )
+    # Workflow Gates DB ID は v0.9.0（Issue #44 / Workgraph Phase 4）で追加。
+    # 同じく後方互換 fallback。
+    workflow_gates_db_id = ids.get("workflow_gates_db_id")
+    if workflow_gates_db_id:
+        block_lines.append(
+            f'export {workflow_gates_env_name}="{workflow_gates_db_id}"'
         )
     block_lines.append(end_marker)
     new_block = "\n".join(block_lines) + "\n"

@@ -2662,3 +2662,147 @@ def test_drain_pending_work_items_dispatches_lease_release_event_when_marker_set
     assert capt.calls[0]["idempotency_key"].startswith(
         "wf-1:work_item_lease_release:"
     )
+
+
+# ---------------------------------------------------------------------------
+# WorkflowRunner._drain_pending_workflow_gates（Workgraph Phase 4 / Issue #44）
+# ---------------------------------------------------------------------------
+
+
+def test_drain_pending_workflow_gates_no_op_when_empty():
+    runner = _make_runner()
+    capt = _CapturingDispatch(runner)
+    runner.compiled_workflow = _FakeCompiledWorkflow()  # type: ignore[assignment]
+
+    n = runner._drain_pending_workflow_gates(
+        {"pending_workflow_gates": []}, {"thread": "x"}
+    )
+    assert n == 0
+    assert capt.calls == []
+
+
+def test_drain_pending_workflow_gates_dispatches_upsert_event_by_default():
+    """payload に `_event` marker が無ければ workflow_gate_upsert として dispatch"""
+    runner = _make_runner()
+    capt = _CapturingDispatch(runner)
+    runner.compiled_workflow = _FakeCompiledWorkflow()  # type: ignore[assignment]
+
+    pending = [
+        {
+            "workflow_id": "wf-1",
+            "name": "Phase 5 approval",
+            "gate_type": "human_approval",
+            "required_by_phase": 5,
+        }
+    ]
+    runner._drain_pending_workflow_gates(
+        {"pending_workflow_gates": pending}, {"thread": "x"}
+    )
+    assert len(capt.calls) == 1
+    assert capt.calls[0]["event_type"] == "workflow_gate_upsert"
+    assert capt.calls[0]["idempotency_key"].startswith(
+        "wf-1:workflow_gate_upsert:"
+    )
+
+
+def test_drain_pending_workflow_gates_dispatches_status_change_when_marker_set():
+    """`_event="status_change"` marker があれば workflow_gate_status_change として dispatch"""
+    runner = _make_runner()
+    capt = _CapturingDispatch(runner)
+    runner.compiled_workflow = _FakeCompiledWorkflow()  # type: ignore[assignment]
+
+    pending = [
+        {
+            "workflow_id": "wf-1",
+            "gate_type": "human_approval",
+            "required_by_phase": 5,
+            "status": "open",
+            "_event": "status_change",
+        }
+    ]
+    runner._drain_pending_workflow_gates(
+        {"pending_workflow_gates": pending}, {"thread": "x"}
+    )
+    assert len(capt.calls) == 1
+    assert capt.calls[0]["event_type"] == "workflow_gate_status_change"
+    assert capt.calls[0]["idempotency_key"].startswith(
+        "wf-1:workflow_gate_status_change:"
+    )
+    # internal marker は dispatcher 向け payload からは除去
+    assert "_event" not in capt.calls[0]["payload"]
+
+
+def test_drain_pending_workflow_gates_marks_missing_gate_type_in_idempotency_key():
+    """gate_type 欠落時は dedupe_key 生成を skip し、`_missing_gate_type` marker
+    を idempotency_key 末尾に入れる（衝突回避）"""
+    runner = _make_runner()
+    capt = _CapturingDispatch(runner)
+    runner.compiled_workflow = _FakeCompiledWorkflow()  # type: ignore[assignment]
+
+    pending = [
+        {
+            "workflow_id": "wf-1",
+            "name": "X",
+            "status": "open",
+            "_event": "status_change",
+            # gate_type 欠落
+        }
+    ]
+    runner._drain_pending_workflow_gates(
+        {"pending_workflow_gates": pending}, {"thread": "x"}
+    )
+    assert len(capt.calls) == 1
+    assert (
+        capt.calls[0]["idempotency_key"]
+        == "wf-1:workflow_gate_status_change:_missing_gate_type"
+    )
+    # enriched payload には dedupe_key が含まれない（dispatcher 側 guard 用）
+    assert "dedupe_key" not in capt.calls[0]["payload"]
+
+
+def test_drain_pending_workflow_gates_persists_cleared_state_to_store():
+    """drain 後に self.store に clear 後の state を保存（Work Items と同パターン）"""
+    runner = _make_runner()
+    _CapturingDispatch(runner)
+    runner.compiled_workflow = _FakeCompiledWorkflow()  # type: ignore[assignment]
+
+    save_calls: list[tuple[str, dict]] = []
+    original_save = runner.store.save_workflow
+
+    def _spy_save(wid, st):
+        save_calls.append((wid, dict(st)))
+        return original_save(wid, st)
+
+    runner.store.save_workflow = _spy_save  # type: ignore[assignment]
+
+    state_values = {
+        "workflow_id": "wf-persist",
+        "pending_workflow_gates": [
+            {
+                "workflow_id": "wf-persist",
+                "name": "X",
+                "gate_type": "human_approval",
+            }
+        ],
+    }
+    runner._drain_pending_workflow_gates(state_values, {"thread": "x"})
+    assert state_values["pending_workflow_gates"] == []
+    assert len(save_calls) >= 1
+    saved_wid, saved_state = save_calls[-1]
+    assert saved_wid == "wf-persist"
+    assert saved_state["pending_workflow_gates"] == []
+
+
+def test_drain_pending_workflow_gates_swallows_exceptions():
+    """drain 中の例外はワークフロー本体に伝播しない（best effort）"""
+    runner = _make_runner()
+    runner.compiled_workflow = _FakeCompiledWorkflow()  # type: ignore[assignment]
+
+    def raising(event_type, payload, **kwargs):
+        raise RuntimeError("boom")
+
+    runner._safe_notion_dispatch = raising  # type: ignore[method-assign]
+    runner._drain_pending_workflow_gates(
+        {"pending_workflow_gates": [{"name": "X", "gate_type": "human_approval", "workflow_id": "w"}]},
+        {"thread": "x"},
+    )

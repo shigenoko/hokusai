@@ -21,6 +21,7 @@ from .client import NotionAPIClient, NotionAPIError, NotionRateLimitError
 from .pull_requests_db import PullRequestsDBClient
 from .review_issues_db import ReviewIssuesDBClient
 from .work_items_db import WorkItemsDBClient
+from .workflow_gates_db import WorkflowGatesDBClient
 from .workflows_db import WorkflowsDBClient
 
 logger = get_logger("integrations.notion_dashboard.dispatcher")
@@ -53,6 +54,12 @@ EVENT_WORK_ITEM_STATUS_CHANGE = "work_item_status_change"
 # 割当できる）。
 EVENT_WORK_ITEM_CLAIM = "work_item_claim"
 EVENT_WORK_ITEM_LEASE_RELEASE = "work_item_lease_release"
+# Workflow Gate イベント（Workgraph Phase 4 / Issue #44）。Phase 4 plan ノード
+# や Phase 6 verify / Phase 7 review が gate を Notion に登録する際に
+# dispatch される。状態遷移（pending → open / blocked / expired）は別 event
+# `workflow_gate_status_change` で扱う（upsert は Status 温存）。
+EVENT_GATE_UPSERT = "workflow_gate_upsert"
+EVENT_GATE_STATUS_CHANGE = "workflow_gate_status_change"
 
 
 class NotionSyncDispatcher:
@@ -71,6 +78,7 @@ class NotionSyncDispatcher:
         self._pull_requests_db: PullRequestsDBClient | None = None
         self._review_issues_db: ReviewIssuesDBClient | None = None
         self._work_items_db: WorkItemsDBClient | None = None
+        self._workflow_gates_db: WorkflowGatesDBClient | None = None
         # workflow_id → page_id の positive-cache（PR #37 Copilot 7 回目指摘）。
         # Phase 6/7 drain で同一 workflow の review_issue を複数 dispatch する際、
         # 各 dispatch で Workflows DB に lookup query を投げないよう抑止する。
@@ -250,6 +258,14 @@ class NotionSyncDispatcher:
             self._handle_work_item_lease_release(payload)
             return
 
+        if event_type == EVENT_GATE_UPSERT:
+            self._handle_workflow_gate_upsert(payload)
+            return
+
+        if event_type == EVENT_GATE_STATUS_CHANGE:
+            self._handle_workflow_gate_status_change(payload)
+            return
+
         # 後方互換: 旧 Service Status sync が outbox に積んだ
         # service_status_checked エントリは Notion 連携廃止済みなので
         # no-op として扱い、retry_pending() で drain できるようにする。
@@ -342,27 +358,36 @@ class NotionSyncDispatcher:
     ) -> int:
         """workflow Notion ページの存在に影響する pending イベントだけを数える。
 
-        `review_issue_raised` / 廃止済 `service_status_checked` は workflow page
-        とは独立した同期なので除外する。これがないと、retry_pending() で
-        `review_issue_raised` を再送する時、自己 entry を含む `_count_pending_for`
-        が常に > 0 を返してしまい、`review_issue_raised` が永久に自己 deferral
+        以下は workflow page と独立した同期なので除外する。これがないと、
+        retry_pending() で各イベントを再送する時、自己 entry を含む
+        `_count_pending_for` が常に > 0 を返してしまい、永久に自己 deferral
         ループに陥り max_attempts 到達まで errors テーブルへ移動できない
-        （PR #37 Copilot 5 回目指摘）。
+        （PR #37 Copilot 5 回目指摘 / PR #45 Copilot 2 回目で gate イベント
+        も同じ理由で除外対象に追加）:
+
+        - `review_issue_raised`: Phase 6/7 の指摘同期（#36）
+        - `work_item_*` (upsert / status_change / claim / lease_release):
+          Work Items DB 関連（#38, #42）
+        - `workflow_gate_*` (upsert / status_change): Workflow Gates DB
+          関連（#44）
+        - `service_status_checked`: 廃止済の旧 Service Status sync
 
         exclude_key を渡せば、retry_pending() 経由で「これから削除される」
         自己 entry をさらに除外できる。
         """
         if self._store is None:
             return 0
-        # work_item_upsert は review_issue_raised と同じく workflow page sync
-        # とは独立した同期。同 workflow_id の workflow_started が pending の
-        # 際の deferred ループを避けるため除外する。
+        # 各イベントは workflow page sync とは独立した同期なので、同一
+        # workflow_id の workflow_started が pending の際の deferred ループを
+        # 避けるため除外する。
         excluded_types = (
             "review_issue_raised",
             "work_item_upsert",
             "work_item_status_change",
             "work_item_claim",
             "work_item_lease_release",
+            "workflow_gate_upsert",
+            "workflow_gate_status_change",
             "service_status_checked",
         )
         try:
@@ -802,6 +827,260 @@ class NotionSyncDispatcher:
             return
         client.release_lease(page_id)
 
+    def _handle_workflow_gate_upsert(self, payload: dict[str, Any]) -> None:
+        """Workflow Gate upsert イベント（Workgraph Phase 4 / Issue #44）。
+
+        必須 payload: name / gate_type。任意: workflow_id / required_by_phase /
+        status / approver / decision_reason / due_at / work_item_dedupe_key /
+        dedupe_key / workflow_page_id / pull_request_page_id /
+        work_item_page_id / review_issue_page_id.
+
+        入力検証（poison message 防止）:
+        - name / gate_type 必須、未指定なら warning + skip
+        - gate_type / status が enum 外なら warning + skip
+        - dedupe_key が str 以外なら warning + skip（list/dict 等で Notion
+          query 構築 TypeError を防ぐ、PR #43 で学んだパターン）
+        """
+        from .workflow_gates_db import (
+            DEFAULT_GATE_STATUS,
+            is_valid_gate_status,
+            is_valid_gate_type,
+        )
+
+        workflow_gates_db_id = os.environ.get(
+            self._config.workflow_gates_db_id_env, ""
+        ).strip()
+        if not workflow_gates_db_id:
+            logger.debug(
+                "Workflow Gates DB ID 未設定のため workflow_gate_upsert をスキップ"
+            )
+            return
+
+        name = payload.get("name")
+        gate_type = payload.get("gate_type")
+        if not name or not gate_type:
+            logger.warning(
+                "workflow_gate_upsert に name または gate_type が無いためスキップ"
+            )
+            return
+        if not is_valid_gate_type(gate_type):
+            logger.warning(
+                "workflow_gate_upsert の gate_type が enum 外なのでスキップ: %r",
+                gate_type,
+            )
+            return
+        status = payload.get("status") or DEFAULT_GATE_STATUS
+        if not is_valid_gate_status(status):
+            logger.warning(
+                "workflow_gate_upsert の status が enum 外なのでスキップ: %r",
+                status,
+            )
+            return
+
+        dedupe_key = payload.get("dedupe_key")
+        if dedupe_key is not None and not isinstance(dedupe_key, str):
+            logger.warning(
+                "workflow_gate_upsert の dedupe_key が str でないためスキップ: %r",
+                dedupe_key,
+            )
+            return
+
+        # required_by_phase の型検証
+        raw_phase = payload.get("required_by_phase")
+        if raw_phase is None:
+            required_by_phase = None
+        else:
+            try:
+                required_by_phase = int(raw_phase)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "workflow_gate_upsert の required_by_phase が int 変換 "
+                    "不能なのでスキップ: %r",
+                    raw_phase,
+                )
+                return
+
+        # **workflow_id 必須化 + 型検証**（PR #45 Copilot 3/4 回目指摘）:
+        # dedupe_key が未指定で workflow_id も無い場合、build_dedupe_key が
+        # workflow_id を空文字扱いにし、別 workflow 間で dedupe_key が衝突
+        # するリスクがあるため、dedupe_key 自動生成パスでは workflow_id を
+        # 必須にする。さらに workflow_id / work_item_dedupe_key が str 以外
+        # （list/dict 等）だと build_dedupe_key の join で TypeError 経由
+        # poison message 化するため、型も検証する。明示 dedupe_key 指定パスは
+        # 呼び出し側が衝突回避責任を持つ前提で skip しない。
+        workflow_id = payload.get("workflow_id")
+        if not dedupe_key:
+            if not workflow_id:
+                logger.warning(
+                    "workflow_gate_upsert で dedupe_key も workflow_id も無い "
+                    "ため別 workflow 間 dedupe_key 衝突のリスクがありスキップ: "
+                    "gate_type=%s, required_by_phase=%s",
+                    gate_type, required_by_phase,
+                )
+                return
+            if not isinstance(workflow_id, str):
+                logger.warning(
+                    "workflow_gate_upsert で workflow_id が str でないため "
+                    "スキップ: %r",
+                    workflow_id,
+                )
+                return
+            raw_wi_dkey = payload.get("work_item_dedupe_key")
+            if raw_wi_dkey is not None and not isinstance(raw_wi_dkey, str):
+                logger.warning(
+                    "workflow_gate_upsert で work_item_dedupe_key が str で "
+                    "ないためスキップ: %r",
+                    raw_wi_dkey,
+                )
+                return
+
+        client = self._get_workflow_gates_client(workflow_gates_db_id)
+        client.upsert_gate(
+            name=str(name),
+            gate_type=str(gate_type),
+            status=str(status),
+            required_by_phase=required_by_phase,
+            workflow_id=workflow_id,
+            workflow_page_id=payload.get("workflow_page_id"),
+            pull_request_page_id=payload.get("pull_request_page_id"),
+            work_item_page_id=payload.get("work_item_page_id"),
+            review_issue_page_id=payload.get("review_issue_page_id"),
+            approver=payload.get("approver"),
+            decision_reason=payload.get("decision_reason"),
+            due_at=payload.get("due_at"),
+            work_item_dedupe_key=payload.get("work_item_dedupe_key"),
+            dedupe_key=dedupe_key,
+        )
+
+    def _handle_workflow_gate_status_change(
+        self, payload: dict[str, Any]
+    ) -> None:
+        """Workflow Gate Status 遷移イベント（Workgraph Phase 4 / Issue #44）。
+
+        Phase 6 verify / Phase 7 review / 外部承認 hook から「gate を open に
+        した」「blocked にした」等の状態遷移を Notion に反映する。dedupe_key
+        または (workflow_id, gate_type, required_by_phase, work_item_dedupe_key)
+        で gate を同定し、見つからなければ warning + skip。
+        """
+        from .workflow_gates_db import build_dedupe_key, is_valid_gate_status
+
+        workflow_gates_db_id = os.environ.get(
+            self._config.workflow_gates_db_id_env, ""
+        ).strip()
+        if not workflow_gates_db_id:
+            logger.debug(
+                "Workflow Gates DB ID 未設定のため "
+                "workflow_gate_status_change をスキップ"
+            )
+            return
+
+        status = payload.get("status")
+        if not status:
+            logger.warning(
+                "workflow_gate_status_change に status が無いためスキップ"
+            )
+            return
+        if not is_valid_gate_status(status):
+            logger.warning(
+                "workflow_gate_status_change の status が enum 外なのでスキップ: %r",
+                status,
+            )
+            return
+
+        dedupe_key = payload.get("dedupe_key")
+        if dedupe_key is not None and not isinstance(dedupe_key, str):
+            logger.warning(
+                "workflow_gate_status_change の dedupe_key が str でない: %r",
+                dedupe_key,
+            )
+            return
+
+        if not dedupe_key:
+            gate_type = payload.get("gate_type")
+            if not gate_type:
+                logger.warning(
+                    "workflow_gate_status_change で dedupe_key も gate_type も "
+                    "無いため Gate を同定不能スキップ"
+                )
+                return
+            # gate_type の enum 検証（PR #45 Copilot 2 回目指摘）。typo / poison
+            # payload で誤 dedupe_key を build_dedupe_key が生成すると
+            # find_by_dedupe_key で常に miss → 状態遷移が silent に失敗する
+            # ため、upsert と同じく enum 外なら warning + skip。
+            from .workflow_gates_db import is_valid_gate_type
+            if not is_valid_gate_type(gate_type):
+                logger.warning(
+                    "workflow_gate_status_change の gate_type が enum 外 "
+                    "なのでスキップ: %r",
+                    gate_type,
+                )
+                return
+            # **workflow_id 必須化 + 型検証**（PR #45 Copilot 3/4 回目指摘、
+            # upsert と同じ理由）: dedupe_key 自動生成パスで workflow_id が
+            # 無いと別 workflow 間衝突。さらに workflow_id /
+            # work_item_dedupe_key が str 以外だと build_dedupe_key の join
+            # で TypeError → poison message 化するため、型も検証する。
+            workflow_id_for_key = payload.get("workflow_id")
+            if not workflow_id_for_key:
+                logger.warning(
+                    "workflow_gate_status_change で dedupe_key も workflow_id "
+                    "も無いため別 workflow 間衝突のリスクがありスキップ"
+                )
+                return
+            if not isinstance(workflow_id_for_key, str):
+                logger.warning(
+                    "workflow_gate_status_change で workflow_id が str で "
+                    "ないためスキップ: %r",
+                    workflow_id_for_key,
+                )
+                return
+            raw_wi_dkey = payload.get("work_item_dedupe_key")
+            if raw_wi_dkey is not None and not isinstance(raw_wi_dkey, str):
+                logger.warning(
+                    "workflow_gate_status_change で work_item_dedupe_key が "
+                    "str でないためスキップ: %r",
+                    raw_wi_dkey,
+                )
+                return
+            # required_by_phase の型検証（upsert と同じ）
+            raw_phase = payload.get("required_by_phase")
+            if raw_phase is None:
+                phase_for_key = None
+            else:
+                try:
+                    phase_for_key = int(raw_phase)
+                except (TypeError, ValueError):
+                    logger.warning(
+                        "workflow_gate_status_change で required_by_phase の "
+                        "int 変換不能スキップ: %r",
+                        raw_phase,
+                    )
+                    return
+            dedupe_key = build_dedupe_key(
+                workflow_id=workflow_id_for_key,
+                gate_type=str(gate_type),
+                required_by_phase=phase_for_key,
+                work_item_dedupe_key=payload.get("work_item_dedupe_key"),
+            )
+
+        client = self._get_workflow_gates_client(workflow_gates_db_id)
+        page_id = client.find_by_dedupe_key(dedupe_key)
+        if page_id is None:
+            logger.warning(
+                "workflow_gate_status_change の対象 page が見つからない: "
+                "workflow_id=%s, gate_type=%s, dedupe_key=%s...",
+                payload.get("workflow_id"),
+                payload.get("gate_type"),
+                dedupe_key[:8],
+            )
+            return
+        client.update_status(
+            page_id,
+            str(status),
+            approver=payload.get("approver"),
+            decision_reason=payload.get("decision_reason"),
+        )
+
     def _resolve_work_item_for_lease_event(
         self, payload: dict[str, Any], *, event_label: str
     ) -> tuple[str | None, Any]:
@@ -1031,6 +1310,16 @@ class NotionSyncDispatcher:
                 database_id=database_id,
             )
         return self._work_items_db
+
+    def _get_workflow_gates_client(
+        self, database_id: str
+    ) -> WorkflowGatesDBClient:
+        if self._workflow_gates_db is None:
+            self._workflow_gates_db = WorkflowGatesDBClient(
+                api=self._get_api(),
+                database_id=database_id,
+            )
+        return self._workflow_gates_db
 
     def _get_api(self) -> NotionAPIClient:
         if self._api is None:

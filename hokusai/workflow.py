@@ -94,6 +94,36 @@ def _resolve_work_item_event_name(marker: object) -> str:
     return EVENT_WORK_ITEM_UPSERT
 
 
+# Workflow Gates drain layer の event 名解決（Workgraph Phase 4 / Issue #44）。
+# Work Items と同じく dispatcher 定数を直接 import して drift を防ぐ。
+def _build_workflow_gate_event_marker_map() -> dict[str, str]:
+    from .integrations.notion_dashboard.dispatcher import (
+        EVENT_GATE_STATUS_CHANGE,
+    )
+
+    return {
+        "status_change": EVENT_GATE_STATUS_CHANGE,
+    }
+
+
+_WORKFLOW_GATE_EVENT_NAME_BY_MARKER: dict[str, str] = (
+    _build_workflow_gate_event_marker_map()
+)
+
+
+def _resolve_workflow_gate_event_name(marker: object) -> str:
+    """payload の `_event` marker から Workflow Gate event 名を解決する。
+
+    marker が None / 未知の場合は既定の `workflow_gate_upsert`（新規作成）。
+    """
+    if isinstance(marker, str):
+        mapped = _WORKFLOW_GATE_EVENT_NAME_BY_MARKER.get(marker)
+        if mapped is not None:
+            return mapped
+    from .integrations.notion_dashboard.dispatcher import EVENT_GATE_UPSERT
+    return EVENT_GATE_UPSERT
+
+
 class WorkflowRunner:
     """ワークフロー実行クラス"""
 
@@ -305,6 +335,117 @@ class WorkflowRunner:
                 f"Work Items 同期 drain 中のエラーを抑制: {wi_err}"
             )
             return 0
+
+    def _drain_pending_workflow_gates(
+        self, state_values: dict, langgraph_config: dict
+    ) -> int:
+        """Phase node が pending_workflow_gates に積んだ payload を Notion
+        Workflow Gates DB へ dispatch し、state からは clear する
+        （Workgraph Phase 4 / Issue #44）。
+
+        Work Items drain と同じパターン（per-item idempotency_key / `_event`
+        marker での event 名分岐 / store 永続化）。`_event="status_change"`
+        marker があれば workflow_gate_status_change として dispatch、それ以外
+        は workflow_gate_upsert。例外はワークフロー本体に伝播させない。
+
+        Returns:
+            dispatch 試行した gate イベント件数（0 = drain なし）
+        """
+        try:
+            pending = state_values.get("pending_workflow_gates") or []
+            if not pending:
+                return 0
+            operator = state_values.get("operator")
+            if not operator and self.notion_dispatcher.is_configured():
+                operator = resolve_operator_name()
+            for payload in pending:
+                enriched, idempotency_key = self._prepare_gate_dispatch(
+                    payload, operator
+                )
+                event_name = _resolve_workflow_gate_event_name(
+                    payload.get("_event")
+                )
+                self._safe_notion_dispatch(
+                    event_name,
+                    enriched,
+                    idempotency_key=idempotency_key,
+                )
+            self.compiled_workflow.update_state(
+                langgraph_config, {"pending_workflow_gates": []}
+            )
+            state_values["pending_workflow_gates"] = []
+            workflow_id = state_values.get("workflow_id")
+            if workflow_id:
+                try:
+                    self.store.save_workflow(workflow_id, state_values)
+                except Exception as save_err:
+                    logger.debug(
+                        f"workflow gates drain 後の store 保存で例外を抑制: "
+                        f"{save_err}"
+                    )
+            return len(pending)
+        except Exception as wg_err:
+            logger.debug(
+                f"Workflow Gates 同期 drain 中のエラーを抑制: {wg_err}"
+            )
+            return 0
+
+    @staticmethod
+    def _prepare_gate_dispatch(
+        payload: dict, operator: str | None
+    ) -> tuple[dict, str]:
+        """Workflow Gate 系イベントの payload を enrich し、idempotency_key を
+        組み立てる（Workgraph Phase 4 / Issue #44）。
+
+        - operator が指定されており payload に未含なら enrich
+        - dedupe_key 欠落時は build_dedupe_key で stable hash を生成
+          （workflow_id + gate_type + required_by_phase + work_item_dedupe_key）
+        - **idempotency_key は payload の `_event` marker に応じて event 名が
+          切り替わる**:
+            - `_event="status_change"` → `workflow_id:workflow_gate_status_change:dedupe_key`
+            - それ以外（既定）        → `workflow_id:workflow_gate_upsert:dedupe_key`
+          同一 gate の upsert / status_change は outbox 上で別エントリになる。
+        - 返す enriched payload から `_event` marker は除く（internal な分岐用）
+        - dedupe_key 自動生成では gate_type が必須。欠落時は dedupe_key 生成を
+          skip し、idempotency_key は `_missing_gate_type` marker にする
+          （dispatcher 側 handler が再検査で skip するため、誤更新は起きない）
+        """
+        from .integrations.notion_dashboard.workflow_gates_db import (
+            build_dedupe_key,
+        )
+
+        enriched = dict(payload)
+        if operator and "operator" not in enriched:
+            enriched["operator"] = operator
+        wid = enriched.get("workflow_id") or ""
+        event_marker = enriched.pop("_event", None)
+        # event 名は `_resolve_workflow_gate_event_name` に一元化（PR #45
+        # Copilot 3 回目指摘で二重管理を解消）。dispatcher 側 EVENT_*
+        # 定数の変更がそのまま idempotency_key 側にも反映される。
+        event_for_key = _resolve_workflow_gate_event_name(event_marker)
+        dkey = enriched.get("dedupe_key")
+        if not dkey:
+            gate_type = enriched.get("gate_type")
+            if gate_type:
+                dkey = build_dedupe_key(
+                    workflow_id=wid or None,
+                    gate_type=str(gate_type),
+                    required_by_phase=enriched.get("required_by_phase"),
+                    work_item_dedupe_key=enriched.get("work_item_dedupe_key"),
+                )
+                enriched["dedupe_key"] = dkey
+            else:
+                # gate_type が無いと build_dedupe_key の入力が空文字に潰れ、
+                # 同一 workflow 内の別 gate と衝突するため、空 title fallback
+                # と同じ「明示 marker で識別 + dispatcher 側 guard で skip」
+                # パターンを使う。
+                dkey = "_missing_gate_type"
+        idempotency_key = (
+            f"{wid}:{event_for_key}:{dkey}"
+            if wid
+            else f"{event_for_key}:{dkey}"
+        )
+        return enriched, idempotency_key
 
     @staticmethod
     def _prepare_work_item_dispatch(
@@ -1132,6 +1273,9 @@ class WorkflowRunner:
 
                 # Work Items DB 同期キューの drain（Issue #38 / Workgraph Phase 2）
                 self._drain_pending_work_items(current_state.values, config)
+
+                # Workflow Gates DB 同期キューの drain（Issue #44 / Workgraph Phase 4）
+                self._drain_pending_workflow_gates(current_state.values, config)
 
                 # ループ検出: 同じフェーズが繰り返されているか
                 if current_phase:
