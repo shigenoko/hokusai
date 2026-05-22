@@ -320,8 +320,13 @@ class ProjectMemoryDBClient:
                     page_size=100,
                 )
             except Exception as e:
-                logger.debug(
-                    f"Project Memory DB list 失敗: error={e}"
+                # 運用で気付けるよう warning に上げる（docstring「warning /
+                # debug log で通知」と整合: Copilot 指摘）。部分結果は保持
+                # して呼び出し側に返す（後段の Agent prompt 注入で memory
+                # 全消失を避けるため）。
+                logger.warning(
+                    "Project Memory DB list 失敗（部分結果 %d 件で続行）: %s",
+                    len(results), e,
                 )
                 return results
             for page in response.get("results") or []:

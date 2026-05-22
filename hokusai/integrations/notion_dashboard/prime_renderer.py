@@ -152,7 +152,12 @@ def _render_memory_entry(page: dict, memory_type: str) -> list[str]:
     if applies:
         meta.append("**Applies To:** " + ", ".join(f"`{p}`" for p in applies))
     out.append(" / ".join(meta))
-    body = (summary or content or "").strip()
+    # Summary が空白のみだと truthy 判定で content が無視されるため、
+    # 個別に strip して非空の方を採用する（Copilot 指摘）。Summary 優先で
+    # 内容が無ければ Content にフォールバック。
+    summary_stripped = summary.strip()
+    content_stripped = content.strip()
+    body = summary_stripped or content_stripped
     if body:
         # 引用 block で囲み、複数行は各行に `> ` を付与
         for ln in body.splitlines() or [""]:

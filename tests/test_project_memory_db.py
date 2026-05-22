@@ -655,32 +655,20 @@ def test_list_active_memories_respects_max_pages_safety_limit(caplog):
     )
 
 
-def test_list_active_memories_no_truncation_warning_when_naturally_done():
-    """has_more=False で自然完走したら truncation warning は出さない"""
+def test_list_active_memories_no_truncation_warning_when_naturally_done(caplog):
+    """has_more=False で自然完走したら truncation warning は出さない（caplog で
+    検証。実 logger は `hokusai.integrations.notion_dashboard.project_memory_db`）"""
     pages = [
         [_make_memory_page(page_id="m1", name="A")],
         [_make_memory_page(page_id="m2", name="B")],
     ]
     api = _PaginatedFakeAPI(pages)
     client = ProjectMemoryDBClient(api=api, database_id="pm-db")
-    import logging
-    handler_records: list[logging.LogRecord] = []
-
-    class _Capture(logging.Handler):
-        def emit(self, record):
-            if record.levelno >= logging.WARNING:
-                handler_records.append(record)
-
-    logger_obj = logging.getLogger(
-        "integrations.notion_dashboard.project_memory_db"
-    )
-    h = _Capture()
-    logger_obj.addHandler(h)
-    try:
+    with caplog.at_level("WARNING"):
         client.list_active_memories(max_pages=10)
-    finally:
-        logger_obj.removeHandler(h)
-    assert handler_records == []
+    assert not any(
+        "打ち切" in rec.message for rec in caplog.records
+    )
 
 
 def test_list_active_memories_filters_profile_with_multi_element_rich_text():

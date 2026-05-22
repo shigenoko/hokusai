@@ -136,6 +136,27 @@ def test_markdown_display_order_matches_constant():
     assert MEMORY_TYPE_DISPLAY_ORDER[0] == MEMORY_TYPE_HANDOVER_NOTE
 
 
+def test_markdown_falls_back_to_content_when_summary_is_whitespace_only():
+    """Summary が空白のみなら Content にフォールバックする（Copilot 指摘:
+    `or` 演算子で空白文字列が truthy になり Content が無視される問題を防止）"""
+    memories = [
+        _page(
+            page_id="p1",
+            name="X",
+            memory_type=MEMORY_TYPE_PROJECT_RULE,
+            summary="   \n  ",  # 空白だけ
+            content="real content body",
+        ),
+    ]
+    out = render_prime_markdown(
+        workflow_id="wf-1",
+        profile=None,
+        current_phase=None,
+        memories=memories,
+    )
+    assert "> real content body" in out
+
+
 def test_markdown_concatenates_multi_element_rich_text():
     """Notion が rich_text を装飾 / mention 等で複数要素に分割しても
     全要素が連結されて出力される（Copilot 指摘）"""
