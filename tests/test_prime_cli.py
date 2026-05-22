@@ -714,24 +714,12 @@ def test_prime_skips_handover_when_type_filter_excludes_it(
 # ---------------------------------------------------------------------------
 
 
-def test_prime_injects_workgraph_context_when_all_db_ids_set(
-    tmp_path, monkeypatch, captured
-):
-    """全 DB ID 設定済みなら work_items / review_issues / gates も prime に統合"""
-    out, err = captured
-    cfg = _make_config(tmp_path)
-    _seed_workflow(cfg)
-    monkeypatch.setenv("TEST_API_TOKEN", "t")
-    monkeypatch.setenv("TEST_MEMORY_DB", "pm-db")
-    monkeypatch.setenv("TEST_WORKFLOWS_DB", "wf-db")
-    monkeypatch.setenv("TEST_WORK_ITEMS_DB", "wi-db")
-    monkeypatch.setenv("TEST_REVIEW_ISSUES_DB", "ri-db")
-    monkeypatch.setenv("TEST_WORKFLOW_GATES_DB", "wg-db")
-
-    # cfg を拡張: 追加 env を解決可能に
-    cfg.notion_dashboard.work_items_db_id_env = "TEST_WORK_ITEMS_DB"
-    cfg.notion_dashboard.review_issues_db_id_env = "TEST_REVIEW_ISSUES_DB"
-    cfg.notion_dashboard.workflow_gates_db_id_env = "TEST_WORKFLOW_GATES_DB"
+def _make_baseline_workgraph_fakes():
+    """test_prime_injects_workgraph_context_when_all_db_ids_set と
+    test_prime_skips_workgraph_context_when_db_ids_unset で共通する
+    Workflows / ProjectMemory / NotionAPI の fake class セット（SonarCloud
+    duplication 対策で共通化）。返り値は (FakeAPI, FakeWFClient, FakeMemClient)
+    の 3 つ組。"""
 
     class _FakeWFClient:
         def __init__(self, *, api, database_id):
@@ -754,6 +742,51 @@ def test_prime_injects_workgraph_context_when_all_db_ids_set(
 
         def find_handover_notes_for_workflow(self, page_id, **kwargs):
             return []
+
+    class _FakeAPI:
+        def __init__(self, *a, **kw):
+            # no-op fake constructor: テスト fixture は state を持たない
+            return
+
+    return _FakeAPI, _FakeWFClient, _FakeMemClient
+
+
+def _apply_baseline_workgraph_patches(monkeypatch, fake_api, fake_wf, fake_mem):
+    """fake_api / fake_wf / fake_mem を Notion 各モジュールへ monkeypatch する
+    共通 helper（SonarCloud duplication 対策で共通化）。"""
+    monkeypatch.setattr(
+        "hokusai.integrations.notion_dashboard.client.NotionAPIClient", fake_api
+    )
+    monkeypatch.setattr(
+        "hokusai.integrations.notion_dashboard.project_memory_db.ProjectMemoryDBClient",
+        fake_mem,
+    )
+    monkeypatch.setattr(
+        "hokusai.integrations.notion_dashboard.workflows_db.WorkflowsDBClient",
+        fake_wf,
+    )
+
+
+def test_prime_injects_workgraph_context_when_all_db_ids_set(
+    tmp_path, monkeypatch, captured
+):
+    """全 DB ID 設定済みなら work_items / review_issues / gates も prime に統合"""
+    out, err = captured
+    cfg = _make_config(tmp_path)
+    _seed_workflow(cfg)
+    monkeypatch.setenv("TEST_API_TOKEN", "t")
+    monkeypatch.setenv("TEST_MEMORY_DB", "pm-db")
+    monkeypatch.setenv("TEST_WORKFLOWS_DB", "wf-db")
+    monkeypatch.setenv("TEST_WORK_ITEMS_DB", "wi-db")
+    monkeypatch.setenv("TEST_REVIEW_ISSUES_DB", "ri-db")
+    monkeypatch.setenv("TEST_WORKFLOW_GATES_DB", "wg-db")
+
+    # cfg を拡張: 追加 env を解決可能に
+    cfg.notion_dashboard.work_items_db_id_env = "TEST_WORK_ITEMS_DB"
+    cfg.notion_dashboard.review_issues_db_id_env = "TEST_REVIEW_ISSUES_DB"
+    cfg.notion_dashboard.workflow_gates_db_id_env = "TEST_WORKFLOW_GATES_DB"
+
+    _FakeAPI, _FakeWFClient, _FakeMemClient = _make_baseline_workgraph_fakes()
 
     class _FakeWIClient:
         def __init__(self, *, api, database_id):
@@ -779,18 +812,7 @@ def test_prime_injects_workgraph_context_when_all_db_ids_set(
         def list_pending_gates_for_workflow(self, page_id, **kwargs):
             return [{"id": "g-1", "properties": {"Name": {"title": [{"text": {"content": "Sec"}}]}, "Status": {"select": {"name": "pending"}}}}]
 
-    class _FakeAPI:
-        def __init__(self, *a, **kw):
-            # no-op fake constructor: テスト fixture は state を持たない
-            return
-
-    monkeypatch.setattr("hokusai.integrations.notion_dashboard.client.NotionAPIClient", _FakeAPI)
-    monkeypatch.setattr(
-        "hokusai.integrations.notion_dashboard.project_memory_db.ProjectMemoryDBClient", _FakeMemClient,
-    )
-    monkeypatch.setattr(
-        "hokusai.integrations.notion_dashboard.workflows_db.WorkflowsDBClient", _FakeWFClient,
-    )
+    _apply_baseline_workgraph_patches(monkeypatch, _FakeAPI, _FakeWFClient, _FakeMemClient)
     monkeypatch.setattr(
         "hokusai.integrations.notion_dashboard.work_items_db.WorkItemsDBClient", _FakeWIClient,
     )
@@ -828,41 +850,9 @@ def test_prime_skips_workgraph_context_when_db_ids_unset(
     cfg.notion_dashboard.review_issues_db_id_env = "TEST_REVIEW_ISSUES_DB"
     cfg.notion_dashboard.workflow_gates_db_id_env = "TEST_WORKFLOW_GATES_DB"
 
-    class _FakeWFClient:
-        def __init__(self, *, api, database_id):
-            # no-op fake constructor: テスト fixture は state を持たない
-            return
-
-        def find_workflow_page_id(self, workflow_id):
-            return "wf-page-1"
-
-        def get_supersedes(self, page_id):
-            return []
-
-    class _FakeMemClient:
-        def __init__(self, *, api, database_id):
-            # no-op fake constructor: テスト fixture は state を持たない
-            return
-
-        def list_active_memories(self, **kwargs):
-            return []
-
-        def find_handover_notes_for_workflow(self, page_id, **kwargs):
-            return []
-
-    class _FakeAPI:
-        def __init__(self, *a, **kw):
-            # no-op fake constructor: テスト fixture は state を持たない
-            return
-
+    _FakeAPI, _FakeWFClient, _FakeMemClient = _make_baseline_workgraph_fakes()
     # 各 sub client は monkeypatch しない（呼ばれたらテスト fail）
-    monkeypatch.setattr("hokusai.integrations.notion_dashboard.client.NotionAPIClient", _FakeAPI)
-    monkeypatch.setattr(
-        "hokusai.integrations.notion_dashboard.project_memory_db.ProjectMemoryDBClient", _FakeMemClient,
-    )
-    monkeypatch.setattr(
-        "hokusai.integrations.notion_dashboard.workflows_db.WorkflowsDBClient", _FakeWFClient,
-    )
+    _apply_baseline_workgraph_patches(monkeypatch, _FakeAPI, _FakeWFClient, _FakeMemClient)
 
     args = _Args(workflow_id="wf-1", phase=None, memory_types=None, output="json")
     with redirect_stdout(out), redirect_stderr(err):

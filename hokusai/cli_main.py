@@ -1170,9 +1170,15 @@ def _handle_prime(args, config) -> int:
                 memory_types is None
                 or "handover_note" in (memory_types or [])
             )
+            # workflow_page_id 解決は handover 注入 OR workgraph context fetch
+            # の少なくとも 1 つが必要な場合に限る（Copilot 指摘: 不要な
+            # find_workflow_page_id 呼び出しを避けて API 呼び出しを最小化）。
+            need_page_id = inject_handover or bool(
+                work_items_db_id or review_issues_db_id or workflow_gates_db_id
+            )
             current_page_id = None
             wf_client = None
-            if workflows_db_id:
+            if workflows_db_id and need_page_id:
                 from .integrations.notion_dashboard.workflows_db import (
                     WorkflowsDBClient,
                 )
@@ -1181,12 +1187,14 @@ def _handle_prime(args, config) -> int:
                 )
                 current_page_id = wf_client.find_workflow_page_id(workflow_id)
 
-            if inject_handover and wf_client is not None:
+            if inject_handover and wf_client is not None and current_page_id:
+                # 解決済の current_page_id を渡して重複検索を避ける（Copilot 指摘）
                 handover_memories = _collect_handover_notes(
                     wf_client=wf_client,
                     pm_client=client,
                     workflow_id=workflow_id,
                     profile=resolved_profile,
+                    start_page_id=current_page_id,
                 )
                 memories = _merge_memories_dedup(memories, handover_memories)
 
@@ -1266,11 +1274,13 @@ def _collect_handover_notes(
     workflow_id: str,
     profile: str | None,
     max_depth: int = 3,
+    start_page_id: str | None = None,
 ) -> list[dict]:
     """Supersedes リレーションを辿って active handover_note を集める
     （Workgraph Phase 7 / Issue #52 / 要件 §8.4 lookup rule）。
 
-    - 起点 workflow_id → page_id を解決
+    - 起点 workflow_id → page_id を解決（`start_page_id` で事前解決済みのものを
+      渡せば再検索を skip、Issue #54 Copilot 指摘）
     - `get_supersedes` で旧 workflow page_id を取得（最大 `max_depth` 世代まで遡る）
     - 各旧 workflow について `find_handover_notes_for_workflow` を呼び active を集める
     - 環状回避: 訪問済 page_id は再訪しない
@@ -1284,7 +1294,8 @@ def _collect_handover_notes(
         NotionRateLimitError,
     )
 
-    start_page_id = wf_client.find_workflow_page_id(workflow_id)
+    if start_page_id is None:
+        start_page_id = wf_client.find_workflow_page_id(workflow_id)
     if not start_page_id:
         return []
 
