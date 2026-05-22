@@ -419,11 +419,10 @@ class WorkflowRunner:
             enriched["operator"] = operator
         wid = enriched.get("workflow_id") or ""
         event_marker = enriched.pop("_event", None)
-        event_for_key = (
-            "workflow_gate_status_change"
-            if event_marker == "status_change"
-            else "workflow_gate_upsert"
-        )
+        # event 名は `_resolve_workflow_gate_event_name` に一元化（PR #45
+        # Copilot 3 回目指摘で二重管理を解消）。dispatcher 側 EVENT_*
+        # 定数の変更がそのまま idempotency_key 側にも反映される。
+        event_for_key = _resolve_workflow_gate_event_name(event_marker)
         dkey = enriched.get("dedupe_key")
         if not dkey:
             gate_type = enriched.get("gate_type")

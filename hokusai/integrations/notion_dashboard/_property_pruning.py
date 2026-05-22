@@ -21,8 +21,8 @@ from __future__ import annotations
 from ...logging_config import get_logger
 from .client import NotionAPIClient, NotionAPIError
 from .workflows_db import (
-    _extract_missing_property,
-    _is_property_not_found,
+    extract_missing_property,
+    is_property_not_found,
 )
 
 logger = get_logger("integrations.notion_dashboard._property_pruning")
@@ -59,7 +59,7 @@ def submit_with_property_pruning(
                 api, database_id, existing_page_id, current_props
             )
         except NotionAPIError as exc:
-            if not _is_property_not_found(exc):
+            if not is_property_not_found(exc):
                 raise
             _prune_missing_or_raise(
                 exc, current_props, attempts, max_attempts, db_label=db_label
@@ -107,7 +107,7 @@ def _prune_missing_or_raise(
             db_label, len(current_props),
         )
         raise exc
-    missing = _extract_missing_property(exc.message, current_props)
+    missing = extract_missing_property(exc.message, current_props)
     if missing is None:
         logger.warning(
             "%s: property_not_found 検知だが対象プロパティを特定できず: %s",

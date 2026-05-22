@@ -336,3 +336,46 @@ def test_dispatcher_gate_status_change_skips_invalid_gate_type(
     updates = [c for c in api.calls if c[0] == "update"]
     assert queries == []
     assert updates == []
+
+
+def test_dispatcher_gate_upsert_skips_when_workflow_id_missing_for_auto_dedupe(
+    store: SQLiteStore, monkeypatch
+):
+    """dedupe_key 未指定 + workflow_id 未指定なら、別 workflow 間で衝突する
+    リスクがあるので skip（PR #45 Copilot 3 回目指摘）。
+
+    Note: dispatch() 自体が workflow_id 欠落で early-return False するため
+    結果は False になる。create_page が呼ばれないことが本質。"""
+    disp, api = _build_dispatcher_with_gates_db(store, monkeypatch)
+    result = disp.dispatch(EVENT_GATE_UPSERT, {
+        "name": "X",
+        "gate_type": "human_approval",
+        "required_by_phase": 5,
+        # workflow_id 省略 + dedupe_key も省略
+    })
+    # dispatch の workflow_id 欠落 guard が先に発火するため False
+    assert result is False
+    creates = [c for c in api.calls if c[0] == "create"]
+    assert creates == []
+
+
+def test_dispatcher_gate_status_change_skips_when_workflow_id_missing_for_auto_dedupe(
+    store: SQLiteStore, monkeypatch
+):
+    """status_change でも dedupe_key 自動生成パスでは workflow_id 必須。
+    dispatch の workflow_id 欠落 guard が先に発火するので False が返り、
+    API も呼ばれない。"""
+    disp, api = _build_dispatcher_with_gates_db(
+        store, monkeypatch, query_result=[{"id": "gate-existing"}]
+    )
+    result = disp.dispatch(EVENT_GATE_STATUS_CHANGE, {
+        "gate_type": "human_approval",
+        "required_by_phase": 5,
+        "status": "open",
+        # workflow_id 省略 + dedupe_key も省略
+    })
+    assert result is False
+    queries = [c for c in api.calls if c[0] == "query"]
+    updates = [c for c in api.calls if c[0] == "update"]
+    assert queries == []
+    assert updates == []
