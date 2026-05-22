@@ -6,21 +6,19 @@ B-3-3: is_retry フラグ設定のテスト
 B-4-4: リポジトリ単位の成功判定のテスト
 """
 
-import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
-from hokusai.state import (
-    WorkflowState,
-    PhaseStatus,
-    VerificationErrorEntry,
-)
 from hokusai.nodes.phase5_implement import (
-    _prepare_implementation,
-    _resolve_work_plan,
-    _build_retry_prompt,
     _build_implementation_prompt,
+    _build_retry_prompt,
     _extract_completed_steps,
     _extract_steps_from_work_plan,
+    _prepare_implementation,
+    _resolve_work_plan,
+)
+from hokusai.state import (
+    VerificationErrorEntry,
+    WorkflowState,
 )
 
 
@@ -588,7 +586,7 @@ class TestPhase5WorkflowGateEnforcement:
         from hokusai.nodes.phase5_implement import _prepare_implementation
         from hokusai.state import create_initial_state
 
-        state = create_initial_state(task_url="http://example.com/task")
+        state = create_initial_state(task_url="https://example.com/task")
         state["workflow_id"] = "wf-1"
         state["workflow_gates_blocked_reason"] = (
             "Phase 5 human approval gate is pending"
@@ -606,7 +604,7 @@ class TestPhase5WorkflowGateEnforcement:
         （他のフローでも継続）"""
         from hokusai.state import create_initial_state
 
-        state = create_initial_state(task_url="http://example.com/task")
+        state = create_initial_state(task_url="https://example.com/task")
         state["workflow_id"] = "wf-1"
         # workflow_gates_blocked_reason は init_state で None 初期化される
         assert state["workflow_gates_blocked_reason"] is None
@@ -616,7 +614,7 @@ class TestPhase5WorkflowGateEnforcement:
         from hokusai.nodes.phase5_implement import _prepare_implementation
         from hokusai.state import create_initial_state
 
-        state = create_initial_state(task_url="http://example.com/task")
+        state = create_initial_state(task_url="https://example.com/task")
         state["workflow_id"] = "wf-1"
         state["workflow_gates_blocked_reason"] = ""
 

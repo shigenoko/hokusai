@@ -27,11 +27,8 @@ from datetime import datetime
 from typing import Any
 
 from ...logging_config import get_logger
-from .client import NotionAPIClient, NotionAPIError
-from .workflows_db import (
-    _extract_missing_property,
-    _is_property_not_found,
-)
+from ._property_pruning import submit_with_property_pruning
+from .client import NotionAPIClient
 
 logger = get_logger("integrations.notion_dashboard.workflow_gates_db")
 
@@ -47,7 +44,7 @@ GATE_TYPE_DEPENDENCY_RISK_ACCEPTED = "dependency_risk_accepted"
 GATE_TYPE_TIMER = "timer"
 GATE_TYPE_EXTERNAL = "external"
 
-_ALL_GATE_TYPES = frozenset({
+ALL_GATE_TYPES = frozenset({
     GATE_TYPE_HUMAN_APPROVAL,
     GATE_TYPE_CI_PASSED,
     GATE_TYPE_DESIGN_APPROVED,
@@ -57,6 +54,12 @@ _ALL_GATE_TYPES = frozenset({
     GATE_TYPE_TIMER,
     GATE_TYPE_EXTERNAL,
 })
+
+
+def is_valid_gate_type(value: object) -> bool:
+    """Gate Type が許容 enum 値かを判定する public helper（PR #45 Copilot 1
+    回目指摘で private 直参照を撤廃するため公開）。"""
+    return isinstance(value, str) and value in ALL_GATE_TYPES
 
 # Status enum（要件 §7.3）。状態遷移の標準フロー:
 # pending → open（承認）/ blocked（拒否）/ expired（期限切れ）/ canceled（取り下げ）。
@@ -68,7 +71,7 @@ GATE_STATUS_BLOCKED = "blocked"
 GATE_STATUS_EXPIRED = "expired"
 GATE_STATUS_CANCELED = "canceled"
 
-_ALL_GATE_STATUSES = frozenset({
+ALL_GATE_STATUSES = frozenset({
     GATE_STATUS_NOT_REQUIRED,
     GATE_STATUS_PENDING,
     GATE_STATUS_OPEN,
@@ -76,6 +79,12 @@ _ALL_GATE_STATUSES = frozenset({
     GATE_STATUS_EXPIRED,
     GATE_STATUS_CANCELED,
 })
+
+
+def is_valid_gate_status(value: object) -> bool:
+    """Gate Status が許容 enum 値かを判定する public helper（PR #45 Copilot
+    1 回目指摘で private 直参照を撤廃するため公開）。"""
+    return isinstance(value, str) and value in ALL_GATE_STATUSES
 
 # 進行を阻害する Status（ready 判定エンジンが workflow を blocked と扱う条件）。
 # pending / blocked のいずれかの gate があれば対象 workflow は先に進めない。
@@ -149,9 +158,9 @@ class WorkflowGatesDBClient:
         dedupe_key: str | None = None,
     ) -> dict:
         """Gate を upsert する（status は新規作成時のみ書き込み、update では温存）。"""
-        if gate_type not in _ALL_GATE_TYPES:
+        if gate_type not in ALL_GATE_TYPES:
             raise ValueError(f"Gate Type の値が不正です: {gate_type!r}")
-        if status not in _ALL_GATE_STATUSES:
+        if status not in ALL_GATE_STATUSES:
             raise ValueError(f"Gate Status の値が不正です: {status!r}")
         if not name:
             raise ValueError("name は必須です")
@@ -197,7 +206,7 @@ class WorkflowGatesDBClient:
         本 API を使う。Approver / Decision Reason を同時に上書きできる
         （要件 §7.5: gate の判断理由と承認者を audit trail として残す）。
         """
-        if status not in _ALL_GATE_STATUSES:
+        if status not in ALL_GATE_STATUSES:
             raise ValueError(f"Gate Status の値が不正です: {status!r}")
         now_iso = datetime.now().isoformat()
         properties: dict[str, Any] = {
@@ -239,60 +248,15 @@ class WorkflowGatesDBClient:
         max_attempts: int = 6,
     ) -> dict:
         """property_not_found 検出時に該当プロパティを除外して再試行する
-        共通機構（workflows_db / review_issues_db / work_items_db と同形）。"""
-        attempts = 0
-        current_props = dict(properties)
-        while True:
-            attempts += 1
-            try:
-                return self._create_or_update(existing_page_id, current_props)
-            except NotionAPIError as exc:
-                if not _is_property_not_found(exc):
-                    raise
-                self._prune_missing_or_raise(
-                    exc, current_props, attempts, max_attempts
-                )
-
-    def _create_or_update(
-        self, existing_page_id: str | None, current_props: dict
-    ) -> dict:
-        if existing_page_id is None:
-            return self._api.create_page({
-                "parent": {"database_id": self._database_id},
-                "properties": current_props,
-            })
-        return self._api.update_page(
-            existing_page_id, {"properties": current_props}
+        共通機構（_property_pruning.submit_with_property_pruning に集約）。"""
+        return submit_with_property_pruning(
+            api=self._api,
+            database_id=self._database_id,
+            existing_page_id=existing_page_id,
+            properties=properties,
+            db_label="Workflow Gates DB",
+            max_attempts=max_attempts,
         )
-
-    @staticmethod
-    def _prune_missing_or_raise(
-        exc: NotionAPIError,
-        current_props: dict,
-        attempts: int,
-        max_attempts: int,
-    ) -> None:
-        if attempts >= max_attempts:
-            logger.warning(
-                "property_not_found リトライ上限に到達: 残プロパティ数=%d",
-                len(current_props),
-            )
-            raise exc
-        missing = _extract_missing_property(exc.message, current_props)
-        if missing is None:
-            logger.warning(
-                "property_not_found 検知だが対象プロパティを特定できず: %s",
-                exc.message[:200],
-            )
-            raise exc
-        logger.info(
-            "Workflow Gates DB に '%s' プロパティが存在しないため除外して再試行",
-            missing,
-        )
-        current_props.pop(missing, None)
-        if not current_props:
-            logger.warning("除外後にプロパティが空になったため処理を中断")
-            raise exc
 
     @staticmethod
     def _build_properties(

@@ -57,7 +57,7 @@ EVENT_WORK_ITEM_LEASE_RELEASE = "work_item_lease_release"
 # Workflow Gate イベント（Workgraph Phase 4 / Issue #44）。Phase 4 plan ノード
 # や Phase 6 verify / Phase 7 review が gate を Notion に登録する際に
 # dispatch される。状態遷移（pending → open / blocked / expired）は別 event
-# `work_item_gate_status_change` で扱う（upsert は Status 温存）。
+# `workflow_gate_status_change` で扱う（upsert は Status 温存）。
 EVENT_GATE_UPSERT = "workflow_gate_upsert"
 EVENT_GATE_STATUS_CHANGE = "workflow_gate_status_change"
 
@@ -835,9 +835,9 @@ class NotionSyncDispatcher:
           query 構築 TypeError を防ぐ、PR #43 で学んだパターン）
         """
         from .workflow_gates_db import (
-            _ALL_GATE_STATUSES,
-            _ALL_GATE_TYPES,
             DEFAULT_GATE_STATUS,
+            is_valid_gate_status,
+            is_valid_gate_type,
         )
 
         workflow_gates_db_id = os.environ.get(
@@ -856,14 +856,14 @@ class NotionSyncDispatcher:
                 "workflow_gate_upsert に name または gate_type が無いためスキップ"
             )
             return
-        if gate_type not in _ALL_GATE_TYPES:
+        if not is_valid_gate_type(gate_type):
             logger.warning(
                 "workflow_gate_upsert の gate_type が enum 外なのでスキップ: %r",
                 gate_type,
             )
             return
         status = payload.get("status") or DEFAULT_GATE_STATUS
-        if status not in _ALL_GATE_STATUSES:
+        if not is_valid_gate_status(status):
             logger.warning(
                 "workflow_gate_upsert の status が enum 外なのでスキップ: %r",
                 status,
@@ -921,7 +921,7 @@ class NotionSyncDispatcher:
         または (workflow_id, gate_type, required_by_phase, work_item_dedupe_key)
         で gate を同定し、見つからなければ warning + skip。
         """
-        from .workflow_gates_db import _ALL_GATE_STATUSES, build_dedupe_key
+        from .workflow_gates_db import build_dedupe_key, is_valid_gate_status
 
         workflow_gates_db_id = os.environ.get(
             self._config.workflow_gates_db_id_env, ""
@@ -939,7 +939,7 @@ class NotionSyncDispatcher:
                 "workflow_gate_status_change に status が無いためスキップ"
             )
             return
-        if status not in _ALL_GATE_STATUSES:
+        if not is_valid_gate_status(status):
             logger.warning(
                 "workflow_gate_status_change の status が enum 外なのでスキップ: %r",
                 status,

@@ -67,9 +67,12 @@ def compute_ready_state(
         review_issues_by_page_id: blocking Review Issue を page_id で引ける
             lookup
         gates_by_page_id: 関連 Workflow Gate を page_id で引ける lookup。
-            未指定なら gate チェックはスキップ（既存呼び出しの後方互換）。
-            指定された場合、`Lease Status == pending / blocked` の gate が
-            紐付いていれば blocked を返す（要件 §7.5）。
+            **work_item に `gate_page_ids` が無い場合は不要**（gate 不要扱い、
+            既存呼び出しの後方互換）。`gate_page_ids` がある場合に lookup が
+            未指定 / 空 / 該当 page id が無いなら、状態不明として保守的に
+            blocked を返す（誤 ready 化を防ぐため）。指定 lookup の gate の
+            `status` が `pending` / `blocked`（BLOCKING_GATE_STATUSES）の
+            いずれかなら blocked を返す（要件 §7.5）。
 
     Returns:
         ready / blocked / pending / (元の status をそのまま) のいずれか。
