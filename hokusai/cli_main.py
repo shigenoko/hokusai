@@ -1251,9 +1251,21 @@ def _handle_notion_migrate_schema(args, config=None) -> int:
         )
         return 1
 
+    # Supersedes は self-link relation のため対象 DB id を含めて payload を組む
+    # （Issue #50 / Workgraph Phase 7）。Notion API は同名プロパティ既存時に
+    # no-op になるため idempotent。dry-run 出力と実際の payload が一致する
+    # よう、表示前に payload を確定させる（Copilot 指摘）。
+    properties_payload: dict = dict(PROPERTIES_TO_ADD)
+    properties_payload["Supersedes"] = {
+        "relation": {
+            "database_id": workflows_db_id,
+            "single_property": {},
+        }
+    }
+
     print(f"対象 Workflows DB: {workflows_db_id}")
     print("追加予定プロパティ:")
-    for name, schema in PROPERTIES_TO_ADD.items():
+    for name, schema in properties_payload.items():
         print(f"  - {name}: {schema}")
 
     # --dry-run は API 呼び出しを行わないため、token 未設定でも実行可能にする。
@@ -1269,16 +1281,6 @@ def _handle_notion_migrate_schema(args, config=None) -> int:
 
     try:
         api = NotionAPIClient(api_token=api_token)
-        # Supersedes は self-link relation のため対象 DB id を含めて payload を組む
-        # （Issue #50 / Workgraph Phase 7）。Notion API は同名プロパティ既存時に
-        # no-op になるため idempotent。
-        properties_payload: dict = dict(PROPERTIES_TO_ADD)
-        properties_payload["Supersedes"] = {
-            "relation": {
-                "database_id": workflows_db_id,
-                "single_property": {},
-            }
-        }
         result = api.update_database(
             workflows_db_id,
             {"properties": properties_payload},

@@ -3060,9 +3060,13 @@ def test_set_cancel_reason_rejects_empty_args():
         client.set_cancel_reason("page", "")
 
 
-def test_set_supersedes_retries_when_property_not_found():
-    """Supersedes プロパティが Notion 側に未追加（古い DB）でも property_not_found
-    リトライで pruning して同期破壊しない（migrate 未実施環境での後方互換）"""
+def test_set_supersedes_raises_when_property_missing_after_pruning():
+    """Supersedes プロパティが Notion 側に未追加（migrate 未実施環境）の場合、
+    `_submit_with_property_pruning` は missing プロパティを除外して再試行する。
+    `set_supersedes` は単一プロパティ（Supersedes のみ）を書き込むので、pruning
+    すると残プロパティが空になり、共通 helper は明示的に `NotionAPIError` を
+    raise する（silent no-op で同期破壊が見えなくなるのを避ける方針）。
+    呼び出し側は migrate 未実施の障害として認識して対処できる。"""
     from hokusai.integrations.notion_dashboard.client import NotionAPIError
 
     class _MissingPropAPI:
@@ -3083,8 +3087,5 @@ def test_set_supersedes_retries_when_property_not_found():
 
     api = _MissingPropAPI()
     client = WorkflowsDBClient(api=api, database_id="wf-db")
-    # 結果プロパティが空になると _submit_with_property_pruning は raise する。
-    # set_supersedes は単一プロパティを書き込むので、pruning すると空になり
-    # NotionAPIError が外に伝播する（呼び出し側は障害として認識できる）。
     with pytest.raises(NotionAPIError):
         client.set_supersedes("page-x", "page-prior")

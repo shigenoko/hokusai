@@ -210,7 +210,8 @@ class WorkflowsDBClient:
         """`Cancel Reason`（rich_text）を設定する（Workgraph Phase 7 / Issue #50）。
 
         Status=Canceled 時の理由。引き継ぎ運用（要件 §9.3.2）では推奨。
-        空文字 / None は no-op で page を返さず例外（呼び出し側で空を渡さない）。
+        引数 `page_id` / `reason` が空 / None なら `ValueError` を raise する
+        （silent no-op は呼び出し側のバグを隠すため、明示的に拒否する方針）。
         property_not_found には `_submit_with_property_pruning` で耐性。
         """
         if not page_id:
