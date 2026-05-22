@@ -275,13 +275,19 @@ def _render_gate_entry(page: dict) -> list[str]:
     name = _extract_title(page, "Name") or _UNTITLED
     status = _extract_select_name(page, "Status") or _UNKNOWN_STATUS
     gate_type = _extract_select_name(page, "Gate Type")
-    required_phase = _extract_rich_text(page, "Required By Phase")
+    # Required By Phase は Workflow Gates DB 上 number プロパティなので
+    # number から読み取って `phase{n}` に整形する（Copilot 指摘で rich_text
+    # 読み出しから修正）。1..10 の整数なら `phase{n}`、それ以外は数値そのまま。
+    required_phase_num = _extract_number(page, "Required By Phase")
     out: list[str] = [f"### {name}"]
     meta = [f"**Status:** `{status}`"]
     if gate_type:
         meta.append(f"**Type:** `{gate_type}`")
-    if required_phase:
-        meta.append(f"**Required by:** `{required_phase}`")
+    if required_phase_num is not None:
+        if isinstance(required_phase_num, int) and 1 <= required_phase_num <= 10:
+            meta.append(f"**Required by:** `phase{required_phase_num}`")
+        else:
+            meta.append(f"**Required by:** `{required_phase_num}`")
     out.append(" / ".join(meta))
     description = _extract_rich_text(page, "Description").strip()
     if description:
@@ -319,9 +325,17 @@ def _extract_gate_dict(page: dict) -> dict[str, Any]:
         "name": _extract_title(page, "Name"),
         "status": _extract_select_name(page, "Status"),
         "gate_type": _extract_select_name(page, "Gate Type"),
-        "required_by_phase": _extract_rich_text(page, "Required By Phase"),
+        # Required By Phase は number プロパティ。整数で JSON 出力する
+        # （Copilot 指摘: rich_text 読み出しは常に空になる schema 不整合）
+        "required_by_phase": _extract_number(page, "Required By Phase"),
         "description": _extract_rich_text(page, "Description"),
     }
+
+
+def _extract_number(page: dict, prop_name: str):
+    """Notion `number` プロパティの値を抜き出す（None / 数値）。"""
+    prop = (page.get("properties") or {}).get(prop_name) or {}
+    return prop.get("number")
 
 
 def _extract_memory_dict(page: dict) -> dict[str, Any]:

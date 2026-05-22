@@ -221,7 +221,8 @@ def test_markdown_includes_gates_section():
                 "Name": {"title": [{"text": {"content": "Security review"}}]},
                 "Status": {"select": {"name": "pending"}},
                 "Gate Type": {"select": {"name": "human_approval"}},
-                "Required By Phase": {"rich_text": [{"text": {"content": "phase8"}}]},
+                # Workflow Gates DB schema は number プロパティ（Copilot 指摘）
+                "Required By Phase": {"number": 8},
                 "Description": {"rich_text": [{"text": {"content": "Sign off needed"}}]},
             },
         }
