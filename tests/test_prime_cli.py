@@ -836,7 +836,8 @@ def test_prime_injects_workgraph_context_when_all_db_ids_set(
 def test_prime_skips_workgraph_context_when_db_ids_unset(
     tmp_path, monkeypatch, captured
 ):
-    """各 DB ID 未設定なら該当 section は空配列（既存 prime 動作維持）"""
+    """各 DB ID 未設定なら該当 section は null（未取得 / fetch 試行せず）。
+    取得済み 0 件 (= []) と区別するため null になることを検証。"""
     out, err = captured
     cfg = _make_config(tmp_path)
     _seed_workflow(cfg)
