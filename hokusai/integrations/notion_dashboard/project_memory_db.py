@@ -262,6 +262,99 @@ class ProjectMemoryDBClient:
             properties["Approved At"] = _date(approved_at)
         return self._submit_with_property_pruning(page_id, properties)
 
+    def list_active_memories(
+        self,
+        *,
+        profile: str | None = None,
+        phase: str | None = None,
+        types: Iterable[str] | None = None,
+        max_pages: int = 10,
+    ) -> list[dict]:
+        """Status == active な Memory レコードを fetch する（Workgraph Phase 6
+        / Issue #48: `hokusai prime` 用）。
+
+        サーバ側 filter は `Status == active` のみで絞り、profile / phase /
+        types は client-side で post-process する（Applies To multi_select の
+        「空配列 OR phase を含む」OR 条件を Notion filter で組むと複雑で API
+        制約に当たりやすいため、シンプルさを優先）。
+
+        Args:
+            profile: 一致させる Profile 名。指定時は `Profile == profile`
+                **または `Profile` 未設定** な memory を採用（global memory）。
+            phase: 一致させる Applies To 値（例 `phase5`）。指定時は
+                `Applies To` が空 **または `phase` を含む** memory を採用。
+            types: 採用する Memory Type の集合。None なら全 Type を採用。
+                ALL_MEMORY_TYPES に含まれない値は黙って除外する。
+            max_pages: ページネーション安全上限。各 100 件 × 10 ページで
+                通常案件はカバーできる想定（大量 active memory が想定外で
+                溜まった場合の暴走防止）。上限到達時は warning ログを出して
+                truncation を明示する（silent truncation 防止）。
+
+        Returns:
+            Notion page dict のリスト（`id` / `properties` を含む）。
+            空ならゼロ件。途中ページで API 失敗した場合は **その時点までに
+            取得済みの結果を返す**（部分結果保持: 後段の Agent prompt 注入
+            が memory 全消失するより部分的にでも渡せた方が有用なため）。
+            API 失敗 / max_pages 上限到達はいずれも warning / debug log で
+            通知し、呼び出し側に例外は伝播しない。
+        """
+        valid_types = None
+        if types is not None:
+            valid_types = {t for t in types if t in ALL_MEMORY_TYPES}
+            if not valid_types:
+                # types を渡したのに 1 つも valid でなければ空が期待動作
+                return []
+
+        results: list[dict] = []
+        start_cursor: str | None = None
+        truncated = False
+        for page_idx in range(max_pages):
+            try:
+                response = self._api.query_database(
+                    self._database_id,
+                    filter_={
+                        "property": "Status",
+                        "select": {"equals": MEMORY_STATUS_ACTIVE},
+                    },
+                    start_cursor=start_cursor,
+                    page_size=100,
+                )
+            except Exception as e:
+                # 運用で気付けるよう warning に上げる（docstring「warning /
+                # debug log で通知」と整合: Copilot 指摘）。部分結果は保持
+                # して呼び出し側に返す（後段の Agent prompt 注入で memory
+                # 全消失を避けるため）。
+                logger.warning(
+                    "Project Memory DB list 失敗（部分結果 %d 件で続行）: %s",
+                    len(results), e,
+                )
+                return results
+            for page in response.get("results") or []:
+                if _matches_memory_filters(
+                    page, profile=profile, phase=phase, types=valid_types
+                ):
+                    results.append(page)
+            if not response.get("has_more"):
+                break
+            start_cursor = response.get("next_cursor")
+            if not start_cursor:
+                break
+            # 次 page を取りに行く直前で安全上限に達するかチェック
+            if page_idx + 1 >= max_pages:
+                truncated = True
+                break
+
+        if truncated:
+            # max_pages 上限で打ち切ったことを明示（silent truncation 防止：
+            # Copilot 指摘）。呼び出し側が部分結果と認識して上限調整 / DB
+            # 整理（古い active を deprecated 化等）の判断材料にできる。
+            logger.warning(
+                "Project Memory DB list が max_pages=%d で打ち切られました "
+                "（has_more=True のまま）。取得済み %d 件で返却します。",
+                max_pages, len(results),
+            )
+        return results
+
     def find_by_dedupe_key(self, dedupe_key: str) -> str | None:
         """dedupe_key で既存レコードを検索する。"""
         if not dedupe_key:
@@ -350,6 +443,76 @@ class ProjectMemoryDBClient:
         if audit.expires_at:
             props["Expires At"] = _date(audit.expires_at)
         return props
+
+
+def _matches_memory_filters(
+    page: dict,
+    *,
+    profile: str | None,
+    phase: str | None,
+    types: set[str] | None,
+) -> bool:
+    """`list_active_memories` の client-side filter helper。
+
+    - `profile` 指定時: Profile == profile **または Profile が空**（global memory）
+    - `phase` 指定時: Applies To が空 **または phase を含む**（global memory）
+    - `types` 指定時: Type が types に含まれる
+
+    profile / phase が空時の memory は「全範囲適用」とみなして採用する仕様
+    （要件 §8.3: Applies To は「省略時 global」の意味付け）。
+    """
+    props = page.get("properties") or {}
+
+    if types is not None:
+        type_value = (
+            (props.get("Type") or {}).get("select") or {}
+        ).get("name")
+        if type_value not in types:
+            return False
+
+    if profile is not None:
+        profile_rt = (props.get("Profile") or {}).get("rich_text") or []
+        # rich_text は装飾やメンションで複数 element に分割され得るため、
+        # 先頭要素だけ読むと別 profile を global 扱い（空文字 = passthrough）
+        # で誤って通過させる可能性がある。全 element の plain_text / text.content
+        # を連結してから比較する（Copilot 指摘）。
+        page_profile = _join_rich_text_text(profile_rt).strip()
+        if page_profile and page_profile != profile:
+            return False
+
+    if phase is not None:
+        applies = (
+            (props.get("Applies To") or {}).get("multi_select") or []
+        )
+        if applies:
+            names = {opt.get("name") for opt in applies}
+            if phase not in names:
+                return False
+    return True
+
+
+def _join_rich_text_text(items: list[dict]) -> str:
+    """rich_text array の全要素から plain_text / text.content を連結する。
+
+    `_matches_memory_filters` の Profile 比較で使う。複数 element 分割 /
+    mention / equation 対応（Copilot 指摘）。prime_renderer 側にも同等の
+    `_join_rich_text_items` があるが、依存方向（client → renderer）を逆に
+    したくないので本 module 内に独立して持つ。
+    """
+    parts: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        plain = item.get("plain_text")
+        if isinstance(plain, str) and plain:
+            parts.append(plain)
+            continue
+        text = item.get("text")
+        if isinstance(text, dict):
+            content = text.get("content")
+            if isinstance(content, str) and content:
+                parts.append(content)
+    return "".join(parts)
 
 
 def _title(text: str) -> dict:
