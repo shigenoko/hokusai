@@ -273,6 +273,21 @@ def test_upsert_omits_applies_to_when_no_valid_values():
     assert "Applies To" not in props
 
 
+def test_upsert_rejects_mapping_applies_to():
+    """dict / Mapping を applies_to に渡しても黙ってキーが採用されない（Copilot 指摘）"""
+    api = _FakeAPI()
+    client = ProjectMemoryDBClient(api=api, database_id="pm-db")
+    client.upsert_memory(
+        name="X",
+        memory_type=MEMORY_TYPE_PROJECT_RULE,
+        content="c",
+        applies_to={"phase1": True, "phase2": False},  # Mapping は reject
+        workflow_id="wf-1",
+    )
+    props = api.create_calls[0]["properties"]
+    assert "Applies To" not in props
+
+
 def test_allowed_applies_to_values_covers_phase1_through_phase10():
     """phase1〜phase10 の 10 値が ALLOWED_APPLIES_TO_VALUES に含まれる"""
     assert ALLOWED_APPLIES_TO_VALUES == frozenset(

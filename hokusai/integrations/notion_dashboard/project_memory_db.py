@@ -22,6 +22,7 @@ Notion に保存し、後段で Agent prompt に要約注入する基盤。本 m
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Iterable
@@ -112,6 +113,11 @@ def _normalize_applies_to(value: object) -> list[str]:
         return []
     if isinstance(value, str):
         candidates: list[str] = [value]
+    elif isinstance(value, Mapping):
+        # dict 等を渡されると iterate でキーが取れて silent に値が通ってしまう
+        # ため、Iterable 経路の前で明示的に reject（Copilot 指摘 / ready_judgment
+        # `_as_list` と同じ防御策）。
+        return []
     elif isinstance(value, Iterable):
         candidates = [item for item in value if isinstance(item, str)]
     else:
