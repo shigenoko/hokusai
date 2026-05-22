@@ -649,6 +649,43 @@ def test_list_active_memories_respects_max_pages_safety_limit():
     assert len(api.query_calls) == 2
 
 
+def test_list_active_memories_filters_profile_with_multi_element_rich_text():
+    """Profile が rich_text 複数要素に分割されていても、全要素連結で
+    profile 文字列を復元してから比較する（Copilot 指摘）"""
+    pages = [[
+        {
+            "id": "m1",
+            "properties": {
+                "Type": {"select": {"name": MEMORY_TYPE_PROJECT_RULE}},
+                "Status": {"select": {"name": MEMORY_STATUS_ACTIVE}},
+                "Profile": {
+                    "rich_text": [
+                        {"plain_text": "ac"},
+                        {"text": {"content": "me"}},
+                    ]
+                },
+            },
+        },
+        {
+            "id": "m2",
+            "properties": {
+                "Type": {"select": {"name": MEMORY_TYPE_PROJECT_RULE}},
+                "Status": {"select": {"name": MEMORY_STATUS_ACTIVE}},
+                "Profile": {
+                    "rich_text": [
+                        {"plain_text": "other"},
+                    ]
+                },
+            },
+        },
+    ]]
+    api = _PaginatedFakeAPI(pages)
+    client = ProjectMemoryDBClient(api=api, database_id="pm-db")
+    result = client.list_active_memories(profile="acme")
+    # m1 のみ採用（m2 は profile 不一致で除外）
+    assert [m["id"] for m in result] == ["m1"]
+
+
 def test_list_active_memories_returns_empty_on_first_page_failure():
     """初回 query で失敗 → 部分結果 0 件で gracefully 返却"""
 

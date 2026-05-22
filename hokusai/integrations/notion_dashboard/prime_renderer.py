@@ -175,18 +175,37 @@ def _extract_memory_dict(page: dict) -> dict[str, Any]:
 
 def _extract_title(page: dict, prop_name: str) -> str:
     title = (page.get("properties") or {}).get(prop_name) or {}
-    items = title.get("title") or []
-    if not items:
-        return ""
-    return (items[0].get("text") or {}).get("content") or ""
+    return _join_rich_text_items(title.get("title") or [])
 
 
 def _extract_rich_text(page: dict, prop_name: str) -> str:
     prop = (page.get("properties") or {}).get(prop_name) or {}
-    items = prop.get("rich_text") or []
-    if not items:
-        return ""
-    return (items[0].get("text") or {}).get("content") or ""
+    return _join_rich_text_items(prop.get("rich_text") or [])
+
+
+def _join_rich_text_items(items: list[dict]) -> str:
+    """Notion の rich_text / title array の全要素を連結して 1 つの文字列にする。
+
+    Notion は装飾 / メンション / リンクで rich_text を複数 element に分割する
+    ため、先頭要素だけ読むと後続のテキストが欠落する。各 element は
+    `plain_text` をまず採用し、無ければ `text.content` でフォールバック
+    （mention / equation 等で `text` キーが無いケースに耐性を持たせる）。
+    Copilot 指摘。
+    """
+    parts: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        plain = item.get("plain_text")
+        if isinstance(plain, str) and plain:
+            parts.append(plain)
+            continue
+        text = item.get("text")
+        if isinstance(text, dict):
+            content = text.get("content")
+            if isinstance(content, str) and content:
+                parts.append(content)
+    return "".join(parts)
 
 
 def _extract_select_name(page: dict, prop_name: str) -> str | None:

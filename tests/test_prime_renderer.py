@@ -136,6 +136,45 @@ def test_markdown_display_order_matches_constant():
     assert MEMORY_TYPE_DISPLAY_ORDER[0] == MEMORY_TYPE_HANDOVER_NOTE
 
 
+def test_markdown_concatenates_multi_element_rich_text():
+    """Notion が rich_text を装飾 / mention 等で複数要素に分割しても
+    全要素が連結されて出力される（Copilot 指摘）"""
+    memories = [
+        {
+            "id": "p1",
+            "properties": {
+                "Name": {
+                    "title": [
+                        {"plain_text": "Part1 "},
+                        {"plain_text": "Part2"},
+                    ]
+                },
+                "Type": {"select": {"name": MEMORY_TYPE_PROJECT_RULE}},
+                "Content": {
+                    "rich_text": [
+                        # plain_text 経路
+                        {"plain_text": "Line1 "},
+                        # text.content フォールバック経路
+                        {"text": {"content": "Line2 "}},
+                        # mention（text key 無し）→ skip
+                        {"type": "mention", "mention": {"type": "user"}},
+                        # 末尾の通常要素
+                        {"plain_text": "Tail"},
+                    ]
+                },
+            },
+        }
+    ]
+    out = render_prime_markdown(
+        workflow_id="wf-1",
+        profile=None,
+        current_phase=None,
+        memories=memories,
+    )
+    assert "### Part1 Part2" in out
+    assert "> Line1 Line2 Tail" in out
+
+
 def test_markdown_handles_unknown_memory_type_gracefully():
     """schema drift で想定外 type が来ても落ちず、末尾 section に出す"""
     memories = [

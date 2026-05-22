@@ -450,11 +450,11 @@ def _matches_memory_filters(
 
     if profile is not None:
         profile_rt = (props.get("Profile") or {}).get("rich_text") or []
-        page_profile = (
-            profile_rt[0].get("text", {}).get("content", "")
-            if profile_rt
-            else ""
-        ).strip()
+        # rich_text は装飾やメンションで複数 element に分割され得るため、
+        # 先頭要素だけ読むと別 profile を global 扱い（空文字 = passthrough）
+        # で誤って通過させる可能性がある。全 element の plain_text / text.content
+        # を連結してから比較する（Copilot 指摘）。
+        page_profile = _join_rich_text_text(profile_rt).strip()
         if page_profile and page_profile != profile:
             return False
 
@@ -467,6 +467,30 @@ def _matches_memory_filters(
             if phase not in names:
                 return False
     return True
+
+
+def _join_rich_text_text(items: list[dict]) -> str:
+    """rich_text array の全要素から plain_text / text.content を連結する。
+
+    `_matches_memory_filters` の Profile 比較で使う。複数 element 分割 /
+    mention / equation 対応（Copilot 指摘）。prime_renderer 側にも同等の
+    `_join_rich_text_items` があるが、依存方向（client → renderer）を逆に
+    したくないので本 module 内に独立して持つ。
+    """
+    parts: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        plain = item.get("plain_text")
+        if isinstance(plain, str) and plain:
+            parts.append(plain)
+            continue
+        text = item.get("text")
+        if isinstance(text, dict):
+            content = text.get("content")
+            if isinstance(content, str) and content:
+                parts.append(content)
+    return "".join(parts)
 
 
 def _title(text: str) -> dict:

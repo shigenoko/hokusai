@@ -1066,7 +1066,18 @@ def _handle_prime(args, config) -> int:
         return 1
 
     resolved_profile = profile_arg or state.get("profile_name")
-    resolved_phase = cli_phase or state.get("current_phase")
+    # workflow state の current_phase は int（1..10）で保存される一方、
+    # Project Memory DB の Applies To は `phase1`..`phase10` 文字列なので、
+    # state 由来の int は `phase{n}` に正規化する。CLI `--phase` の文字列指定
+    # はそのまま優先採用（呼び出し側責任で `phase5` 等を渡す）。Copilot 指摘。
+    resolved_phase: str | None = cli_phase
+    if resolved_phase is None:
+        raw_phase = state.get("current_phase")
+        if isinstance(raw_phase, int) and 1 <= raw_phase <= 10:
+            resolved_phase = f"phase{raw_phase}"
+        elif isinstance(raw_phase, str) and raw_phase:
+            # 既に文字列で渡ってきた場合はそのまま採用
+            resolved_phase = raw_phase
 
     # `--profile` 未指定で workflow state の profile_name が現 config の
     # profile と異なる場合、state 側 profile の config に切り替える。

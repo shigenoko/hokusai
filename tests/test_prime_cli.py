@@ -56,10 +56,13 @@ def _make_config(
 def _seed_workflow(config: WorkflowConfig, **overrides):
     """テスト用 workflow を SQLite に保存する"""
     store = SQLiteStore(config.database_path)
+    # current_phase は SQLite 上で INTEGER として保存される（1..10）
+    # ことに合わせて int で seed する。prime CLI 側で `phase{n}` に
+    # 正規化されることをテストで検証する。
     state = {
         "workflow_id": overrides.get("workflow_id", "wf-1"),
         "profile_name": overrides.get("profile_name", "acme"),
-        "current_phase": overrides.get("current_phase", "phase5"),
+        "current_phase": overrides.get("current_phase", 5),
     }
     store.save_workflow(state["workflow_id"], state)
 
@@ -106,7 +109,8 @@ def test_prime_resolves_profile_and_phase_from_state(
     """--profile / --phase 未指定なら workflow state を解決源にする"""
     out, err = captured
     cfg = _make_config(tmp_path)
-    _seed_workflow(cfg, profile_name="acme", current_phase="phase4")
+    # int で seed → 実装側で `phase4` 文字列に正規化される（Copilot 指摘）
+    _seed_workflow(cfg, profile_name="acme", current_phase=4)
     monkeypatch.setenv("TEST_API_TOKEN", "t")
     monkeypatch.setenv("TEST_MEMORY_DB", "memdb")
 
@@ -134,11 +138,54 @@ def test_prime_resolves_profile_and_phase_from_state(
     assert payload["current_phase"] == "phase4"
 
 
+def test_prime_normalizes_int_current_phase_to_phase_string(
+    tmp_path, monkeypatch, captured
+):
+    """state.current_phase の int を `phase{n}` に正規化して出力する（Copilot 指摘）"""
+    out, err = captured
+    cfg = _make_config(tmp_path)
+    _seed_workflow(cfg, current_phase=7)
+    monkeypatch.setenv("TEST_API_TOKEN", "t")
+    monkeypatch.setenv("TEST_MEMORY_DB", "memdb")
+
+    captured_phase: list = []
+
+    class _FakeClient:
+        def __init__(self, *, api, database_id):
+            pass
+
+        def list_active_memories(self, *, profile, phase, types, **kwargs):
+            captured_phase.append(phase)
+            return []
+
+    class _FakeAPI:
+        def __init__(self, *a, **kw):
+            pass
+
+    monkeypatch.setattr(
+        "hokusai.integrations.notion_dashboard.client.NotionAPIClient", _FakeAPI
+    )
+    monkeypatch.setattr(
+        "hokusai.integrations.notion_dashboard.project_memory_db.ProjectMemoryDBClient",
+        _FakeClient,
+    )
+
+    args = _Args(workflow_id="wf-1", phase=None, memory_types=None, output="json")
+    with redirect_stdout(out), redirect_stderr(err):
+        rc = _handle_prime(args, cfg)
+    assert rc == 0
+    # client には phase7 で渡る
+    assert captured_phase == ["phase7"]
+    # 出力にも phase7 が乗る
+    payload = json.loads(out.getvalue())
+    assert payload["current_phase"] == "phase7"
+
+
 def test_prime_cli_phase_overrides_state(tmp_path, monkeypatch, captured):
     """--phase が指定されたら state の current_phase より優先される"""
     out, err = captured
     cfg = _make_config(tmp_path)
-    _seed_workflow(cfg, current_phase="phase4")
+    _seed_workflow(cfg, current_phase=4)
     monkeypatch.setenv("TEST_API_TOKEN", "t")
     monkeypatch.setenv("TEST_MEMORY_DB", "memdb")
 
