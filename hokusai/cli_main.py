@@ -1079,16 +1079,20 @@ def _handle_prime(args, config) -> int:
             # 既に文字列で渡ってきた場合はそのまま採用
             resolved_phase = raw_phase
 
-    # `--profile` 未指定で workflow state の profile_name が現 config の
-    # profile と異なる場合、state 側 profile の config に切り替える。
-    # 同じ env 名で別 profile の memory を引かないため（Copilot 指摘）。
-    # 再ロード失敗時は warning で既存 config のまま続行。
+    # `--profile` も `--config` も指定されていない場合に限り、workflow
+    # state の profile_name に基づいて config を再ロードする。
+    # - `--config` 明示時はそちらを尊重して再ロードしない（明示 > state）
+    # - `--profile` 明示時は既に正しい profile が解決済みなので再ロード不要
+    # - 上記いずれも未指定で state.profile_name があるときのみ、別 profile
+    #   の env を引かないよう state 側 profile の config に切り替える
+    # （WorkflowConfig 自体は profile_name 属性を持たないため、CLI 引数の
+    # 有無で分岐する：Copilot 指摘）。再ロード失敗時は warning + 既存 config 続行。
+    config_arg = getattr(args, "config", None)
     state_profile = state.get("profile_name")
-    current_config_profile = getattr(config, "profile_name", None)
     if (
         profile_arg is None
+        and not config_arg
         and state_profile
-        and state_profile != current_config_profile
     ):
         try:
             from .config import create_config_from_env_and_file

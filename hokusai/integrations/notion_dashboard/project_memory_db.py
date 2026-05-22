@@ -287,14 +287,16 @@ class ProjectMemoryDBClient:
                 ALL_MEMORY_TYPES に含まれない値は黙って除外する。
             max_pages: ページネーション安全上限。各 100 件 × 10 ページで
                 通常案件はカバーできる想定（大量 active memory が想定外で
-                溜まった場合の暴走防止）。
+                溜まった場合の暴走防止）。上限到達時は warning ログを出して
+                truncation を明示する（silent truncation 防止）。
 
         Returns:
             Notion page dict のリスト（`id` / `properties` を含む）。
             空ならゼロ件。途中ページで API 失敗した場合は **その時点までに
             取得済みの結果を返す**（部分結果保持: 後段の Agent prompt 注入
             が memory 全消失するより部分的にでも渡せた方が有用なため）。
-            warning は debug log のみで、呼び出し側に例外は伝播しない。
+            API 失敗 / max_pages 上限到達はいずれも warning / debug log で
+            通知し、呼び出し側に例外は伝播しない。
         """
         valid_types = None
         if types is not None:
@@ -305,7 +307,8 @@ class ProjectMemoryDBClient:
 
         results: list[dict] = []
         start_cursor: str | None = None
-        for _ in range(max_pages):
+        truncated = False
+        for page_idx in range(max_pages):
             try:
                 response = self._api.query_database(
                     self._database_id,
@@ -331,6 +334,20 @@ class ProjectMemoryDBClient:
             start_cursor = response.get("next_cursor")
             if not start_cursor:
                 break
+            # 次 page を取りに行く直前で安全上限に達するかチェック
+            if page_idx + 1 >= max_pages:
+                truncated = True
+                break
+
+        if truncated:
+            # max_pages 上限で打ち切ったことを明示（silent truncation 防止：
+            # Copilot 指摘）。呼び出し側が部分結果と認識して上限調整 / DB
+            # 整理（古い active を deprecated 化等）の判断材料にできる。
+            logger.warning(
+                "Project Memory DB list が max_pages=%d で打ち切られました "
+                "（has_more=True のまま）。取得済み %d 件で返却します。",
+                max_pages, len(results),
+            )
         return results
 
     def find_by_dedupe_key(self, dedupe_key: str) -> str | None:

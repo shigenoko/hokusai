@@ -638,15 +638,49 @@ def test_list_active_memories_paginates_until_has_more_false():
     assert api.query_calls[2]["start_cursor"] == "cursor-2"
 
 
-def test_list_active_memories_respects_max_pages_safety_limit():
+def test_list_active_memories_respects_max_pages_safety_limit(caplog):
     pages = [
         [_make_memory_page(page_id=f"m{i}", name=f"M{i}")] for i in range(5)
     ]
     api = _PaginatedFakeAPI(pages)
     client = ProjectMemoryDBClient(api=api, database_id="pm-db")
-    result = client.list_active_memories(max_pages=2)
+    with caplog.at_level("WARNING"):
+        result = client.list_active_memories(max_pages=2)
     assert [m["id"] for m in result] == ["m0", "m1"]
     assert len(api.query_calls) == 2
+    # truncation を warning ログで明示する（silent truncation 防止: Copilot 指摘）
+    assert any(
+        "max_pages=2" in rec.message and "打ち切" in rec.message
+        for rec in caplog.records
+    )
+
+
+def test_list_active_memories_no_truncation_warning_when_naturally_done():
+    """has_more=False で自然完走したら truncation warning は出さない"""
+    pages = [
+        [_make_memory_page(page_id="m1", name="A")],
+        [_make_memory_page(page_id="m2", name="B")],
+    ]
+    api = _PaginatedFakeAPI(pages)
+    client = ProjectMemoryDBClient(api=api, database_id="pm-db")
+    import logging
+    handler_records: list[logging.LogRecord] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record):
+            if record.levelno >= logging.WARNING:
+                handler_records.append(record)
+
+    logger_obj = logging.getLogger(
+        "integrations.notion_dashboard.project_memory_db"
+    )
+    h = _Capture()
+    logger_obj.addHandler(h)
+    try:
+        client.list_active_memories(max_pages=10)
+    finally:
+        logger_obj.removeHandler(h)
+    assert handler_records == []
 
 
 def test_list_active_memories_filters_profile_with_multi_element_rich_text():
