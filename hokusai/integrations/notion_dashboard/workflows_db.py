@@ -174,8 +174,16 @@ class WorkflowsDBClient:
         / Issue #50 / 要件 §9.3.3）。
 
         新 workflow（wf-B）から旧 workflow（wf-A）への引き継ぎリレーション。
-        property_not_found（migrate 未実施環境）には `_submit_with_property_pruning`
-        経由で耐性を持たせる。`single_property` 採用のため backref は表示されない。
+        `single_property` 採用のため Notion 側 `Superseded By` の synced
+        backref は表示されない。
+
+        本メソッドは単一プロパティ（`Supersedes` のみ）を書き込むため、Notion
+        側に `Supersedes` が未追加（migrate 未実施環境）だと `_submit_with_property_pruning`
+        が該当プロパティを除外した結果 payload が空になり `NotionAPIError`
+        を raise する。呼び出し側は「`hokusai notion-migrate-schema` 実施
+        必要」のシグナルとして扱う想定（silent no-op で同期破壊が見えなく
+        なるのを避ける）。複数プロパティ書き込みの apply_event 経路とは
+        挙動が異なる点に注意。
         """
         if not page_id:
             raise ValueError("page_id は必須です")
@@ -212,7 +220,12 @@ class WorkflowsDBClient:
         Status=Canceled 時の理由。引き継ぎ運用（要件 §9.3.2）では推奨。
         引数 `page_id` / `reason` が空 / None なら `ValueError` を raise する
         （silent no-op は呼び出し側のバグを隠すため、明示的に拒否する方針）。
-        property_not_found には `_submit_with_property_pruning` で耐性。
+
+        単一プロパティ書き込みのため、Notion 側に `Cancel Reason` が未追加
+        （migrate 未実施環境）だと `_submit_with_property_pruning` が pruning
+        した結果 payload が空になり `NotionAPIError` を raise する。呼び出し
+        側は「`hokusai notion-migrate-schema` 実施必要」のシグナルとして扱う
+        想定（`set_supersedes` と同じ方針）。
         """
         if not page_id:
             raise ValueError("page_id は必須です")
