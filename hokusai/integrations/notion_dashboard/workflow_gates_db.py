@@ -230,78 +230,43 @@ class WorkflowGatesDBClient:
 
         サーバ側 filter: AND(Status in {pending, blocked, open}, Workflow contains
         workflow_page_id)。「次に必要な人間判断」と「blocking 状態」を統合した
-        ビューを prime 出力に提供する用途。
-
-        API 失敗時は部分結果を保持して返す（`find_handover_notes_for_workflow`
-        と同じ graceful degrade パターン）。
+        ビューを prime 出力に提供する用途。ページネーション / 部分結果保持 /
+        truncation warning は共通 `_pagination.paginate_query` に集約。
         """
         if not workflow_page_id:
             return []
-
-        results: list[dict] = []
-        start_cursor: str | None = None
-        truncated = False
-        for page_idx in range(max_pages):
-            try:
-                response = self._api.query_database(
-                    self._database_id,
-                    filter_={
-                        "and": [
+        from ._pagination import paginate_query
+        return paginate_query(
+            api=self._api,
+            database_id=self._database_id,
+            filter_={
+                "and": [
+                    {
+                        "or": [
                             {
-                                "or": [
-                                    {
-                                        "property": "Status",
-                                        "select": {
-                                            "equals": GATE_STATUS_PENDING
-                                        },
-                                    },
-                                    {
-                                        "property": "Status",
-                                        "select": {
-                                            "equals": GATE_STATUS_BLOCKED
-                                        },
-                                    },
-                                    {
-                                        "property": "Status",
-                                        "select": {
-                                            "equals": GATE_STATUS_OPEN
-                                        },
-                                    },
-                                ]
+                                "property": "Status",
+                                "select": {"equals": GATE_STATUS_PENDING},
                             },
                             {
-                                "property": "Workflow",
-                                "relation": {"contains": workflow_page_id},
+                                "property": "Status",
+                                "select": {"equals": GATE_STATUS_BLOCKED},
+                            },
+                            {
+                                "property": "Status",
+                                "select": {"equals": GATE_STATUS_OPEN},
                             },
                         ]
                     },
-                    start_cursor=start_cursor,
-                    page_size=100,
-                )
-            except Exception as e:
-                logger.warning(
-                    "Workflow Gates DB list_pending_gates_for_workflow 失敗 "
-                    "(部分結果 %d 件で続行): %s",
-                    len(results), e,
-                )
-                return results
-            results.extend(response.get("results") or [])
-            if not response.get("has_more"):
-                break
-            start_cursor = response.get("next_cursor")
-            if not start_cursor:
-                break
-            if page_idx + 1 >= max_pages:
-                truncated = True
-                break
-
-        if truncated:
-            logger.warning(
-                "list_pending_gates_for_workflow が max_pages=%d で打ち切られました "
-                "(取得済み %d 件で返却)",
-                max_pages, len(results),
-            )
-        return results
+                    {
+                        "property": "Workflow",
+                        "relation": {"contains": workflow_page_id},
+                    },
+                ]
+            },
+            label="list_pending_gates_for_workflow",
+            max_pages=max_pages,
+            logger=logger,
+        )
 
     def find_by_dedupe_key(self, dedupe_key: str) -> str | None:
         """dedupe_key で既存レコードを検索する。"""

@@ -1137,9 +1137,13 @@ def _handle_prime(args, config) -> int:
         ).strip()
 
     memories: list[dict] = []
-    # workgraph context 3 カテゴリは「未取得（DB ID 未設定 / fetch skip）」と
-    # 「取得済み 0 件」を JSON 出力で区別するため None で初期化（Copilot 指摘）。
-    # 各 DB ID が設定されて実際に fetch を試みた場合のみ list に切り替える。
+    # workgraph context 3 カテゴリは「未取得」と「取得済み 0 件」を JSON 出力
+    # で区別するため None で初期化（Copilot 指摘）。`None` のままになる条件:
+    #   1. 該当 DB ID が未設定（環境変数未設定 / profile config 未対応）
+    #   2. workflows_db_id があっても `find_workflow_page_id` が None を返した
+    #      （workflow が Notion 側に未同期 / Workflows DB に存在しない）
+    # 各 DB ID + workflow_page_id が揃って fetch を実際に試みた場合のみ list
+    # に切り替え、API 障害時も list（部分結果保持）として返る。
     work_items: list[dict] | None = None
     review_issues: list[dict] | None = None
     gates: list[dict] | None = None

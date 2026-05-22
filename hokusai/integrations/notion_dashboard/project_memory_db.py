@@ -383,65 +383,43 @@ class ProjectMemoryDBClient:
         if not workflow_page_id:
             return []
 
-        results: list[dict] = []
-        start_cursor: str | None = None
-        truncated = False
-        for page_idx in range(max_pages):
-            try:
-                response = self._api.query_database(
-                    self._database_id,
-                    filter_={
-                        "and": [
-                            {
-                                "property": "Status",
-                                "select": {"equals": MEMORY_STATUS_ACTIVE},
-                            },
-                            {
-                                "property": "Type",
-                                "select": {
-                                    "equals": MEMORY_TYPE_HANDOVER_NOTE
-                                },
-                            },
-                            {
-                                "property": "Workflow",
-                                "relation": {"contains": workflow_page_id},
-                            },
-                        ]
-                    },
-                    start_cursor=start_cursor,
-                    page_size=100,
-                )
-            except Exception as e:
-                logger.warning(
-                    "Project Memory DB handover_note list 失敗 "
-                    "(部分結果 %d 件で続行): %s",
-                    len(results), e,
-                )
-                return results
-            for page in response.get("results") or []:
+        from ._pagination import paginate_query
+
+        def _profile_filter(page_results: list[dict]) -> list[dict]:
+            return [
+                p for p in page_results
                 if _matches_memory_filters(
-                    page,
+                    p,
                     profile=profile,
                     phase=None,
                     types={MEMORY_TYPE_HANDOVER_NOTE},
-                ):
-                    results.append(page)
-            if not response.get("has_more"):
-                break
-            start_cursor = response.get("next_cursor")
-            if not start_cursor:
-                break
-            if page_idx + 1 >= max_pages:
-                truncated = True
-                break
+                )
+            ]
 
-        if truncated:
-            logger.warning(
-                "find_handover_notes_for_workflow が max_pages=%d で打ち切られました "
-                "（取得済み %d 件で返却）",
-                max_pages, len(results),
-            )
-        return results
+        return paginate_query(
+            api=self._api,
+            database_id=self._database_id,
+            filter_={
+                "and": [
+                    {
+                        "property": "Status",
+                        "select": {"equals": MEMORY_STATUS_ACTIVE},
+                    },
+                    {
+                        "property": "Type",
+                        "select": {"equals": MEMORY_TYPE_HANDOVER_NOTE},
+                    },
+                    {
+                        "property": "Workflow",
+                        "relation": {"contains": workflow_page_id},
+                    },
+                ]
+            },
+            label="find_handover_notes_for_workflow",
+            max_pages=max_pages,
+            logger=logger,
+            page_filter=_profile_filter,
+        )
 
     def find_by_dedupe_key(self, dedupe_key: str) -> str | None:
         """dedupe_key で既存レコードを検索する。"""
