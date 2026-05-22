@@ -2959,3 +2959,132 @@ def test_drain_pending_project_memories_swallows_exceptions():
         },
         {"thread": "x"},
     )
+
+
+# ---------------------------------------------------------------------------
+# WorkflowsDBClient.set_supersedes / get_supersedes / set_cancel_reason
+# （Workgraph Phase 7 / Issue #50 / 要件 §9.3.3）
+# ---------------------------------------------------------------------------
+
+
+class _SupersedesFakeAPI:
+    """set / get_supersedes / set_cancel_reason 検証用 fake API。"""
+
+    def __init__(self, *, supersedes_relation: list[dict] | None = None):
+        self.calls: list[tuple[str, dict]] = []
+        self._supersedes_relation = supersedes_relation or []
+
+    def update_page(self, page_id: str, payload: dict) -> dict:
+        self.calls.append(("update", {"page_id": page_id, **payload}))
+        return {"id": page_id}
+
+    def retrieve_page(self, page_id: str) -> dict:
+        self.calls.append(("retrieve", {"page_id": page_id}))
+        return {
+            "id": page_id,
+            "properties": {
+                "Supersedes": {"relation": self._supersedes_relation}
+            },
+        }
+
+
+def test_set_supersedes_writes_relation():
+    api = _SupersedesFakeAPI()
+    client = WorkflowsDBClient(api=api, database_id="wf-db")
+    client.set_supersedes("page-new", "page-prior")
+    update_calls = [c for c in api.calls if c[0] == "update"]
+    assert len(update_calls) == 1
+    props = update_calls[0][1]["properties"]
+    assert props["Supersedes"]["relation"] == [{"id": "page-prior"}]
+
+
+def test_set_supersedes_rejects_empty_args():
+    client = WorkflowsDBClient(api=_SupersedesFakeAPI(), database_id="wf-db")
+    with pytest.raises(ValueError, match="page_id"):
+        client.set_supersedes("", "prior")
+    with pytest.raises(ValueError, match="prior_workflow_page_id"):
+        client.set_supersedes("page", "")
+
+
+def test_get_supersedes_returns_page_id_list():
+    api = _SupersedesFakeAPI(
+        supersedes_relation=[{"id": "wf-prior-1"}, {"id": "wf-prior-2"}]
+    )
+    client = WorkflowsDBClient(api=api, database_id="wf-db")
+    result = client.get_supersedes("page-new")
+    assert result == ["wf-prior-1", "wf-prior-2"]
+
+
+def test_get_supersedes_returns_empty_when_no_relation():
+    api = _SupersedesFakeAPI(supersedes_relation=[])
+    client = WorkflowsDBClient(api=api, database_id="wf-db")
+    assert client.get_supersedes("page-new") == []
+
+
+def test_get_supersedes_returns_empty_when_page_id_blank():
+    api = _SupersedesFakeAPI()
+    client = WorkflowsDBClient(api=api, database_id="wf-db")
+    # 空 page_id では retrieve_page を呼ばずに早期 return
+    assert client.get_supersedes("") == []
+    assert api.calls == []
+
+
+def test_get_supersedes_returns_empty_on_api_failure():
+    class _RaisingAPI:
+        def retrieve_page(self, page_id: str) -> dict:
+            from hokusai.integrations.notion_dashboard.client import NotionAPIError
+            raise NotionAPIError(503, "service unavailable")
+
+    client = WorkflowsDBClient(api=_RaisingAPI(), database_id="wf-db")
+    assert client.get_supersedes("page-new") == []
+
+
+def test_set_cancel_reason_writes_rich_text():
+    api = _SupersedesFakeAPI()
+    client = WorkflowsDBClient(api=api, database_id="wf-db")
+    client.set_cancel_reason(
+        "page-x", "ブロッカー検出のため引き継ぎ"
+    )
+    update_calls = [c for c in api.calls if c[0] == "update"]
+    assert len(update_calls) == 1
+    props = update_calls[0][1]["properties"]
+    rt = props["Cancel Reason"]["rich_text"][0]["text"]["content"]
+    assert rt == "ブロッカー検出のため引き継ぎ"
+
+
+def test_set_cancel_reason_rejects_empty_args():
+    client = WorkflowsDBClient(api=_SupersedesFakeAPI(), database_id="wf-db")
+    with pytest.raises(ValueError, match="page_id"):
+        client.set_cancel_reason("", "reason")
+    with pytest.raises(ValueError, match="reason"):
+        client.set_cancel_reason("page", "")
+
+
+def test_set_supersedes_retries_when_property_not_found():
+    """Supersedes プロパティが Notion 側に未追加（古い DB）でも property_not_found
+    リトライで pruning して同期破壊しない（migrate 未実施環境での後方互換）"""
+    from hokusai.integrations.notion_dashboard.client import NotionAPIError
+
+    class _MissingPropAPI:
+        def __init__(self):
+            self.calls: list[dict] = []
+            self._first = True
+
+        def update_page(self, page_id: str, payload: dict) -> dict:
+            self.calls.append({"page_id": page_id, "payload": payload})
+            if self._first and "Supersedes" in payload["properties"]:
+                self._first = False
+                raise NotionAPIError(
+                    400,
+                    '"Supersedes" is not a property that exists.',
+                    code="validation_error",
+                )
+            return {"id": page_id}
+
+    api = _MissingPropAPI()
+    client = WorkflowsDBClient(api=api, database_id="wf-db")
+    # 結果プロパティが空になると _submit_with_property_pruning は raise する。
+    # set_supersedes は単一プロパティを書き込むので、pruning すると空になり
+    # NotionAPIError が外に伝播する（呼び出し側は障害として認識できる）。
+    with pytest.raises(NotionAPIError):
+        client.set_supersedes("page-x", "page-prior")

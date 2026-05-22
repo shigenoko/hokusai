@@ -167,6 +167,59 @@ class WorkflowsDBClient:
             return None
         return results[0].get("url")
 
+    def set_supersedes(
+        self, page_id: str, prior_workflow_page_id: str
+    ) -> dict:
+        """`Supersedes`（self-link relation）を設定する（Workgraph Phase 7
+        / Issue #50 / 要件 §9.3.3）。
+
+        新 workflow（wf-B）から旧 workflow（wf-A）への引き継ぎリレーション。
+        property_not_found（migrate 未実施環境）には `_submit_with_property_pruning`
+        経由で耐性を持たせる。`single_property` 採用のため backref は表示されない。
+        """
+        if not page_id:
+            raise ValueError("page_id は必須です")
+        if not prior_workflow_page_id:
+            raise ValueError("prior_workflow_page_id は必須です")
+        properties = {
+            "Supersedes": {"relation": [{"id": prior_workflow_page_id}]}
+        }
+        return self._submit_with_property_pruning(page_id, properties)
+
+    def get_supersedes(self, page_id: str) -> list[str]:
+        """`Supersedes` リレーション値（旧 workflow の page_id リスト）を取得する。
+
+        次 PR（handover_note 世代遡及）で使用予定。Notion から返る
+        `relation` プロパティを抜き出して `[{"id": "..."}]` の id を平坦化する。
+        プロパティが存在しない / 失敗時は空リストを返す（部分結果保持の方針）。
+        """
+        if not page_id:
+            return []
+        try:
+            page = self._api.retrieve_page(page_id)
+        except Exception as e:
+            logger.debug(
+                f"Workflows DB retrieve_page 失敗: page_id={page_id[:8]}..., error={e}"
+            )
+            return []
+        prop = (page.get("properties") or {}).get("Supersedes") or {}
+        relations = prop.get("relation") or []
+        return [r.get("id") for r in relations if r.get("id")]
+
+    def set_cancel_reason(self, page_id: str, reason: str) -> dict:
+        """`Cancel Reason`（rich_text）を設定する（Workgraph Phase 7 / Issue #50）。
+
+        Status=Canceled 時の理由。引き継ぎ運用（要件 §9.3.2）では推奨。
+        空文字 / None は no-op で page を返さず例外（呼び出し側で空を渡さない）。
+        property_not_found には `_submit_with_property_pruning` で耐性。
+        """
+        if not page_id:
+            raise ValueError("page_id は必須です")
+        if not reason:
+            raise ValueError("reason は必須です")
+        properties = {"Cancel Reason": _rich_text(str(reason))}
+        return self._submit_with_property_pruning(page_id, properties)
+
     def _find_page_id(self, workflow_id: str) -> str | None:
         """Workflow ID プロパティで Notion DB を検索し、page_id を返す。"""
         try:

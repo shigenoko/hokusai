@@ -115,23 +115,26 @@ def test_setup_rejects_empty_parent_page_id():
 
 def test_setup_creates_six_resources_in_order():
     """Workflows → Pull Requests → Review Issues → Work Items → Workflow Gates
-    → Project Memory の順で作成し、Work Items 作成直後の Dependencies
-    （self-relation）追加で update_database を 1 回呼ぶ（Issue #38 / #44 / #46）。"""
+    → Project Memory の順で作成。Workflows 作成直後に Supersedes（self-link
+    relation）追加で update_database が 1 回、Work Items 作成直後に Dependencies
+    （self-relation）追加で update_database がもう 1 回呼ばれる
+    （Issue #38 / #44 / #46 / #50）。"""
     client = _RecordingClient()
     result = setup_notion_workspace(
         "token", "parent-page-id", api_client=client
     )
 
     actions = [c[0] for c in client.calls]
-    # create_database x 6 + update_database x 1
+    # create_database x 6 + update_database x 2
     assert actions == [
-        "create_database",
-        "create_database",
-        "create_database",
-        "create_database",
+        "create_database",  # Workflows DB
+        "update_database",  # Workflows Supersedes self-relation
+        "create_database",  # Pull Requests DB
+        "create_database",  # Review Issues DB
+        "create_database",  # Work Items DB
         "update_database",  # Work Items Dependencies self-relation
-        "create_database",  # Workflow Gates DB（Dependencies update の後）
-        "create_database",  # Project Memory DB（最後）
+        "create_database",  # Workflow Gates DB
+        "create_database",  # Project Memory DB
     ]
     assert result["workflows_db_id"] == "wf-db-id"
     assert result["pull_requests_db_id"] == "pr-db-id"
@@ -158,7 +161,8 @@ def test_setup_pr_db_payload_includes_description_warning():
     client = _RecordingClient()
     setup_notion_workspace("token", "parent", api_client=client)
 
-    pr_payload = client.calls[1][1]
+    create_calls = [c for c in client.calls if c[0] == "create_database"]
+    pr_payload = create_calls[1][1]
     assert "description" in pr_payload
     text = pr_payload["description"][0]["text"]["content"]
     assert "HOKUSAI が自動管理する DB" in text
@@ -229,12 +233,38 @@ def test_setup_workflows_waiting_reason_select_has_eight_options():
     assert len(names) == 8
 
 
+def test_setup_workflows_db_payload_includes_cancel_reason():
+    """Workflows DB に Cancel Reason プロパティが含まれる（Issue #50 / §9.3.3）"""
+    client = _RecordingClient()
+    setup_notion_workspace("token", "parent", api_client=client)
+
+    wf_payload = client.calls[0][1]
+    assert "Cancel Reason" in wf_payload["properties"]
+    assert wf_payload["properties"]["Cancel Reason"] == {"rich_text": {}}
+
+
+def test_setup_workflows_supersedes_self_relation_added_after_create():
+    """Workflows DB 作成直後に Supersedes（self-link relation）が
+    update_database で追加される（Issue #50 / §9.3.3）"""
+    client = _RecordingClient()
+    setup_notion_workspace("token", "parent", api_client=client)
+
+    update_calls = [c for c in client.calls if c[0] == "update_database"]
+    # 1 番目（Workflows Supersedes）を確認
+    action, args = update_calls[0]
+    assert action == "update_database"
+    assert args["database_id"] == "wf-db-id"
+    sup = args["payload"]["properties"]["Supersedes"]
+    assert sup["relation"]["database_id"] == "wf-db-id"
+    assert "single_property" in sup["relation"]
+
+
 def test_setup_pr_db_payload_includes_workflow_relation():
     """PR DB の Workflow プロパティに Workflows DB の relation が含まれる"""
     client = _RecordingClient()
     setup_notion_workspace("token", "parent", api_client=client)
 
-    pr_payload = client.calls[1][1]
+    pr_payload = [c for c in client.calls if c[0] == "create_database"][1][1]
     title = pr_payload["title"][0]["text"]["content"]
     assert title == PULL_REQUESTS_DB_TITLE
     relation = pr_payload["properties"]["Workflow"]["relation"]
@@ -247,7 +277,7 @@ def test_setup_pr_db_has_required_properties():
     client = _RecordingClient()
     setup_notion_workspace("token", "parent", api_client=client)
 
-    pr_payload = client.calls[1][1]
+    pr_payload = [c for c in client.calls if c[0] == "create_database"][1][1]
     props = pr_payload["properties"]
     for required in [
         "PR Number",
@@ -265,7 +295,7 @@ def test_setup_pr_db_has_required_properties():
 def test_setup_pr_db_status_select_has_five_options():
     client = _RecordingClient()
     setup_notion_workspace("token", "parent", api_client=client)
-    pr_payload = client.calls[1][1]
+    pr_payload = [c for c in client.calls if c[0] == "create_database"][1][1]
     names = [
         o["name"]
         for o in pr_payload["properties"]["Status"]["select"]["options"]
@@ -282,7 +312,7 @@ def test_setup_review_issues_db_payload_includes_description_warning():
     client = _RecordingClient()
     setup_notion_workspace("token", "parent", api_client=client)
 
-    ri_payload = client.calls[2][1]
+    ri_payload = [c for c in client.calls if c[0] == "create_database"][2][1]
     title = ri_payload["title"][0]["text"]["content"]
     assert title == REVIEW_ISSUES_DB_TITLE
     text = ri_payload["description"][0]["text"]["content"]
@@ -294,7 +324,7 @@ def test_setup_review_issues_db_has_required_properties():
     client = _RecordingClient()
     setup_notion_workspace("token", "parent", api_client=client)
 
-    ri_payload = client.calls[2][1]
+    ri_payload = [c for c in client.calls if c[0] == "create_database"][2][1]
     props = ri_payload["properties"]
     for required in [
         "Title",
@@ -319,7 +349,7 @@ def test_setup_review_issues_source_select_includes_future_slots():
     client = _RecordingClient()
     setup_notion_workspace("token", "parent", api_client=client)
 
-    ri_payload = client.calls[2][1]
+    ri_payload = [c for c in client.calls if c[0] == "create_database"][2][1]
     names = [
         o["name"]
         for o in ri_payload["properties"]["Source"]["select"]["options"]
@@ -341,7 +371,7 @@ def test_setup_review_issues_workflow_relation_points_to_workflows_db():
     client = _RecordingClient()
     setup_notion_workspace("token", "parent", api_client=client)
 
-    ri_payload = client.calls[2][1]
+    ri_payload = [c for c in client.calls if c[0] == "create_database"][2][1]
     relation = ri_payload["properties"]["Workflow"]["relation"]
     assert relation["database_id"] == "wf-db-id"
 
@@ -377,9 +407,15 @@ def test_setup_raises_when_review_issues_db_fails():
     client = _RecordingClient(fail_on="review_issues")
     with pytest.raises(NotionSetupError, match="Review Issues DB"):
         setup_notion_workspace("token", "parent", api_client=client)
-    # Workflows / PR は作成済み、Review Issues で失敗するので 3 回の create_database
+    # Workflows create → Workflows Supersedes update → PR create → Review Issues
+    # で失敗（Issue #50 で Workflows Supersedes の update_database が増えた）
     actions = [c[0] for c in client.calls]
-    assert actions == ["create_database", "create_database", "create_database"]
+    assert actions == [
+        "create_database",  # Workflows
+        "update_database",  # Workflows Supersedes
+        "create_database",  # PR
+        "create_database",  # Review Issues（失敗）
+    ]
 
 
 def test_setup_raises_when_work_items_db_fails():
@@ -387,14 +423,15 @@ def test_setup_raises_when_work_items_db_fails():
     client = _RecordingClient(fail_on="work_items")
     with pytest.raises(NotionSetupError, match="Work Items DB"):
         setup_notion_workspace("token", "parent", api_client=client)
-    # Workflows / PR / Review Issues は作成済み、Work Items で失敗するので
-    # 4 回の create_database。update_database は到達しない。
+    # Workflows create → Supersedes update → PR / Review Issues / Work Items
+    # create で失敗。Work Items Dependencies update には到達しない。
     actions = [c[0] for c in client.calls]
     assert actions == [
-        "create_database",
-        "create_database",
-        "create_database",
-        "create_database",
+        "create_database",  # Workflows
+        "update_database",  # Workflows Supersedes
+        "create_database",  # PR
+        "create_database",  # Review Issues
+        "create_database",  # Work Items（失敗）
     ]
 
 
@@ -405,7 +442,7 @@ def test_setup_work_items_db_payload_includes_relations():
     client = _RecordingClient()
     setup_notion_workspace("token", "parent", api_client=client)
 
-    wi_payload = client.calls[3][1]
+    wi_payload = [c for c in client.calls if c[0] == "create_database"][3][1]
     title_text = wi_payload["title"][0]["text"]["content"]
     assert title_text == WORK_ITEMS_DB_TITLE
     props = wi_payload["properties"]
@@ -436,8 +473,12 @@ def test_setup_work_items_dependencies_self_relation_added_after_create():
     client = _RecordingClient()
     setup_notion_workspace("token", "parent", api_client=client)
 
-    # 5 回目（index 4）の呼び出しが Dependencies update であることを確認
-    action, args = client.calls[4]
+    # update_database 呼び出しは 2 回（Workflows Supersedes + Work Items Dependencies）。
+    # 2 番目（Work Items Dependencies）を確認する（Issue #50 / Workgraph Phase 7
+    # で 1 番目に Workflows Supersedes が追加された）。
+    update_calls = [c for c in client.calls if c[0] == "update_database"]
+    assert len(update_calls) == 2
+    action, args = update_calls[1]
     assert action == "update_database"
     assert args["database_id"] == "wi-db-id"
     deps = args["payload"]["properties"]["Dependencies"]
@@ -551,14 +592,19 @@ def test_setup_does_not_manually_add_blocking_work_items_reverse_relation():
     client = _RecordingClient()
     setup_notion_workspace("token", "parent", api_client=client)
 
-    # update_database 呼び出しは Dependencies の 1 回のみ
+    # update_database 呼び出しは Workflows Supersedes + Work Items Dependencies の 2 回
+    # （Issue #50 で Workflows Supersedes が増えた。Blocking Work Items の手動
+    # update は行わない方針は変わらず）
     update_calls = [
         args for action, args in client.calls if action == "update_database"
     ]
-    assert len(update_calls) == 1
-    # Dependencies update のみで Blocking Work Items の手動 update は無い
-    assert "Dependencies" in update_calls[0]["payload"]["properties"]
-    assert "Blocking Work Items" not in update_calls[0]["payload"]["properties"]
+    assert len(update_calls) == 2
+    # 1 番目は Workflows Supersedes、2 番目は Work Items Dependencies
+    assert "Supersedes" in update_calls[0]["payload"]["properties"]
+    assert "Dependencies" in update_calls[1]["payload"]["properties"]
+    # いずれのリクエストにも Blocking Work Items の手動 update は無い
+    for upd in update_calls:
+        assert "Blocking Work Items" not in upd["payload"]["properties"]
 
 
 def test_setup_raises_when_response_missing_id(monkeypatch):
@@ -701,6 +747,11 @@ def test_migrate_handler_calls_update_database_on_success(capsys, monkeypatch):
     assert "更新しました" in out
     assert captured["database_id"] == "wf-db-target"
     assert "Operator" in captured["payload"]["properties"]
+    # Issue #50 / Workgraph Phase 7: Cancel Reason + Supersedes（self-link）も追加対象
+    assert "Cancel Reason" in captured["payload"]["properties"]
+    sup = captured["payload"]["properties"]["Supersedes"]
+    assert sup["relation"]["database_id"] == "wf-db-target"
+    assert "single_property" in sup["relation"]
 
 
 def test_migrate_handler_fails_when_token_missing_non_dry_run(capsys, monkeypatch):
@@ -2256,8 +2307,9 @@ def test_setup_workspace_without_scaffold_does_not_create_pages():
     result = setup_notion_workspace("token", "parent", api_client=client)
     # Workflows + PR + Review Issues + Work Items + Workflow Gates + Project Memory = 6
     assert client.create_database_calls == 6
-    # Dependencies self-relation のみ = 1
-    assert client.update_database_calls == 1
+    # Workflows Supersedes + Work Items Dependencies の self-relation 2 回
+    # （Issue #50 / Workgraph Phase 7 で Workflows 側 1 回増えた）
+    assert client.update_database_calls == 2
     assert client.create_page_calls == []
     assert "scaffold" not in result
 
