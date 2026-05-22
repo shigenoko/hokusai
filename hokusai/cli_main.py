@@ -1068,6 +1068,29 @@ def _handle_prime(args, config) -> int:
     resolved_profile = profile_arg or state.get("profile_name")
     resolved_phase = cli_phase or state.get("current_phase")
 
+    # `--profile` 未指定で workflow state の profile_name が現 config の
+    # profile と異なる場合、state 側 profile の config に切り替える。
+    # 同じ env 名で別 profile の memory を引かないため（Copilot 指摘）。
+    # 再ロード失敗時は warning で既存 config のまま続行。
+    state_profile = state.get("profile_name")
+    current_config_profile = getattr(config, "profile_name", None)
+    if (
+        profile_arg is None
+        and state_profile
+        and state_profile != current_config_profile
+    ):
+        try:
+            from .config import create_config_from_env_and_file
+            config = create_config_from_env_and_file(
+                None, profile_name=state_profile
+            )
+        except Exception as e:
+            print(
+                f"⚠ state の profile '{state_profile}' に基づく config "
+                f"再ロード失敗（既存 config で続行）: {e}",
+                file=sys.stderr,
+            )
+
     # Project Memory DB が未設定なら memory 0 件の prime を返す（後方互換）
     notion_cfg = getattr(config, "notion_dashboard", None)
     api_token = ""
@@ -1082,7 +1105,7 @@ def _handle_prime(args, config) -> int:
     if api_token and db_id:
         try:
             api = NotionAPIClient(
-                token=api_token,
+                api_token=api_token,
                 requests_per_second=getattr(
                     notion_cfg.rate_limit, "requests_per_second", 3.0
                 ),

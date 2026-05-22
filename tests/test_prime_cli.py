@@ -186,6 +186,82 @@ def test_prime_swallows_notion_failure_and_returns_0(
     assert "# HOKUSAI Prime Context" in out.getvalue()
 
 
+def test_prime_reloads_config_when_state_profile_differs(
+    tmp_path, monkeypatch, captured
+):
+    """--profile 未指定で state.profile_name が config と異なれば
+    create_config_from_env_and_file が state 側の profile で再呼び出しされる
+    （Copilot 指摘: 別 profile の env を引かない）"""
+    out, err = captured
+    cfg = _make_config(tmp_path)
+    # config 側 profile はあえて None。state の profile_name と不一致状態
+    _seed_workflow(cfg, profile_name="acme")
+    monkeypatch.setenv("TEST_API_TOKEN", "t")
+    monkeypatch.setenv("TEST_MEMORY_DB", "memdb")
+
+    reload_calls: list[dict] = []
+
+    def _fake_create_config(config_path, *, profile_name=None):
+        reload_calls.append({"profile_name": profile_name})
+        # 再ロード後 config も同じ構成を返す（テスト目的: 呼ばれたことを検証）
+        return _make_config(tmp_path)
+
+    monkeypatch.setattr(
+        "hokusai.config.create_config_from_env_and_file", _fake_create_config
+    )
+
+    class _FakeAPI:
+        def __init__(self, *a, **kw):
+            pass
+
+        def query_database(self, *args, **kwargs):
+            return {"results": [], "has_more": False}
+
+    monkeypatch.setattr(
+        "hokusai.integrations.notion_dashboard.client.NotionAPIClient", _FakeAPI
+    )
+
+    args = _Args(workflow_id="wf-1", phase=None, memory_types=None, output="json")
+    with redirect_stdout(out), redirect_stderr(err):
+        rc = _handle_prime(args, cfg)
+    assert rc == 0
+    assert reload_calls == [{"profile_name": "acme"}]
+
+
+def test_prime_does_not_reload_config_when_profile_arg_present(
+    tmp_path, monkeypatch, captured
+):
+    """--profile 明示時は state.profile_name と無関係に config 再ロードしない"""
+    out, err = captured
+    cfg = _make_config(tmp_path)
+    _seed_workflow(cfg, profile_name="acme")
+    monkeypatch.setenv("TEST_API_TOKEN", "t")
+    monkeypatch.setenv("TEST_MEMORY_DB", "memdb")
+
+    def _fake_create_config(*args, **kwargs):
+        raise AssertionError("create_config_from_env_and_file should not be called")
+
+    monkeypatch.setattr(
+        "hokusai.config.create_config_from_env_and_file", _fake_create_config
+    )
+
+    class _FakeAPI:
+        def __init__(self, *a, **kw):
+            pass
+
+        def query_database(self, *args, **kwargs):
+            return {"results": [], "has_more": False}
+
+    monkeypatch.setattr(
+        "hokusai.integrations.notion_dashboard.client.NotionAPIClient", _FakeAPI
+    )
+
+    args = _Args(workflow_id="wf-1", phase=None, memory_types=None, output="json", profile="acme")
+    with redirect_stdout(out), redirect_stderr(err):
+        rc = _handle_prime(args, cfg)
+    assert rc == 0
+
+
 def test_prime_passes_types_filter_to_client(tmp_path, monkeypatch, captured):
     """--type で指定された types が list_active_memories に伝わる"""
     out, err = captured

@@ -48,7 +48,8 @@ from hokusai.integrations.notion_dashboard.project_memory_db import (
 class _FakeAPI:
     def __init__(self, *, existing_id: str | None = None):
         self._existing_id = existing_id
-        self.query_calls: list[tuple[str, dict | None]] = []
+        # query_calls: (database_id, filter_, start_cursor, page_size)
+        self.query_calls: list[tuple[str, dict | None, str | None, int | None]] = []
         self.create_calls: list[dict] = []
         self.update_calls: list[tuple[str, dict]] = []
 
@@ -648,7 +649,9 @@ def test_list_active_memories_respects_max_pages_safety_limit():
     assert len(api.query_calls) == 2
 
 
-def test_list_active_memories_returns_empty_on_api_failure():
+def test_list_active_memories_returns_empty_on_first_page_failure():
+    """初回 query で失敗 → 部分結果 0 件で gracefully 返却"""
+
     class _RaisingAPI:
         def query_database(self, *args, **kwargs):
             raise NotionAPIError(503, "service unavailable")
@@ -656,3 +659,26 @@ def test_list_active_memories_returns_empty_on_api_failure():
     client = ProjectMemoryDBClient(api=_RaisingAPI(), database_id="pm-db")
     result = client.list_active_memories()
     assert result == []
+
+
+def test_list_active_memories_preserves_partial_results_on_mid_failure():
+    """途中ページで失敗 → 取得済み部分は保持して返す（docstring 仕様）"""
+
+    class _MidFailAPI:
+        def __init__(self):
+            self.calls = 0
+
+        def query_database(self, *args, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                return {
+                    "results": [_make_memory_page(page_id="m1", name="A")],
+                    "has_more": True,
+                    "next_cursor": "cursor-1",
+                }
+            raise NotionAPIError(503, "service unavailable")
+
+    api = _MidFailAPI()
+    client = ProjectMemoryDBClient(api=api, database_id="pm-db")
+    result = client.list_active_memories()
+    assert [m["id"] for m in result] == ["m1"]

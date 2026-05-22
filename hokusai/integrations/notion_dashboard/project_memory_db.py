@@ -291,7 +291,10 @@ class ProjectMemoryDBClient:
 
         Returns:
             Notion page dict のリスト（`id` / `properties` を含む）。
-            空ならゼロ件 / 取得失敗ならゼロ件（warning は debug log のみ）。
+            空ならゼロ件。途中ページで API 失敗した場合は **その時点までに
+            取得済みの結果を返す**（部分結果保持: 後段の Agent prompt 注入
+            が memory 全消失するより部分的にでも渡せた方が有用なため）。
+            warning は debug log のみで、呼び出し側に例外は伝播しない。
         """
         valid_types = None
         if types is not None:
