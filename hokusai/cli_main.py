@@ -1116,6 +1116,13 @@ def _handle_prime(args, config) -> int:
             notion_cfg.project_memory_db_id_env, ""
         ).strip()
 
+    # Workflows DB ID も Supersedes 世代遡及で使う（Issue #52 / 要件 §8.4）
+    workflows_db_id = ""
+    if notion_cfg is not None and getattr(notion_cfg, "enabled", False):
+        workflows_db_id = os.environ.get(
+            getattr(notion_cfg, "workflows_db_id_env", ""), ""
+        ).strip()
+
     memories: list[dict] = []
     if api_token and db_id:
         try:
@@ -1131,6 +1138,27 @@ def _handle_prime(args, config) -> int:
                 phase=resolved_phase,
                 types=memory_types,
             )
+            # handover_note 世代遡及（要件 §8.4 lookup rule）。Workflows DB ID
+            # 未設定 / API 障害なら skip（graceful degrade）。--type で
+            # handover_note を除外している場合も skip（呼び出し側意図を尊重）。
+            inject_handover = bool(workflows_db_id) and (
+                memory_types is None
+                or "handover_note" in (memory_types or [])
+            )
+            if inject_handover:
+                from .integrations.notion_dashboard.workflows_db import (
+                    WorkflowsDBClient,
+                )
+                wf_client = WorkflowsDBClient(
+                    api=api, database_id=workflows_db_id
+                )
+                handover_memories = _collect_handover_notes(
+                    wf_client=wf_client,
+                    pm_client=client,
+                    workflow_id=workflow_id,
+                    profile=resolved_profile,
+                )
+                memories = _merge_memories_dedup(memories, handover_memories)
         except Exception as e:
             # 障害時は memory 0 件で続行（warning は stderr）
             print(
@@ -1157,6 +1185,98 @@ def _handle_prime(args, config) -> int:
             )
         )
     return 0
+
+
+def _collect_handover_notes(
+    *,
+    wf_client,
+    pm_client,
+    workflow_id: str,
+    profile: str | None,
+    max_depth: int = 3,
+) -> list[dict]:
+    """Supersedes リレーションを辿って active handover_note を集める
+    （Workgraph Phase 7 / Issue #52 / 要件 §8.4 lookup rule）。
+
+    - 起点 workflow_id → page_id を解決
+    - `get_supersedes` で旧 workflow page_id を取得（最大 `max_depth` 世代まで遡る）
+    - 各旧 workflow について `find_handover_notes_for_workflow` を呼び active を集める
+    - 環状回避: 訪問済 page_id は再訪しない
+    - すべての段階で失敗時は部分結果を返す（prime 全消失より部分提供を優先）
+
+    起点 workflow 自身は対象外（current workflow に handover_note を残すケース
+    は無く、handover_note は「前任から渡される」もの: 要件 §8.6）。
+    """
+    from .integrations.notion_dashboard.client import (
+        NotionAPIError,
+        NotionRateLimitError,
+    )
+
+    start_page_id = wf_client.find_workflow_page_id(workflow_id)
+    if not start_page_id:
+        return []
+
+    visited: set[str] = {start_page_id}
+    chain: list[str] = []
+    current_page_id = start_page_id
+    for _ in range(max_depth):
+        try:
+            priors = wf_client.get_supersedes(current_page_id)
+        except (NotionAPIError, NotionRateLimitError) as e:
+            # API 系例外のみ握り潰して graceful degrade。stderr に warning を
+            # 出して原因調査を可能にする（Copilot 指摘: 「Supersedes 未設定 =
+            # 空リスト」と「Notion 障害」を区別するため、`get_supersedes` 側で
+            # API 系例外を伝播させる設計に変更）。それ以外の例外は呼び出し元の
+            # 大きな try-except に任せる（バグ早期発見）。
+            print(
+                f"⚠ handover_note 世代遡及で get_supersedes が失敗（"
+                f"page_id={current_page_id[:8]}...）。chain 打ち切り: {e}",
+                file=sys.stderr,
+            )
+            break
+        if not priors:
+            break
+        # single_property relation だが念のため最初の要素のみ採用（深さ優先で
+        # 1 本のチェーンを辿る、要件 §8.4: A → A' → B で A' を優先）
+        next_page_id = priors[0]
+        if next_page_id in visited:
+            break
+        visited.add(next_page_id)
+        chain.append(next_page_id)
+        current_page_id = next_page_id
+
+    if not chain:
+        return []
+
+    collected: list[dict] = []
+    for prior_page_id in chain:
+        notes = pm_client.find_handover_notes_for_workflow(
+            prior_page_id, profile=profile
+        )
+        collected.extend(notes)
+    return collected
+
+
+def _merge_memories_dedup(
+    base: list[dict], extra: list[dict]
+) -> list[dict]:
+    """memory リストを id ベースで重複排除しながら結合する（順序は base 先）。
+
+    handover_note 注入時に、`list_active_memories` 結果と `find_handover_notes_for_workflow`
+    結果に同じ memory が含まれることがある（旧 workflow の active が現 workflow から
+    手動でも参照されている場合等）。Notion page id で dedup する。
+    """
+    seen: set[str] = set()
+    out: list[dict] = []
+    for src in (base, extra):
+        for m in src:
+            mid = m.get("id")
+            if mid and mid in seen:
+                continue
+            if mid:
+                seen.add(mid)
+            out.append(m)
+    return out
 
 
 def _handle_notion_migrate_schema(args, config=None) -> int:

@@ -20,7 +20,7 @@ from datetime import datetime
 from typing import Any
 
 from ...logging_config import get_logger
-from .client import NotionAPIClient, NotionAPIError
+from .client import NotionAPIClient, NotionAPIError, NotionRateLimitError
 
 logger = get_logger("integrations.notion_dashboard.workflows_db")
 
@@ -197,19 +197,20 @@ class WorkflowsDBClient:
     def get_supersedes(self, page_id: str) -> list[str]:
         """`Supersedes` リレーション値（旧 workflow の page_id リスト）を取得する。
 
-        次 PR（handover_note 世代遡及）で使用予定。Notion から返る
-        `relation` プロパティを抜き出して `[{"id": "..."}]` の id を平坦化する。
-        プロパティが存在しない / 失敗時は空リストを返す（部分結果保持の方針）。
+        handover_note 世代遡及（Workgraph Phase 7 / Issue #52）で使用。Notion
+        から返る `relation` プロパティを抜き出して `[{"id": "..."}]` の id を
+        平坦化する。プロパティが Notion 側に存在しない場合は空リストを返す。
+
+        API 系例外（`NotionAPIError` / `NotionRateLimitError`）は呼び出し元に
+        伝播させ、graceful degrade の判断と warning ログ責務は呼び出し元に
+        委ねる（`find_workflow_page_id` と同じ責務分割。Copilot 指摘:
+        `_collect_handover_notes` で「Supersedes 未設定」と「Notion 障害」を
+        区別できるようにするため）。それ以外の例外（想定外レスポンス形状 /
+        実装バグ等）はそのまま raise してバグの早期発見を可能にする。
         """
         if not page_id:
             return []
-        try:
-            page = self._api.retrieve_page(page_id)
-        except Exception as e:
-            logger.debug(
-                f"Workflows DB retrieve_page 失敗: page_id={page_id[:8]}..., error={e}"
-            )
-            return []
+        page = self._api.retrieve_page(page_id)
         prop = (page.get("properties") or {}).get("Supersedes") or {}
         relations = prop.get("relation") or []
         return [r.get("id") for r in relations if r.get("id")]
@@ -233,6 +234,28 @@ class WorkflowsDBClient:
             raise ValueError("reason は必須です")
         properties = {"Cancel Reason": _rich_text(str(reason))}
         return self._submit_with_property_pruning(page_id, properties)
+
+    def find_workflow_page_id(self, workflow_id: str) -> str | None:
+        """Workflow ID プロパティで Notion DB を検索し、page_id を返す
+        （Workgraph Phase 7 / Issue #52: handover_note 世代遡及で使用）。
+
+        `_find_page_id` と挙動は同じだが、本メソッドは外部呼び出し向けに
+        例外を抑制して None を返す（API 失敗 / 検索 miss いずれも None）。
+        prime CLI 等の read-only 経路は障害でフローを止めず memory 取得を
+        skip させる方が UX として望ましいため。書き込み経路（apply_event）
+        は内部 `_find_page_id` を引き続き使い、API 失敗を raise する。
+        """
+        if not workflow_id:
+            return None
+        try:
+            return self._find_page_id(workflow_id)
+        except (NotionAPIError, NotionRateLimitError):
+            # API 系例外（rate limit / HTTP error 等）のみ握り潰して None を
+            # 返す（read-only 経路の graceful degrade）。それ以外（想定外
+            # レスポンス形状 / 実装バグ等）は再 raise して呼び出し側で気付
+            # けるようにする（Copilot 指摘）。失敗内容は `_find_page_id`
+            # 側 logger.debug で既に出力済みなので二重ログは出さない。
+            return None
 
     def _find_page_id(self, workflow_id: str) -> str | None:
         """Workflow ID プロパティで Notion DB を検索し、page_id を返す。"""
