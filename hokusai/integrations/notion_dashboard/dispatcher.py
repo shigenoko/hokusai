@@ -358,21 +358,28 @@ class NotionSyncDispatcher:
     ) -> int:
         """workflow Notion ページの存在に影響する pending イベントだけを数える。
 
-        `review_issue_raised` / 廃止済 `service_status_checked` は workflow page
-        とは独立した同期なので除外する。これがないと、retry_pending() で
-        `review_issue_raised` を再送する時、自己 entry を含む `_count_pending_for`
-        が常に > 0 を返してしまい、`review_issue_raised` が永久に自己 deferral
+        以下は workflow page と独立した同期なので除外する。これがないと、
+        retry_pending() で各イベントを再送する時、自己 entry を含む
+        `_count_pending_for` が常に > 0 を返してしまい、永久に自己 deferral
         ループに陥り max_attempts 到達まで errors テーブルへ移動できない
-        （PR #37 Copilot 5 回目指摘）。
+        （PR #37 Copilot 5 回目指摘 / PR #45 Copilot 2 回目で gate イベント
+        も同じ理由で除外対象に追加）:
+
+        - `review_issue_raised`: Phase 6/7 の指摘同期（#36）
+        - `work_item_*` (upsert / status_change / claim / lease_release):
+          Work Items DB 関連（#38, #42）
+        - `workflow_gate_*` (upsert / status_change): Workflow Gates DB
+          関連（#44）
+        - `service_status_checked`: 廃止済の旧 Service Status sync
 
         exclude_key を渡せば、retry_pending() 経由で「これから削除される」
         自己 entry をさらに除外できる。
         """
         if self._store is None:
             return 0
-        # work_item_upsert は review_issue_raised と同じく workflow page sync
-        # とは独立した同期。同 workflow_id の workflow_started が pending の
-        # 際の deferred ループを避けるため除外する。
+        # 各イベントは workflow page sync とは独立した同期なので、同一
+        # workflow_id の workflow_started が pending の際の deferred ループを
+        # 避けるため除外する。
         excluded_types = (
             "review_issue_raised",
             "work_item_upsert",
@@ -960,6 +967,18 @@ class NotionSyncDispatcher:
                 logger.warning(
                     "workflow_gate_status_change で dedupe_key も gate_type も "
                     "無いため Gate を同定不能スキップ"
+                )
+                return
+            # gate_type の enum 検証（PR #45 Copilot 2 回目指摘）。typo / poison
+            # payload で誤 dedupe_key を build_dedupe_key が生成すると
+            # find_by_dedupe_key で常に miss → 状態遷移が silent に失敗する
+            # ため、upsert と同じく enum 外なら warning + skip。
+            from .workflow_gates_db import is_valid_gate_type
+            if not is_valid_gate_type(gate_type):
+                logger.warning(
+                    "workflow_gate_status_change の gate_type が enum 外 "
+                    "なのでスキップ: %r",
+                    gate_type,
                 )
                 return
             # required_by_phase の型検証（upsert と同じ）

@@ -435,9 +435,9 @@ def test_setup_workflow_gates_db_payload_includes_relations():
     client = _RecordingClient()
     setup_notion_workspace("token", "parent", api_client=client)
 
-    # 5 番目 create_database が Workflow Gates DB
-    wg_payload = client.calls[4][1]  # index 4 = 5 番目（0-indexed）
-    # 注: Dependencies update が間に挟まるので実際は index 5
+    # 5 番目 create_database が Workflow Gates DB（Dependencies update が
+    # 4 番目 create と 5 番目 create の間に挟まるため、client.calls の
+    # 連続 index ではなく create_database のみを抽出して 5 つ目を取る）。
     create_calls = [c for c in client.calls if c[0] == "create_database"]
     assert len(create_calls) == 5
     wg_payload = create_calls[4][1]

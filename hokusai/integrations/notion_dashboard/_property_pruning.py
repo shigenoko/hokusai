@@ -1,8 +1,15 @@
 """Notion DB client 共通の property_not_found pruning ヘルパー
 
 review_issues_db / work_items_db / workflow_gates_db で同形の retry ループを
-持っていた boilerplate を集約する（PR #45 SonarCloud 1 回目対応で、Workflow
-Gates DB 追加により duplicated lines density が 3.3% を超えたため）。
+持っていたが、PR #45 で Workflow Gates DB を追加した際に新規 duplicated
+lines density が 3.3% を超えたため、本モジュールに集約した。
+
+**現状の利用状況**:
+- `workflow_gates_db.py`: 移行済（PR #45）
+- `work_items_db.py` / `review_issues_db.py`: 従来のクラスメソッド実装のまま。
+  既存テストの安定性を優先し、本 PR では新規追加分の Workflow Gates DB のみを
+  本 helper 経由に切り替えた（PR #45 Copilot 2 回目指摘）。将来同種の DB
+  client を追加する場合は本 helper を使うことで重複検出を回避できる。
 
 Notion 側でプロパティ自体が存在しない（property_not_found）場合のみが対象。
 select option が存在しないケースは Notion API が自動 option 作成するので

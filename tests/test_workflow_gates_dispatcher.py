@@ -314,3 +314,25 @@ def test_dispatcher_excludes_gate_events_from_pending_count(
     )
     # gate イベント 2 件しか無いので workflow page sync の pending は 0
     assert disp._count_pending_workflow_page_events_for("wf-1") == 0
+
+
+def test_dispatcher_gate_status_change_skips_invalid_gate_type(
+    store: SQLiteStore, monkeypatch
+):
+    """status_change で dedupe_key 未指定 + gate_type が enum 外なら skip
+    （PR #45 Copilot 2 回目指摘の poison message 防止）"""
+    disp, api = _build_dispatcher_with_gates_db(
+        store, monkeypatch, query_result=[{"id": "gate-existing"}]
+    )
+    result = disp.dispatch(EVENT_GATE_STATUS_CHANGE, {
+        "workflow_id": "wf-1",
+        "gate_type": "not_a_real_type",  # enum 外
+        "required_by_phase": 5,
+        "status": "open",
+    })
+    assert result is True
+    # find_by_dedupe_key も update_status も呼ばれない
+    queries = [c for c in api.calls if c[0] == "query"]
+    updates = [c for c in api.calls if c[0] == "update"]
+    assert queries == []
+    assert updates == []
