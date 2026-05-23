@@ -23,6 +23,7 @@ from .decisions import (
     is_valid_fail_mode,
     is_valid_redaction_action,
 )
+from .dispatch import dispatch_via_gateway
 from .interceptor import InterceptorDecision, LLMGatewayInterceptor
 from .policy import (
     ALL_APPROVAL_GATE_TYPES,
@@ -52,6 +53,7 @@ __all__ = [
     "LLMGatewayContext",
     "LLMGatewayInterceptor",
     "RedactionAction",
+    "dispatch_via_gateway",
     "is_valid_approval_gate_type",
     "is_valid_approval_reason",
     "is_valid_decision",

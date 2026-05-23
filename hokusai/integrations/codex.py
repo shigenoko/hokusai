@@ -140,35 +140,43 @@ class CodexClient:
     ) -> None:
         """LLM Gateway interceptor を呼ぶ（Issue #62 / Phase 1: log-only）。
 
-        ClaudeCodeClient._invoke_llm_gateway_interceptor と同じ safety pattern:
-        - Gateway が無効化（enabled=False）なら interceptor 内部で no-op
-        - audit_log_enabled なら構造化 log entry が logger に流れる
-        - decision は Phase 1 では常に "log" / "skipped" で値は使わない
-        - **既存フローへの影響をゼロにするため例外は完全に握り潰す**。
-          stack trace は `exc_info=True` で debug ログにのみ残し、メッセージ
-          経由で secret/PII が log にこぼれないよう本文は出さない。
+        共通 dispatch helper への薄いラッパー。provider="codex" /
+        model=self.model / purpose="cross_review" を埋める。詳細な safety
+        pattern と log-only 動作は `hokusai.llm_gateway.dispatch.dispatch_via_gateway`
+        の docstring を参照（PR #66 で 3 client から DRY 化）。
 
-        provider="codex" / model=self.model を context に詰めるため、PR #61 で
-        追加した policy_hits 評価（unknown_model / high_cost_model）が
-        Codex callsite 経由で初めて意味を持つ。
+        **既存フローへの影響をゼロに保つため**、import を含めて try/except
+        で握り潰す。`hokusai.llm_gateway.dispatch` から直接 import することで
+        `__init__.py` の policy/decisions 等まで巻き込まれる依存を軽量化する
+        （Issue #66 Copilot Round 2 指摘）。
         """
         try:
-            from ..config import get_config
-            from ..llm_gateway import LLMGatewayContext, LLMGatewayInterceptor
+            from ..llm_gateway.dispatch import dispatch_via_gateway
 
-            config = get_config()
-            gateway_config = getattr(config, "llm_gateway", None)
-            if gateway_config is None:
-                return
-            context = LLMGatewayContext(
+            dispatch_via_gateway(
                 provider="codex",
                 model=self.model,
                 purpose="cross_review",
+                prompt=prompt,
                 metadata={"has_schema": has_schema},
             )
-            LLMGatewayInterceptor(gateway_config).intercept(context, prompt)
-        except Exception:
-            logger.debug("LLM Gateway interceptor 内例外を抑制", exc_info=True)
+        except Exception as exc:
+            # 第一選択: dispatch.log_suppressed_exception を使い 3 client で
+            # ログ形式を統一する。import 失敗（dispatch module 自体に到達
+            # できない真の最終ケース）にのみ inline fallback に落とす
+            # （Issue #66 Copilot Round 5 指摘）。`str(exc)` はどちらの経路
+            # でも出さない（secret/PII の漏洩防止）。
+            try:
+                from ..llm_gateway.dispatch import log_suppressed_exception
+
+                log_suppressed_exception(
+                    "LLM Gateway interceptor 呼び出しに失敗", exc
+                )
+            except Exception:
+                logger.debug(
+                    "LLM Gateway interceptor 呼び出しに失敗 (type=%s)",
+                    type(exc).__name__,
+                )
 
     def _parse_output(self, output: str) -> dict[str, Any]:
         """Codex出力をパース"""

@@ -613,6 +613,40 @@ def test_claude_code_client_interceptor_swallows_exceptions(monkeypatch, tmp_pat
     assert result == "ok"
 
 
+def test_claude_code_client_swallows_append_system_prompt_encode_error(
+    monkeypatch, tmp_path
+):
+    """append_system_prompt の hash 計算が UnicodeEncodeError 等で失敗しても
+    workflow を落とさず metadata を省略して継続する（Issue #66 Copilot Round 1
+    指摘）。encode は helper の try/except 範囲外で実行されるため、metadata
+    構築自体を try/except でラップしている必要がある。"""
+    from hokusai.config import set_config
+    from hokusai.config.models import WorkflowConfig
+    from hokusai.integrations.claude_code import ClaudeCodeClient
+
+    cfg = WorkflowConfig(
+        llm_gateway=LLMGatewayConfig(enabled=True, audit_log_enabled=True),
+    )
+    set_config(cfg)
+
+    client = ClaudeCodeClient(working_dir=tmp_path)
+    monkeypatch.setattr(ClaudeCodeClient, "claude_path", "/usr/bin/false")
+    monkeypatch.setattr(
+        "hokusai.integrations.claude_code.ShellRunner",
+        lambda cwd=None: type(
+            "S", (), {"run": lambda self, cmd, timeout: _FakeShellResult()}
+        )(),
+    )
+
+    # 不正サロゲートを含む文字列 → utf-8 encode で UnicodeEncodeError
+    bad_prompt = "valid\ud800tail"
+    result = client._run_claude_code(
+        "main", timeout=10, append_system_prompt=bad_prompt
+    )
+    # 例外が漏れず通常結果を返すこと
+    assert result == "ok"
+
+
 def test_claude_code_client_includes_append_system_prompt_hash_in_metadata(
     monkeypatch, caplog, tmp_path
 ):
@@ -1052,3 +1086,258 @@ def test_gemini_client_proceeds_when_gateway_disabled(monkeypatch, caplog):
         r for r in caplog.records if "llm_gateway_audit" in r.message
     ]
     assert audit_records == []
+
+
+# ---------------------------------------------------------------------------
+# dispatch_via_gateway 単体テスト（Issue #66）
+# 3 client から DRY 化した共通 helper の動作検証。各 client の既存テストは
+# refactor 後も pass しているため、本セクションでは helper 自体の境界条件を
+# 直接検証する。
+# ---------------------------------------------------------------------------
+
+
+def test_dispatch_helper_emits_audit_when_enabled(caplog):
+    """gateway enabled なら provider/model/purpose/metadata が audit に載る"""
+    from hokusai.config import set_config
+    from hokusai.config.models import WorkflowConfig
+    from hokusai.llm_gateway import dispatch_via_gateway
+
+    cfg = WorkflowConfig(
+        llm_gateway=LLMGatewayConfig(enabled=True, audit_log_enabled=True),
+    )
+    set_config(cfg)
+
+    with caplog.at_level(logging.INFO, logger="hokusai.llm_gateway"):
+        dispatch_via_gateway(
+            provider="codex",
+            model="codex-mini-latest",
+            purpose="cross_review",
+            prompt="hello",
+            metadata={"flag": True},
+        )
+
+    audit_records = [
+        r for r in caplog.records if "llm_gateway_audit" in r.message
+    ]
+    assert len(audit_records) == 1
+    payload = json.loads(
+        audit_records[0].message.split("llm_gateway_audit ", 1)[1]
+    )
+    assert payload["context"]["provider"] == "codex"
+    assert payload["context"]["model"] == "codex-mini-latest"
+    assert payload["context"]["purpose"] == "cross_review"
+    assert payload["context"]["metadata"]["flag"] is True
+
+
+def test_dispatch_helper_skips_when_llm_gateway_is_none(caplog):
+    """config の llm_gateway 属性が None の場合 → silent skip"""
+    from hokusai.config import set_config
+    from hokusai.config.models import WorkflowConfig
+    from hokusai.llm_gateway import dispatch_via_gateway
+
+    cfg = WorkflowConfig()
+    cfg.llm_gateway = None  # type: ignore[assignment]
+    set_config(cfg)
+
+    with caplog.at_level(logging.INFO, logger="hokusai.llm_gateway"):
+        dispatch_via_gateway(
+            provider="claude_code",
+            model="",
+            purpose="any",
+            prompt="p",
+        )
+
+    audit_records = [
+        r for r in caplog.records if "llm_gateway_audit" in r.message
+    ]
+    assert audit_records == []
+
+
+def test_dispatch_helper_skips_when_llm_gateway_attribute_missing(caplog):
+    """config object に llm_gateway 属性そのものが存在しない場合
+    （getattr(config, 'llm_gateway', None) が None を返すケース） → silent skip。
+    `cfg.llm_gateway = None` とは別経路を実際に検証する（Issue #66 Copilot
+    Round 5 指摘）。"""
+    from hokusai.config import set_config
+    from hokusai.llm_gateway import dispatch_via_gateway
+
+    # llm_gateway 属性を一切持たないダミー config object
+    class _ConfigWithoutLLMGateway:
+        pass
+
+    set_config(_ConfigWithoutLLMGateway())  # type: ignore[arg-type]
+
+    with caplog.at_level(logging.INFO, logger="hokusai.llm_gateway"):
+        dispatch_via_gateway(
+            provider="gemini", model="m", purpose="p", prompt="x"
+        )
+
+    audit_records = [
+        r for r in caplog.records if "llm_gateway_audit" in r.message
+    ]
+    assert audit_records == []
+
+
+def test_dispatch_helper_skips_when_gateway_disabled(caplog):
+    """gateway enabled=False → interceptor 内部で no-op、audit 出ない"""
+    from hokusai.config import set_config
+    from hokusai.config.models import WorkflowConfig
+    from hokusai.llm_gateway import dispatch_via_gateway
+
+    cfg = WorkflowConfig(llm_gateway=LLMGatewayConfig(enabled=False))
+    set_config(cfg)
+
+    with caplog.at_level(logging.INFO, logger="hokusai.llm_gateway"):
+        dispatch_via_gateway(
+            provider="gemini",
+            model="gemini-2.5-pro",
+            purpose="generate",
+            prompt="p",
+        )
+
+    audit_records = [
+        r for r in caplog.records if "llm_gateway_audit" in r.message
+    ]
+    assert audit_records == []
+
+
+def test_dispatch_helper_swallows_exceptions(monkeypatch):
+    """get_config が例外を投げても helper は静かに戻る（呼び出し側に伝播しない）"""
+    from hokusai.llm_gateway import dispatch_via_gateway
+
+    def _raising_get_config():
+        raise RuntimeError("config broken")
+
+    monkeypatch.setattr("hokusai.config.get_config", _raising_get_config)
+
+    # 例外が漏れず None を返すこと（assert ではなく単に call して通ること）
+    dispatch_via_gateway(
+        provider="codex",
+        model="m",
+        purpose="cross_review",
+        prompt="p",
+    )
+
+
+def test_dispatch_helper_sanitizes_exception_message_from_log(
+    monkeypatch, caplog
+):
+    """例外メッセージに含まれる secret/PII が debug log にこぼれないことを検証
+    （Issue #66 Copilot Round 1 指摘）。`exc_info=True` を使うと exc.args の
+    文字列が traceback に含まれてしまうため、`log_suppressed_exception` で
+    type + frame だけ記録する設計にしている。"""
+    from hokusai.llm_gateway import dispatch_via_gateway
+
+    secret_text = "SECRET-12345-DO-NOT-LEAK"
+
+    def _raising_get_config():
+        raise RuntimeError(secret_text)
+
+    monkeypatch.setattr("hokusai.config.get_config", _raising_get_config)
+
+    with caplog.at_level(logging.DEBUG, logger="hokusai.llm_gateway"):
+        dispatch_via_gateway(
+            provider="codex", model="m", purpose="p", prompt="x"
+        )
+
+    # debug log は出ているが、secret 文字列は含まれない
+    log_messages = " ".join(r.getMessage() for r in caplog.records)
+    assert "LLM Gateway interceptor 内例外を抑制" in log_messages
+    assert "RuntimeError" in log_messages  # 型名は OK
+    assert secret_text not in log_messages  # メッセージ本文は NG
+
+
+def test_log_suppressed_exception_does_not_leak_args(caplog):
+    """`log_suppressed_exception` 単体で `str(exc)` が log に流れないことを検証"""
+    from hokusai.llm_gateway.dispatch import log_suppressed_exception
+
+    sensitive = "TOKEN=abc123_secret"
+    try:
+        raise ValueError(sensitive)
+    except ValueError as exc:
+        with caplog.at_level(logging.DEBUG, logger="hokusai.llm_gateway"):
+            log_suppressed_exception("test prefix", exc)
+
+    log_text = " ".join(r.getMessage() for r in caplog.records)
+    assert "test prefix" in log_text
+    assert "ValueError" in log_text  # type 名は記録される
+    assert sensitive not in log_text  # 例外メッセージは記録されない
+
+
+def test_log_suppressed_exception_handles_null_traceback(caplog):
+    """exc.__traceback__ が None の例外（未 raise 等）を渡しても本関数自体は
+    例外を投げず空 frame として log を出す（Issue #66 Copilot Round 2 指摘）"""
+    from hokusai.llm_gateway.dispatch import log_suppressed_exception
+
+    # 未 raise の例外は __traceback__ が None
+    exc = RuntimeError("never raised")
+    assert exc.__traceback__ is None
+
+    with caplog.at_level(logging.DEBUG, logger="hokusai.llm_gateway"):
+        # 関数自体が例外を投げないこと
+        log_suppressed_exception("null tb test", exc)
+
+    log_text = " ".join(r.getMessage() for r in caplog.records)
+    assert "null tb test" in log_text
+    assert "RuntimeError" in log_text
+    # 空 frame として記録される
+    assert "frames=[]" in log_text
+
+
+def test_dispatch_helper_swallows_import_error_at_callsite(monkeypatch, tmp_path):
+    """3 client は dispatch module の import が失敗してもワークフローを
+    落とさない（Issue #66 Copilot Round 2 指摘）。CodexClient を例として検証。"""
+    import sys
+
+    from hokusai.integrations.codex import CodexClient
+
+    # codex の `_find_codex_command` をスキップ
+    monkeypatch.setattr(
+        CodexClient, "_find_codex_command", lambda self: "/usr/bin/false"
+    )
+    client = CodexClient(model="codex-mini-latest")
+
+    # subprocess 自体は mock しないと test 環境で失敗するのでパス。
+    # 重要なのは _invoke_llm_gateway_interceptor が例外を漏らさないこと。
+    # dispatch module import を壊して呼ぶ
+    monkeypatch.setitem(sys.modules, "hokusai.llm_gateway.dispatch", None)
+
+    # 直接 _invoke_llm_gateway_interceptor を呼ぶ
+    # （review_document を経由すると subprocess も走るため）
+    client._invoke_llm_gateway_interceptor("test prompt", has_schema=False)
+    # 例外が漏れず戻ってくれば OK
+
+
+def test_dispatch_helper_copies_metadata(caplog):
+    """metadata は helper 内で dict コピーされ、呼び出し後に元 dict を書き換えても
+    audit には影響しない（LLMGatewayContext が MappingProxyType でラップ済だが
+    helper レイヤでも防御的にコピーする方針を維持）"""
+    from hokusai.config import set_config
+    from hokusai.config.models import WorkflowConfig
+    from hokusai.llm_gateway import dispatch_via_gateway
+
+    cfg = WorkflowConfig(
+        llm_gateway=LLMGatewayConfig(enabled=True, audit_log_enabled=True),
+    )
+    set_config(cfg)
+
+    src_metadata = {"key": "original"}
+    with caplog.at_level(logging.INFO, logger="hokusai.llm_gateway"):
+        dispatch_via_gateway(
+            provider="codex",
+            model="m",
+            purpose="p",
+            prompt="x",
+            metadata=src_metadata,
+        )
+    # 呼び出し後に src_metadata を書き換える
+    src_metadata["key"] = "mutated"
+
+    audit_records = [
+        r for r in caplog.records if "llm_gateway_audit" in r.message
+    ]
+    payload = json.loads(
+        audit_records[0].message.split("llm_gateway_audit ", 1)[1]
+    )
+    # audit には呼び出し時の値が残る
+    assert payload["context"]["metadata"]["key"] == "original"
