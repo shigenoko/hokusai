@@ -137,6 +137,16 @@ class GeminiClient:
                 f"{schema_content}\n"
             )
 
+        # LLM Gateway interceptor (Issue #64 / Phase 1: log-only)
+        # provider="gemini" / model=self.model / purpose="cross_review"。
+        # has_schema は実 CLI への schema 埋め込み（上の `if schema_path:`）と
+        # 判定基準を揃えるため bool() で評価する（PR #63 と同方針）。
+        self._invoke_llm_gateway_interceptor(
+            full_prompt,
+            purpose="cross_review",
+            metadata={"has_schema": bool(schema_path)},
+        )
+
         # 安全性メモ:
         # - shell=False（list 形式の cmd で既定）でフラグ / コマンド注入を防止
         # - self.gemini_path は _find_gemini_command() で検証済みのパス
@@ -201,6 +211,16 @@ class GeminiClient:
                 content = Path(f).read_text(encoding="utf-8")
                 full_prompt += f"\n\n--- file: {f} ---\n{content}\n"
 
+        # LLM Gateway interceptor (Issue #64 / Phase 1: log-only)
+        # provider="gemini" / model=self.model / purpose="generate"。
+        # file_count は context として残し、後続 audit / spend 計算で参照可能に
+        # する（汎用 generate は cross_review より多様な context を持ちうる）。
+        self._invoke_llm_gateway_interceptor(
+            full_prompt,
+            purpose="generate",
+            metadata={"file_count": len(files) if files else 0},
+        )
+
         # 安全性メモ: review_document() と同じく argv には whitelist 済みの値
         # のみ載せ、user-controlled なプロンプトは stdin で渡す。
         cmd = [self.gemini_path, "-m", self.model]
@@ -219,6 +239,45 @@ class GeminiClient:
             )
 
         return result.stdout
+
+    def _invoke_llm_gateway_interceptor(
+        self,
+        prompt: str,
+        *,
+        purpose: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """LLM Gateway interceptor を呼ぶ（Issue #64 / Phase 1: log-only）。
+
+        ClaudeCodeClient / CodexClient と同じ safety pattern:
+        - Gateway が無効化（enabled=False）なら interceptor 内部で no-op
+        - audit_log_enabled なら構造化 log entry が logger に流れる
+        - decision は Phase 1 では常に "log" / "skipped" で値は使わない
+        - **既存フローへの影響をゼロにするため例外は完全に握り潰す**。
+          stack trace は `exc_info=True` で debug ログにのみ残し、メッセージ
+          経由で secret/PII が log にこぼれないよう本文は出さない。
+
+        provider="gemini" / model=self.model を context に詰めるため、PR #61
+        で追加した policy_hits 評価（unknown_model / high_cost_model）が
+        Gemini callsite 経由で意味を持つ。
+        """
+        try:
+            from ..config import get_config
+            from ..llm_gateway import LLMGatewayContext, LLMGatewayInterceptor
+
+            config = get_config()
+            gateway_config = getattr(config, "llm_gateway", None)
+            if gateway_config is None:
+                return
+            context = LLMGatewayContext(
+                provider="gemini",
+                model=self.model,
+                purpose=purpose,
+                metadata=metadata or {},
+            )
+            LLMGatewayInterceptor(gateway_config).intercept(context, prompt)
+        except Exception:
+            logger.debug("LLM Gateway interceptor 内例外を抑制", exc_info=True)
 
     def _run_with_stdin_prompt(
         self,

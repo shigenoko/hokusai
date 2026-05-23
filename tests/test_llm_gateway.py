@@ -886,3 +886,169 @@ def test_codex_client_proceeds_when_gateway_disabled(monkeypatch, caplog):
         r for r in caplog.records if "llm_gateway_audit" in r.message
     ]
     assert audit_records == []
+
+
+# ---------------------------------------------------------------------------
+# GeminiClient → interceptor 配線（Issue #64）
+# review_document() / generate() の 2 callsite それぞれで interceptor が呼ばれ、
+# context に provider="gemini" / model=self.model が記録されることを検証。
+# ---------------------------------------------------------------------------
+
+
+class _FakeGeminiProcess:
+    """gemini CLI 経由 subprocess.run の戻り値モック"""
+
+    def __init__(
+        self,
+        stdout: str = '{"findings": [], "overall_assessment": "ok", "summary": "g"}',
+        stderr: str = "",
+        returncode: int = 0,
+    ):
+        self.stdout = stdout
+        self.stderr = stderr
+        self.returncode = returncode
+
+
+def _make_gemini_client(monkeypatch, model: str = "gemini-2.5-pro"):
+    """GeminiClient を gemini コマンド検出スキップ付きで生成"""
+    from hokusai.integrations.gemini import GeminiClient
+
+    monkeypatch.setattr(
+        GeminiClient, "_find_gemini_command", staticmethod(lambda: "/usr/bin/false")
+    )
+    return GeminiClient(model=model)
+
+
+def test_gemini_client_invokes_interceptor_on_review(monkeypatch, caplog):
+    """GeminiClient.review_document が interceptor を呼び、provider=gemini /
+    model=self.model / purpose=cross_review が audit に記録される"""
+    from hokusai.config import set_config
+    from hokusai.config.models import WorkflowConfig
+
+    cfg = WorkflowConfig(
+        llm_gateway=LLMGatewayConfig(enabled=True, audit_log_enabled=True),
+    )
+    set_config(cfg)
+
+    client = _make_gemini_client(monkeypatch, model="gemini-2.5-pro")
+    monkeypatch.setattr(
+        "hokusai.integrations.gemini.subprocess.run",
+        lambda *a, **kw: _FakeGeminiProcess(),
+    )
+
+    with caplog.at_level(logging.INFO, logger="hokusai.llm_gateway"):
+        result = client.review_document(
+            document="doc", review_prompt="review"
+        )
+    assert result["overall_assessment"] == "ok"
+
+    audit_records = [
+        r for r in caplog.records if "llm_gateway_audit" in r.message
+    ]
+    assert len(audit_records) == 1
+    payload = json.loads(
+        audit_records[0].message.split("llm_gateway_audit ", 1)[1]
+    )
+    assert payload["context"]["provider"] == "gemini"
+    assert payload["context"]["model"] == "gemini-2.5-pro"
+    assert payload["context"]["purpose"] == "cross_review"
+    assert payload["context"]["metadata"]["has_schema"] is False
+
+
+def test_gemini_client_invokes_interceptor_on_generate(monkeypatch, caplog):
+    """GeminiClient.generate も interceptor を呼び purpose=generate /
+    metadata.file_count が記録される"""
+    from hokusai.config import set_config
+    from hokusai.config.models import WorkflowConfig
+
+    cfg = WorkflowConfig(
+        llm_gateway=LLMGatewayConfig(enabled=True, audit_log_enabled=True),
+    )
+    set_config(cfg)
+
+    client = _make_gemini_client(monkeypatch)
+    monkeypatch.setattr(
+        "hokusai.integrations.gemini.subprocess.run",
+        lambda *a, **kw: _FakeGeminiProcess(stdout="hello"),
+    )
+
+    with caplog.at_level(logging.INFO, logger="hokusai.llm_gateway"):
+        result = client.generate(prompt="say hi")
+    assert result == "hello"
+
+    audit_records = [
+        r for r in caplog.records if "llm_gateway_audit" in r.message
+    ]
+    assert len(audit_records) == 1
+    payload = json.loads(
+        audit_records[0].message.split("llm_gateway_audit ", 1)[1]
+    )
+    assert payload["context"]["provider"] == "gemini"
+    assert payload["context"]["purpose"] == "generate"
+    # files 省略 → file_count == 0
+    assert payload["context"]["metadata"]["file_count"] == 0
+
+
+def test_gemini_client_interceptor_swallows_exceptions(monkeypatch):
+    """interceptor が例外を投げても review_document は副作用なく続行する"""
+    client = _make_gemini_client(monkeypatch)
+    monkeypatch.setattr(
+        "hokusai.integrations.gemini.subprocess.run",
+        lambda *a, **kw: _FakeGeminiProcess(),
+    )
+    def _raising_get_config():
+        raise RuntimeError("config broken")
+
+    monkeypatch.setattr("hokusai.config.get_config", _raising_get_config)
+
+    result = client.review_document(document="d", review_prompt="r")
+    assert result["overall_assessment"] == "ok"
+
+
+def test_gemini_client_skips_interceptor_when_llm_gateway_missing(
+    monkeypatch, caplog
+):
+    """llm_gateway 属性が config にない場合は audit を出さず透過する"""
+    from hokusai.config import set_config
+    from hokusai.config.models import WorkflowConfig
+
+    cfg = WorkflowConfig()
+    cfg.llm_gateway = None  # type: ignore[assignment]
+    set_config(cfg)
+
+    client = _make_gemini_client(monkeypatch)
+    monkeypatch.setattr(
+        "hokusai.integrations.gemini.subprocess.run",
+        lambda *a, **kw: _FakeGeminiProcess(),
+    )
+
+    with caplog.at_level(logging.INFO, logger="hokusai.llm_gateway"):
+        result = client.review_document(document="d", review_prompt="r")
+    assert result["overall_assessment"] == "ok"
+    audit_records = [
+        r for r in caplog.records if "llm_gateway_audit" in r.message
+    ]
+    assert audit_records == []
+
+
+def test_gemini_client_proceeds_when_gateway_disabled(monkeypatch, caplog):
+    """gateway disabled でも subprocess 呼び出しは続行する"""
+    from hokusai.config import set_config
+    from hokusai.config.models import WorkflowConfig
+
+    cfg = WorkflowConfig(llm_gateway=LLMGatewayConfig(enabled=False))
+    set_config(cfg)
+
+    client = _make_gemini_client(monkeypatch)
+    monkeypatch.setattr(
+        "hokusai.integrations.gemini.subprocess.run",
+        lambda *a, **kw: _FakeGeminiProcess(),
+    )
+
+    with caplog.at_level(logging.INFO, logger="hokusai.llm_gateway"):
+        result = client.generate(prompt="p")
+    assert result == '{"findings": [], "overall_assessment": "ok", "summary": "g"}'
+    audit_records = [
+        r for r in caplog.records if "llm_gateway_audit" in r.message
+    ]
+    assert audit_records == []
