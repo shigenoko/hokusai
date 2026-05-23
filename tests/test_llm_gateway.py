@@ -315,6 +315,209 @@ def test_interceptor_hash_is_deterministic_for_same_prompt(caplog):
 
 
 # ---------------------------------------------------------------------------
+# Phase 1 §8a: policy_hits 評価（Issue #60）
+# allowed_providers / allowed_models.default / allowed_models.high_cost_requires_gate
+# を log-only で評価し audit entry に積む。decision は "log" 据え置き。
+# ---------------------------------------------------------------------------
+
+
+def _make_config(**llm_kwargs):
+    """LLMGatewayAllowedModelsConfig 等を差し込んだ config を組み立てる helper"""
+    from hokusai.config.models import LLMGatewayAllowedModelsConfig
+
+    allowed_models = llm_kwargs.pop(
+        "allowed_models", LLMGatewayAllowedModelsConfig()
+    )
+    return LLMGatewayConfig(
+        enabled=True, audit_log_enabled=True, allowed_models=allowed_models,
+        **llm_kwargs,
+    )
+
+
+def _audit_payload(caplog):
+    """caplog に流れた最後の audit log entry を JSON dict として返す"""
+    audit_records = [
+        r for r in caplog.records if "llm_gateway_audit" in r.message
+    ]
+    assert audit_records, "audit log entry should be emitted"
+    return json.loads(
+        audit_records[-1].message.split("llm_gateway_audit ", 1)[1]
+    )
+
+
+def test_interceptor_policy_hits_empty_when_no_allowlist_configured(caplog):
+    """allowed_providers=None / allowed_models.default=None / high_cost=[]
+    のデフォルト状態では policy_hits は空（後方互換）"""
+    config = _make_config()
+    interceptor = LLMGatewayInterceptor(config)
+    with caplog.at_level(logging.INFO, logger="hokusai.llm_gateway"):
+        decision = interceptor.intercept(
+            LLMGatewayContext(provider="claude_code", model="claude-3-opus"),
+            "p",
+        )
+    assert decision.policy_hits == ()
+    assert _audit_payload(caplog)["policy_hits"] == []
+
+
+def test_interceptor_policy_hits_unknown_provider(caplog):
+    """allowed_providers に含まれない provider → "unknown_provider" を hit"""
+    config = _make_config(allowed_providers=["openai"])
+    interceptor = LLMGatewayInterceptor(config)
+    with caplog.at_level(logging.INFO, logger="hokusai.llm_gateway"):
+        decision = interceptor.intercept(
+            LLMGatewayContext(provider="anthropic"), "p"
+        )
+    assert "unknown_provider" in decision.policy_hits
+    assert "unknown_provider" in _audit_payload(caplog)["policy_hits"]
+
+
+def test_interceptor_policy_hits_skip_when_allowed_providers_none(caplog):
+    """allowed_providers=None (未指定) は evaluation を skip（明示 [] と区別）"""
+    config = _make_config(allowed_providers=None)
+    interceptor = LLMGatewayInterceptor(config)
+    with caplog.at_level(logging.INFO, logger="hokusai.llm_gateway"):
+        decision = interceptor.intercept(
+            LLMGatewayContext(provider="anything"), "p"
+        )
+    assert "unknown_provider" not in decision.policy_hits
+
+
+def test_interceptor_policy_hits_unknown_provider_when_explicit_empty(caplog):
+    """allowed_providers=[] (明示空) は「全 provider 拒否」の意図なので
+    どの provider でも "unknown_provider" を hit する"""
+    config = _make_config(allowed_providers=[])
+    interceptor = LLMGatewayInterceptor(config)
+    with caplog.at_level(logging.INFO, logger="hokusai.llm_gateway"):
+        decision = interceptor.intercept(
+            LLMGatewayContext(provider="anything"), "p"
+        )
+    assert "unknown_provider" in decision.policy_hits
+
+
+def test_interceptor_policy_hits_unknown_model(caplog):
+    """allowed_models.default に含まれない model → "unknown_model" を hit"""
+    from hokusai.config.models import LLMGatewayAllowedModelsConfig
+
+    config = _make_config(
+        allowed_models=LLMGatewayAllowedModelsConfig(
+            default=["claude-3-5-sonnet"],
+        )
+    )
+    interceptor = LLMGatewayInterceptor(config)
+    with caplog.at_level(logging.INFO, logger="hokusai.llm_gateway"):
+        decision = interceptor.intercept(
+            LLMGatewayContext(provider="claude_code", model="claude-3-opus"),
+            "p",
+        )
+    assert "unknown_model" in decision.policy_hits
+
+
+def test_interceptor_policy_hits_high_cost_model(caplog):
+    """high_cost_requires_gate に含まれる model → "high_cost_model" を hit"""
+    from hokusai.config.models import LLMGatewayAllowedModelsConfig
+
+    config = _make_config(
+        allowed_models=LLMGatewayAllowedModelsConfig(
+            high_cost_requires_gate=["claude-3-opus"],
+        )
+    )
+    interceptor = LLMGatewayInterceptor(config)
+    with caplog.at_level(logging.INFO, logger="hokusai.llm_gateway"):
+        decision = interceptor.intercept(
+            LLMGatewayContext(provider="claude_code", model="claude-3-opus"),
+            "p",
+        )
+    assert "high_cost_model" in decision.policy_hits
+
+
+def test_interceptor_policy_hits_skip_when_model_empty(caplog):
+    """context.model が空文字 (呼び出し側で取得不可) のときは allowed_models
+    系の evaluation を skip（Copilot Round 1 指摘）。空を「allowlist にない」と
+    判定すると常時 unknown_model hit で audit が誤検知だらけになるため。"""
+    from hokusai.config.models import LLMGatewayAllowedModelsConfig
+
+    config = _make_config(
+        allowed_models=LLMGatewayAllowedModelsConfig(
+            default=["claude-3-5-sonnet"],
+            high_cost_requires_gate=["claude-3-opus"],
+        )
+    )
+    interceptor = LLMGatewayInterceptor(config)
+    with caplog.at_level(logging.INFO, logger="hokusai.llm_gateway"):
+        decision = interceptor.intercept(
+            # model="" (default) — ClaudeCodeClient 等が model を埋めない実態に相当
+            LLMGatewayContext(provider="claude_code"),
+            "p",
+        )
+    assert "unknown_model" not in decision.policy_hits
+    assert "high_cost_model" not in decision.policy_hits
+
+
+def test_interceptor_policy_hits_multiple_hits(caplog):
+    """複数 hit が同時に発生する: unknown_provider + unknown_model + high_cost"""
+    from hokusai.config.models import LLMGatewayAllowedModelsConfig
+
+    config = _make_config(
+        allowed_providers=["openai"],
+        allowed_models=LLMGatewayAllowedModelsConfig(
+            default=["claude-3-5-sonnet"],
+            high_cost_requires_gate=["claude-3-opus"],
+        ),
+    )
+    interceptor = LLMGatewayInterceptor(config)
+    with caplog.at_level(logging.INFO, logger="hokusai.llm_gateway"):
+        decision = interceptor.intercept(
+            LLMGatewayContext(
+                provider="anthropic", model="claude-3-opus"
+            ),
+            "p",
+        )
+    hits = set(decision.policy_hits)
+    assert {"unknown_provider", "unknown_model", "high_cost_model"} <= hits
+
+
+def test_interceptor_policy_hits_evaluated_in_dry_run(caplog):
+    """dry_run でも policy_hits 評価は走る（log-only なので block しないだけ）"""
+    from hokusai.config.models import LLMGatewayAllowedModelsConfig
+
+    config = LLMGatewayConfig(
+        enabled=True,
+        dry_run=True,
+        audit_log_enabled=True,
+        allowed_models=LLMGatewayAllowedModelsConfig(
+            high_cost_requires_gate=["claude-3-opus"],
+        ),
+    )
+    interceptor = LLMGatewayInterceptor(config)
+    with caplog.at_level(logging.INFO, logger="hokusai.llm_gateway"):
+        decision = interceptor.intercept(
+            LLMGatewayContext(provider="claude_code", model="claude-3-opus"),
+            "p",
+        )
+    assert decision.reason == "dry_run_log_only"
+    assert "high_cost_model" in decision.policy_hits
+
+
+def test_interceptor_policy_hits_omitted_when_gateway_disabled():
+    """gateway disabled 時は evaluation を skip し policy_hits は空"""
+    from hokusai.config.models import LLMGatewayAllowedModelsConfig
+
+    config = LLMGatewayConfig(
+        enabled=False,
+        allowed_providers=["openai"],
+        allowed_models=LLMGatewayAllowedModelsConfig(
+            high_cost_requires_gate=["claude-3-opus"],
+        ),
+    )
+    interceptor = LLMGatewayInterceptor(config)
+    decision = interceptor.intercept(
+        LLMGatewayContext(provider="anthropic", model="claude-3-opus"), "p"
+    )
+    assert decision.decision == "skipped"
+    assert decision.policy_hits == ()
+
+
+# ---------------------------------------------------------------------------
 # ClaudeCodeClient → interceptor 配線
 # ---------------------------------------------------------------------------
 
