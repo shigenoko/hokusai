@@ -336,18 +336,44 @@ def _parse_notion_dashboard_config(config_dict: dict) -> NotionDashboardConfig:
 
 
 def _parse_llm_gateway_config(config_dict: dict) -> LLMGatewayConfig:
-    """llm_gateway 設定をパース（#39 / v0.6.0〜）
+    """llm_gateway 設定をパース（#39 / v0.6.0〜、Issue #58 でフル schema 拡張）。
 
-    設定例:
+    設定例（要件 §4.1）:
         llm_gateway:
           enabled: true
           dry_run: false
           log_only: true
           audit_log_enabled: true
+          allowed_providers: [openai, anthropic, google]
+          allowed_models:
+            default: [gpt-5.4, claude-sonnet-4.5]
+            high_cost_requires_gate: [gpt-5.5, claude-opus-4.5]
+          spend_cap:
+            monthly_jpy: 50000
+            daily_jpy: 5000
+            per_workflow_jpy: 500
+            per_phase_jpy: 200
+            fail_mode: block
+          pii_redaction:
+            enabled: true
+            rules: [email, jp_phone_number, credit_card]
+            default_action: redact
+            fail_mode: block
+          approvals:
+            high_cost_model: required
+            pii_send_without_redaction: required
+            policy_override: required
+          audit:
+            store_prompt_hash: true
+            store_redacted_preview: true
+            store_full_prompt: false
 
     バリデーション方針:
     - llm_gateway が dict でなければデフォルト
-    - 各フラグは bool のみ採用、それ以外はデフォルトに戻す
+    - 各値は型 / enum 検証し、不正値は既定値にフォールバック（warning なし
+      は将来的に追加検討、現状は静かに既定値）
+    - allowed_providers / detector rules / model リストは「str 要素のみ」を
+      抽出（dict / int 混入時に安全に str のみ採用）
     """
     raw = config_dict.get("llm_gateway")
     if not isinstance(raw, dict):
@@ -365,6 +391,216 @@ def _parse_llm_gateway_config(config_dict: dict) -> LLMGatewayConfig:
         log_only=_bool_or_default("log_only", defaults.log_only),
         audit_log_enabled=_bool_or_default(
             "audit_log_enabled", defaults.audit_log_enabled
+        ),
+        allowed_providers=_parse_str_list_or_none(
+            raw.get("allowed_providers"), key_present="allowed_providers" in raw
+        ),
+        allowed_models=_parse_llm_gateway_allowed_models(
+            raw.get("allowed_models")
+        ),
+        spend_cap=_parse_llm_gateway_spend_cap(raw.get("spend_cap")),
+        pii_redaction=_parse_llm_gateway_pii_redaction(
+            raw.get("pii_redaction")
+        ),
+        approvals=_parse_llm_gateway_approvals(raw.get("approvals")),
+        audit=_parse_llm_gateway_audit(raw.get("audit")),
+    )
+
+
+def _parse_str_list(raw: object, default: list[str]) -> list[str]:
+    """YAML から list[str] を安全に抽出する共通 helper。
+
+    None / 非 list は既定値を返し、list の場合は str 要素のみを採用する
+    （dict や数値の混入を防ぐ）。
+    """
+    if not isinstance(raw, list):
+        return list(default)
+    return [v for v in raw if isinstance(v, str)]
+
+
+def _parse_str_list_or_none(
+    raw: object, *, key_present: bool
+) -> list[str] | None:
+    """YAML から「未指定 (None)」と「明示的に空配列 ([])」を区別する list[str] 抽出。
+
+    要件 §4.2 の `allowed_providers` / `allowed_models.default` は必須項目
+    だが、後方互換のため未指定（YAML にキーなし）も許容する。Issue #58 で
+    `None` = 未指定 / `[]` = 明示空 allowlist の意味付けを採用（後続
+    enforcement PR で deny-all 解釈を確定する）。
+
+    Args:
+        raw: YAML から取り出した生値（dict.get の戻り）
+        key_present: YAML 上でキーが明示指定されていたか（`"key" in raw`）
+
+    Returns:
+        - キー未指定 → `None`
+        - キーありかつ非 list → `None`（型不正なので未指定と同等扱い）
+        - キーありかつ明示 `[]` → `[]`（ユーザーが明示した空 allowlist）
+        - キーありかつ list（str 要素を含む）→ str 要素のみ抽出
+        - キーありかつ非空 list だが str 要素が 1 つもない（例: `[42]`）→ `None`
+          （filter 後 [] と explicit [] の semantic flip を防ぐため、型不正と
+          同等扱いで未指定に倒す）
+    """
+    if not key_present:
+        return None
+    if not isinstance(raw, list):
+        return None
+    if not raw:
+        # 明示的に空配列 → そのまま保持
+        return []
+    filtered = [v for v in raw if isinstance(v, str)]
+    if not filtered:
+        # 元 list は非空だが str が 1 つもない → 不正値として None に倒す
+        # （explicit [] と区別する: filter 後 [] になると semantic が flip する）
+        return None
+    return filtered
+
+
+def _parse_llm_gateway_allowed_models(raw: object):
+    from .models import LLMGatewayAllowedModelsConfig
+
+    defaults = LLMGatewayAllowedModelsConfig()
+    if not isinstance(raw, dict):
+        return defaults
+    # default は None / [] / [...] を区別する（allowed_providers と同じ方針）
+    default_value = _parse_str_list_or_none(
+        raw.get("default"), key_present="default" in raw
+    )
+    return LLMGatewayAllowedModelsConfig(
+        default=default_value,
+        high_cost_requires_gate=_parse_str_list(
+            raw.get("high_cost_requires_gate"),
+            defaults.high_cost_requires_gate,
+        ),
+    )
+
+
+def _parse_llm_gateway_spend_cap(raw: object):
+    from ..llm_gateway.decisions import ALL_FAIL_MODES
+    from .models import LLMGatewaySpendCapConfig
+
+    defaults = LLMGatewaySpendCapConfig()
+    if not isinstance(raw, dict):
+        return defaults
+
+    def _int_or_none(key: str) -> int | None:
+        # 負値は上限金額として無意味（後続 enforcement で「常に超過」扱いに
+        # なってしまう）ため、bool 除外に加え value >= 0 も検証する。
+        value = raw.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            return value
+        return None
+
+    fail_mode_raw = raw.get("fail_mode", defaults.fail_mode)
+    fail_mode = (
+        fail_mode_raw
+        if isinstance(fail_mode_raw, str) and fail_mode_raw in ALL_FAIL_MODES
+        else defaults.fail_mode
+    )
+    return LLMGatewaySpendCapConfig(
+        monthly_jpy=_int_or_none("monthly_jpy"),
+        daily_jpy=_int_or_none("daily_jpy"),
+        per_workflow_jpy=_int_or_none("per_workflow_jpy"),
+        per_phase_jpy=_int_or_none("per_phase_jpy"),
+        fail_mode=fail_mode,
+    )
+
+
+def _parse_llm_gateway_pii_redaction(raw: object):
+    from ..llm_gateway.decisions import ALL_FAIL_MODES, ALL_REDACTION_ACTIONS
+    from ..llm_gateway.policy import ALL_DETECTOR_RULES
+    from .models import LLMGatewayPiiRedactionConfig
+
+    defaults = LLMGatewayPiiRedactionConfig()
+    if not isinstance(raw, dict):
+        return defaults
+
+    enabled_raw = raw.get("enabled", defaults.enabled)
+    enabled = (
+        enabled_raw if isinstance(enabled_raw, bool) else defaults.enabled
+    )
+
+    # rules は str のうち DetectorRule 列挙に含まれる値だけを採用
+    rules_raw = raw.get("rules")
+    if isinstance(rules_raw, list):
+        rules = [v for v in rules_raw if isinstance(v, str) and v in ALL_DETECTOR_RULES]
+    else:
+        rules = list(defaults.rules)
+
+    default_action_raw = raw.get("default_action", defaults.default_action)
+    default_action = (
+        default_action_raw
+        if isinstance(default_action_raw, str)
+        and default_action_raw in ALL_REDACTION_ACTIONS
+        else defaults.default_action
+    )
+
+    fail_mode_raw = raw.get("fail_mode", defaults.fail_mode)
+    fail_mode = (
+        fail_mode_raw
+        if isinstance(fail_mode_raw, str) and fail_mode_raw in ALL_FAIL_MODES
+        else defaults.fail_mode
+    )
+    return LLMGatewayPiiRedactionConfig(
+        enabled=enabled,
+        rules=rules,
+        default_action=default_action,
+        fail_mode=fail_mode,
+    )
+
+
+# approvals.* の許容値（required / optional / disabled）
+_ALL_APPROVAL_LEVELS = frozenset({"required", "optional", "disabled"})
+
+
+def _parse_llm_gateway_approvals(raw: object):
+    from .models import LLMGatewayApprovalsConfig
+
+    defaults = LLMGatewayApprovalsConfig()
+    if not isinstance(raw, dict):
+        return defaults
+
+    def _level_or_default(key: str, default: str) -> str:
+        value = raw.get(key, default)
+        return (
+            value
+            if isinstance(value, str) and value in _ALL_APPROVAL_LEVELS
+            else default
+        )
+
+    return LLMGatewayApprovalsConfig(
+        high_cost_model=_level_or_default(
+            "high_cost_model", defaults.high_cost_model
+        ),
+        pii_send_without_redaction=_level_or_default(
+            "pii_send_without_redaction", defaults.pii_send_without_redaction
+        ),
+        policy_override=_level_or_default(
+            "policy_override", defaults.policy_override
+        ),
+    )
+
+
+def _parse_llm_gateway_audit(raw: object):
+    from .models import LLMGatewayAuditConfig
+
+    defaults = LLMGatewayAuditConfig()
+    if not isinstance(raw, dict):
+        return defaults
+
+    def _bool_or_default(key: str, default: bool) -> bool:
+        value = raw.get(key, default)
+        return value if isinstance(value, bool) else default
+
+    return LLMGatewayAuditConfig(
+        store_prompt_hash=_bool_or_default(
+            "store_prompt_hash", defaults.store_prompt_hash
+        ),
+        store_redacted_preview=_bool_or_default(
+            "store_redacted_preview", defaults.store_redacted_preview
+        ),
+        store_full_prompt=_bool_or_default(
+            "store_full_prompt", defaults.store_full_prompt
         ),
     )
 
