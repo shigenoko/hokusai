@@ -249,35 +249,21 @@ class GeminiClient:
     ) -> None:
         """LLM Gateway interceptor を呼ぶ（Issue #64 / Phase 1: log-only）。
 
-        ClaudeCodeClient / CodexClient と同じ safety pattern:
-        - Gateway が無効化（enabled=False）なら interceptor 内部で no-op
-        - audit_log_enabled なら構造化 log entry が logger に流れる
-        - decision は Phase 1 では常に "log" / "skipped" で値は使わない
-        - **既存フローへの影響をゼロにするため例外は完全に握り潰す**。
-          stack trace は `exc_info=True` で debug ログにのみ残し、メッセージ
-          経由で secret/PII が log にこぼれないよう本文は出さない。
-
-        provider="gemini" / model=self.model を context に詰めるため、PR #61
-        で追加した policy_hits 評価（unknown_model / high_cost_model）が
-        Gemini callsite 経由で意味を持つ。
+        共通 dispatch helper への薄いラッパー。provider="gemini" /
+        model=self.model を埋め、purpose は呼び出し側（review_document か
+        generate）で渡す。詳細な safety pattern と log-only 動作は
+        `hokusai.llm_gateway.dispatch_via_gateway` の docstring を参照
+        （PR #66 で 3 client から DRY 化）。
         """
-        try:
-            from ..config import get_config
-            from ..llm_gateway import LLMGatewayContext, LLMGatewayInterceptor
+        from ..llm_gateway import dispatch_via_gateway
 
-            config = get_config()
-            gateway_config = getattr(config, "llm_gateway", None)
-            if gateway_config is None:
-                return
-            context = LLMGatewayContext(
-                provider="gemini",
-                model=self.model,
-                purpose=purpose,
-                metadata=metadata or {},
-            )
-            LLMGatewayInterceptor(gateway_config).intercept(context, prompt)
-        except Exception:
-            logger.debug("LLM Gateway interceptor 内例外を抑制", exc_info=True)
+        dispatch_via_gateway(
+            provider="gemini",
+            model=self.model,
+            purpose=purpose,
+            prompt=prompt,
+            metadata=metadata or {},
+        )
 
     def _run_with_stdin_prompt(
         self,

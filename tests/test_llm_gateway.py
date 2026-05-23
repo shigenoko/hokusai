@@ -1052,3 +1052,144 @@ def test_gemini_client_proceeds_when_gateway_disabled(monkeypatch, caplog):
         r for r in caplog.records if "llm_gateway_audit" in r.message
     ]
     assert audit_records == []
+
+
+# ---------------------------------------------------------------------------
+# dispatch_via_gateway 単体テスト（Issue #66）
+# 3 client から DRY 化した共通 helper の動作検証。各 client の既存テストは
+# refactor 後も pass しているため、本セクションでは helper 自体の境界条件を
+# 直接検証する。
+# ---------------------------------------------------------------------------
+
+
+def test_dispatch_helper_emits_audit_when_enabled(caplog):
+    """gateway enabled なら provider/model/purpose/metadata が audit に載る"""
+    from hokusai.config import set_config
+    from hokusai.config.models import WorkflowConfig
+    from hokusai.llm_gateway import dispatch_via_gateway
+
+    cfg = WorkflowConfig(
+        llm_gateway=LLMGatewayConfig(enabled=True, audit_log_enabled=True),
+    )
+    set_config(cfg)
+
+    with caplog.at_level(logging.INFO, logger="hokusai.llm_gateway"):
+        dispatch_via_gateway(
+            provider="codex",
+            model="codex-mini-latest",
+            purpose="cross_review",
+            prompt="hello",
+            metadata={"flag": True},
+        )
+
+    audit_records = [
+        r for r in caplog.records if "llm_gateway_audit" in r.message
+    ]
+    assert len(audit_records) == 1
+    payload = json.loads(
+        audit_records[0].message.split("llm_gateway_audit ", 1)[1]
+    )
+    assert payload["context"]["provider"] == "codex"
+    assert payload["context"]["model"] == "codex-mini-latest"
+    assert payload["context"]["purpose"] == "cross_review"
+    assert payload["context"]["metadata"]["flag"] is True
+
+
+def test_dispatch_helper_skips_when_llm_gateway_missing(caplog):
+    """config に llm_gateway 属性がない（古い config）→ silent skip"""
+    from hokusai.config import set_config
+    from hokusai.config.models import WorkflowConfig
+    from hokusai.llm_gateway import dispatch_via_gateway
+
+    cfg = WorkflowConfig()
+    cfg.llm_gateway = None  # type: ignore[assignment]
+    set_config(cfg)
+
+    with caplog.at_level(logging.INFO, logger="hokusai.llm_gateway"):
+        dispatch_via_gateway(
+            provider="claude_code",
+            model="",
+            purpose="any",
+            prompt="p",
+        )
+
+    audit_records = [
+        r for r in caplog.records if "llm_gateway_audit" in r.message
+    ]
+    assert audit_records == []
+
+
+def test_dispatch_helper_skips_when_gateway_disabled(caplog):
+    """gateway enabled=False → interceptor 内部で no-op、audit 出ない"""
+    from hokusai.config import set_config
+    from hokusai.config.models import WorkflowConfig
+    from hokusai.llm_gateway import dispatch_via_gateway
+
+    cfg = WorkflowConfig(llm_gateway=LLMGatewayConfig(enabled=False))
+    set_config(cfg)
+
+    with caplog.at_level(logging.INFO, logger="hokusai.llm_gateway"):
+        dispatch_via_gateway(
+            provider="gemini",
+            model="gemini-2.5-pro",
+            purpose="generate",
+            prompt="p",
+        )
+
+    audit_records = [
+        r for r in caplog.records if "llm_gateway_audit" in r.message
+    ]
+    assert audit_records == []
+
+
+def test_dispatch_helper_swallows_exceptions(monkeypatch):
+    """get_config が例外を投げても helper は静かに戻る（呼び出し側に伝播しない）"""
+    from hokusai.llm_gateway import dispatch_via_gateway
+
+    def _raising_get_config():
+        raise RuntimeError("config broken")
+
+    monkeypatch.setattr("hokusai.config.get_config", _raising_get_config)
+
+    # 例外が漏れず None を返すこと（assert ではなく単に call して通ること）
+    dispatch_via_gateway(
+        provider="codex",
+        model="m",
+        purpose="cross_review",
+        prompt="p",
+    )
+
+
+def test_dispatch_helper_copies_metadata(caplog):
+    """metadata は helper 内で dict コピーされ、呼び出し後に元 dict を書き換えても
+    audit には影響しない（LLMGatewayContext が MappingProxyType でラップ済だが
+    helper レイヤでも防御的にコピーする方針を維持）"""
+    from hokusai.config import set_config
+    from hokusai.config.models import WorkflowConfig
+    from hokusai.llm_gateway import dispatch_via_gateway
+
+    cfg = WorkflowConfig(
+        llm_gateway=LLMGatewayConfig(enabled=True, audit_log_enabled=True),
+    )
+    set_config(cfg)
+
+    src_metadata = {"key": "original"}
+    with caplog.at_level(logging.INFO, logger="hokusai.llm_gateway"):
+        dispatch_via_gateway(
+            provider="codex",
+            model="m",
+            purpose="p",
+            prompt="x",
+            metadata=src_metadata,
+        )
+    # 呼び出し後に src_metadata を書き換える
+    src_metadata["key"] = "mutated"
+
+    audit_records = [
+        r for r in caplog.records if "llm_gateway_audit" in r.message
+    ]
+    payload = json.loads(
+        audit_records[0].message.split("llm_gateway_audit ", 1)[1]
+    )
+    # audit には呼び出し時の値が残る
+    assert payload["context"]["metadata"]["key"] == "original"

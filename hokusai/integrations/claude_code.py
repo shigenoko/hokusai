@@ -237,44 +237,33 @@ class ClaudeCodeClient:
     ) -> None:
         """LLM Gateway interceptor を呼んで decision を log する（#39 / Phase 1）。
 
-        - Gateway が無効化（enabled=False）なら interceptor 内部で no-op
-        - audit_log_enabled なら構造化 log entry が logger に流れる
-        - decision は Phase 1 では常に "log" / "skipped" で、本メソッドは
-          値を使わず単に副作用（log 出力）のみを期待する
-        - `append_system_prompt` が指定されているときは、その hash / length も
-          context.metadata に載せる（CLI に追加される内容と audit hash/length が
-          不一致になる問題への対応、PR #40 Copilot 1 回目指摘）
-        - **既存フローへの影響をゼロにするため、interceptor 由来の例外は
-          完全に握り潰す**。Phase 5+ で block decision を返す時にはこの
-          挙動を見直す必要がある。例外発生時は `exc_info=True` でスタック
-          トレースを debug ログに残し、原因追跡を可能にする（同 1 回目指摘）。
+        共通 dispatch helper への薄いラッパー。provider="claude_code"
+        固定（Claude Code CLI 経由なので）、model は本 client 側では取得
+        できないため空文字（interceptor 側で空 model は evaluation skip）。
+        `append_system_prompt` 指定時はその hash/length を metadata に積み、
+        CLI に追加される内容と audit が一致するようにする（PR #40 Copilot
+        1 回目指摘）。詳細な safety pattern は
+        `hokusai.llm_gateway.dispatch_via_gateway` の docstring を参照
+        （PR #66 で 3 client から DRY 化）。
         """
-        try:
-            import hashlib
+        import hashlib
 
-            from ..config import get_config
-            from ..llm_gateway import LLMGatewayContext, LLMGatewayInterceptor
+        from ..llm_gateway import dispatch_via_gateway
 
-            config = get_config()
-            gateway_config = getattr(config, "llm_gateway", None)
-            if gateway_config is None:
-                return
-            metadata: dict[str, object] = {}
-            if append_system_prompt:
-                metadata["append_system_prompt_length"] = len(append_system_prompt)
-                metadata["append_system_prompt_hash"] = hashlib.sha256(
-                    append_system_prompt.encode("utf-8")
-                ).hexdigest()[:16]
-            context = LLMGatewayContext(
-                provider="claude_code",
-                purpose=purpose,
-                metadata=metadata,
-            )
-            LLMGatewayInterceptor(gateway_config).intercept(context, prompt)
-        except Exception:
-            # exc_info=True でスタックトレースを残し、メッセージは出さない
-            # （メッセージ経由で secret/PII が log にこぼれるリスクを避けるため）
-            logger.debug("LLM Gateway interceptor 内例外を抑制", exc_info=True)
+        metadata: dict[str, object] = {}
+        if append_system_prompt:
+            metadata["append_system_prompt_length"] = len(append_system_prompt)
+            metadata["append_system_prompt_hash"] = hashlib.sha256(
+                append_system_prompt.encode("utf-8")
+            ).hexdigest()[:16]
+
+        dispatch_via_gateway(
+            provider="claude_code",
+            model="",
+            purpose=purpose,
+            prompt=prompt,
+            metadata=metadata,
+        )
 
     def _parse_skill_result(self, skill: str, output: str) -> dict[str, Any]:
         """
