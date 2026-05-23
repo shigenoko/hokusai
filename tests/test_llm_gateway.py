@@ -302,6 +302,139 @@ def test_interceptor_skips_audit_when_audit_log_disabled(caplog):
     assert audit_records == []
 
 
+# ---------------------------------------------------------------------------
+# Issue #80 / M0.1: SQLite audit_logs テーブルへの永続化
+# ---------------------------------------------------------------------------
+
+
+def test_interceptor_persists_audit_to_sqlite_when_workflow_id_present(
+    tmp_path, monkeypatch
+):
+    """context.workflow_id が埋まっていれば SQLite audit_logs に INSERT される"""
+    import sqlite3
+
+    from hokusai.config import set_config
+    from hokusai.config.models import WorkflowConfig
+    from hokusai.persistence.sqlite_store import SQLiteStore
+
+    db_path = tmp_path / "workflow.db"
+    cfg = WorkflowConfig(
+        llm_gateway=LLMGatewayConfig(enabled=True, audit_log_enabled=True),
+        data_dir=tmp_path,
+    )
+    cfg.database_path = db_path
+    set_config(cfg)
+
+    # SQLiteStore を初期化してテーブルを作成 + workflow レコードを準備
+    # (audit_logs.workflow_id は workflows.workflow_id への FK)
+    store = SQLiteStore(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO workflows (workflow_id, task_url, state_json, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("wf-test-audit", "https://example/issue/1", "{}", "now", "now"),
+        )
+        conn.commit()
+
+    interceptor = LLMGatewayInterceptor(cfg.llm_gateway)
+    interceptor.intercept(
+        LLMGatewayContext(
+            provider="claude_code", workflow_id="wf-test-audit", phase=5
+        ),
+        "test prompt body",
+    )
+
+    # audit_logs テーブルに 1 行記録されている
+    logs = store.get_audit_logs("wf-test-audit")
+    assert len(logs) == 1
+    assert logs[0]["phase"] == 5
+    assert logs[0]["action"] == "llm_gateway_decision"
+    assert logs[0]["status"] == "log"
+    # details に entry 全体が記録されている（get_audit_logs は parse 済 dict を返す）
+    details = logs[0]["details"]
+    assert details["event"] == "llm_gateway_decision"
+    assert details["context"]["provider"] == "claude_code"
+
+
+def test_interceptor_skips_sqlite_persist_when_workflow_id_absent(
+    tmp_path, monkeypatch, caplog
+):
+    """workflow_id が None / 空文字なら SQLite 書き込みを skip（FK 制約違反回避）"""
+    from hokusai.config import set_config
+    from hokusai.config.models import WorkflowConfig
+
+    db_path = tmp_path / "workflow.db"
+    cfg = WorkflowConfig(
+        llm_gateway=LLMGatewayConfig(enabled=True, audit_log_enabled=True),
+        data_dir=tmp_path,
+    )
+    cfg.database_path = db_path
+    set_config(cfg)
+
+    # SQLiteStore を初期化（テーブルだけ作る）
+    from hokusai.persistence.sqlite_store import SQLiteStore
+
+    SQLiteStore(db_path)
+
+    interceptor = LLMGatewayInterceptor(cfg.llm_gateway)
+    with caplog.at_level(logging.INFO, logger="hokusai.llm_gateway"):
+        decision = interceptor.intercept(
+            # workflow_id 指定なし → None のまま
+            LLMGatewayContext(provider="claude_code"),
+            "test",
+        )
+
+    assert decision.audit_emitted is True  # logger 経由は emit される
+    # logger 経由の audit は出ている
+    audit_records = [
+        r for r in caplog.records if "llm_gateway_audit" in r.message
+    ]
+    assert len(audit_records) == 1
+
+    # SQLite には INSERT されていない（workflow_id が無いため）
+    import sqlite3
+
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute("SELECT COUNT(*) FROM audit_logs").fetchone()
+        assert rows[0] == 0
+
+
+def test_interceptor_sqlite_persist_failure_does_not_propagate(
+    tmp_path, monkeypatch
+):
+    """SQLite 書き込み失敗時も呼び出し側に例外を伝播させない（fail-open 原則）"""
+    from hokusai.config import set_config
+    from hokusai.config.models import WorkflowConfig
+
+    # 存在しない path を指定して SQLite 接続を意図的に壊す経路の代わりに、
+    # SQLiteStore.add_audit_log を例外を投げる関数で差し替える
+    cfg = WorkflowConfig(
+        llm_gateway=LLMGatewayConfig(enabled=True, audit_log_enabled=True),
+        data_dir=tmp_path,
+    )
+    cfg.database_path = tmp_path / "workflow.db"
+    set_config(cfg)
+
+    def _raising_add_audit_log(self, **kwargs):
+        raise RuntimeError("simulated sqlite failure")
+
+    monkeypatch.setattr(
+        "hokusai.persistence.sqlite_store.SQLiteStore.add_audit_log",
+        _raising_add_audit_log,
+    )
+
+    interceptor = LLMGatewayInterceptor(cfg.llm_gateway)
+    # 例外が漏れず通常通り decision が返ってくる
+    decision = interceptor.intercept(
+        LLMGatewayContext(
+            provider="claude_code", workflow_id="wf-anything", phase=3
+        ),
+        "x",
+    )
+    assert decision.decision == "log"
+    assert decision.audit_emitted is True
+
+
 def test_interceptor_hash_is_deterministic_for_same_prompt(caplog):
     """同じ prompt は同じ prompt_hash を返す（dedupe / 再現性のため）。
 

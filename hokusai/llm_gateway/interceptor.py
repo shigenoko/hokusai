@@ -164,8 +164,13 @@ class LLMGatewayInterceptor:
         """構造化 log entry を出力する。
 
         prompt 本文は保存せず length / sha256 16 桁 hex のみを残す。secret
-        / PII を log にこぼさないため（要件定義 §14 受け入れ基準）。Phase 5+
-        で sqlite 永続化 / Notion 同期に拡張するが、Phase 1 は logger のみ。
+        / PII を log にこぼさないため（要件定義 §14 受け入れ基準）。
+
+        **永続化** (Issue #80 / M0.1): logger.info で 1 行構造化ログを出すと
+        同時に、`context.workflow_id` が埋まっていれば SQLite `audit_logs`
+        テーブルにも INSERT する。Phase 2 enforcement で「なぜ block されたか」
+        を後追いできる土台。workflow_id が None / "" のときは FK 制約違反を
+        避けるため SQLite 書き込みを skip（logger 出力は継続）。
         """
         prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
         # dataclasses.asdict は MappingProxyType を deepcopy しようとして
@@ -212,3 +217,59 @@ class LLMGatewayInterceptor:
             "llm_gateway_audit %s",
             json.dumps(entry, ensure_ascii=False, default=str),
         )
+
+        # SQLite audit_logs テーブルへの永続化（Issue #80 / M0.1）。
+        # logger.info 出力とは独立に SQLite に書く。workflow_id が無い
+        # interceptor 呼び出し（CLI 起動初期 / テスト等）は FK 制約違反を
+        # 避けるため skip。書き込み失敗は完全に握り潰す（fail-open 原則）。
+        if context.workflow_id:
+            self._persist_audit_to_sqlite(
+                workflow_id=context.workflow_id,
+                phase=context.phase if context.phase is not None else 0,
+                decision=decision,
+                entry=entry,
+            )
+
+    def _persist_audit_to_sqlite(
+        self,
+        *,
+        workflow_id: str,
+        phase: int,
+        decision: str,
+        entry: dict,
+    ) -> None:
+        """audit entry を SQLite audit_logs テーブルに INSERT する（Issue #80 / M0.1）。
+
+        既存 `SQLiteStore.add_audit_log` を再利用する。action は固定で
+        ``"llm_gateway_decision"``、status は decision 値（"log" / "skipped"
+        / Phase 2 以降 "block" 等）、details_json は entry 全体。
+
+        失敗時は debug log に型名 + frame のみ残して呼び出し側へは伝播
+        させない（`dispatch.log_suppressed_exception` と同じ思想）。
+        """
+        try:
+            from ..config import get_config
+            from ..persistence.sqlite_store import SQLiteStore
+
+            config = get_config()
+            store = SQLiteStore(config.database_path)
+            store.add_audit_log(
+                workflow_id=workflow_id,
+                phase=phase,
+                action="llm_gateway_decision",
+                status=decision,
+                details=entry,
+            )
+        except Exception as exc:
+            try:
+                from .dispatch import log_suppressed_exception
+
+                log_suppressed_exception(
+                    "LLM Gateway audit log の SQLite 永続化に失敗（logger 出力は継続）",
+                    exc,
+                )
+            except Exception:
+                logger.debug(
+                    "LLM Gateway audit log SQLite 永続化に失敗 (type=%s)",
+                    type(exc).__name__,
+                )
