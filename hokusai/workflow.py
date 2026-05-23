@@ -691,12 +691,20 @@ class WorkflowRunner:
         """workflow_id → Notion Workflows DB の page_id を解決する
         （Issue #56 / 要件 §9.3.2: start --supersedes で旧 workflow の page_id
         が必要なため）。Notion 同期が未設定 / page miss / API 失敗は None を
-        返して呼び出し側で graceful skip させる。
+        返して呼び出し側で graceful skip させる。`HOKUSAI_SKIP_NOTION=1` も
+        明示的に尊重する（`_sync_workflow_cancel_reason` と同じ責務統一、
+        Copilot 指摘）。
         """
         if not workflow_id or not self.notion_dispatcher.is_configured():
             return None
         try:
             import os
+
+            # ユーザが「Notion なしで続行」を選択している場合は早期 return
+            # （is_configured() は env が揃っていれば True になり得るが、
+            # SKIP_NOTION=1 はそれより上位のオプトアウトシグナル）。
+            if os.environ.get("HOKUSAI_SKIP_NOTION") == "1":
+                return None
 
             from .integrations.notion_dashboard.client import NotionAPIClient
             from .integrations.notion_dashboard.workflows_db import (

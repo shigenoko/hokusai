@@ -613,3 +613,28 @@ class TestStartOperatorWiring:
 
         runner.start("https://notion.so/task-5")
         runner._resolve_workflow_page_id.assert_not_called()
+
+    def test_resolve_workflow_page_id_skips_when_hokusai_skip_notion_set(
+        self, monkeypatch
+    ):
+        """HOKUSAI_SKIP_NOTION=1 が設定されている場合は API 呼び出しせず None
+        を返す（Copilot 指摘: `_sync_workflow_cancel_reason` と同じ責務統一）"""
+        runner = _make_runner()
+        runner.notion_dispatcher = MagicMock()
+        runner.notion_dispatcher.is_configured.return_value = True
+        # 仮に env が揃って is_configured()=True でも SKIP=1 で早期 return
+        monkeypatch.setenv("HOKUSAI_SKIP_NOTION", "1")
+
+        # NotionAPIClient が呼ばれたら fail させる sentinel
+        called: list = []
+
+        class _Sentinel:
+            def __init__(self, *a, **kw):
+                called.append("called")
+
+        monkeypatch.setattr(
+            "hokusai.integrations.notion_dashboard.client.NotionAPIClient",
+            _Sentinel,
+        )
+        assert runner._resolve_workflow_page_id("wf-prior") is None
+        assert called == []
