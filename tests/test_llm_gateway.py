@@ -308,7 +308,7 @@ def test_interceptor_skips_audit_when_audit_log_disabled(caplog):
 
 
 def test_interceptor_persists_audit_to_sqlite_when_workflow_id_present(
-    tmp_path, monkeypatch
+    tmp_path,
 ):
     """context.workflow_id が埋まっていれば SQLite audit_logs に INSERT される"""
     import sqlite3
@@ -357,7 +357,7 @@ def test_interceptor_persists_audit_to_sqlite_when_workflow_id_present(
 
 
 def test_interceptor_skips_sqlite_persist_when_workflow_id_absent(
-    tmp_path, monkeypatch, caplog
+    tmp_path, caplog
 ):
     """workflow_id が None / 空文字なら SQLite 書き込みを skip（orphan レコード
     回避 + NOT NULL 違反回避。PRAGMA foreign_keys は SQLite デフォルト OFF

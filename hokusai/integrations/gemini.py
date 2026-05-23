@@ -246,6 +246,8 @@ class GeminiClient:
         *,
         purpose: str,
         metadata: dict[str, Any] | None = None,
+        workflow_id: str | None = None,
+        phase: int | None = None,
     ) -> None:
         """LLM Gateway interceptor を呼ぶ（Issue #64 / Phase 1: log-only）。
 
@@ -269,6 +271,8 @@ class GeminiClient:
                 purpose=purpose,
                 prompt=prompt,
                 metadata=metadata or {},
+                workflow_id=workflow_id,
+                phase=phase,
             )
         except Exception as exc:
             # 第一選択: dispatch.log_suppressed_exception で 3 client 統一。
