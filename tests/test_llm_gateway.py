@@ -17,8 +17,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from hokusai.config import reset_config
 from hokusai.config.loaders import _parse_llm_gateway_config
-from hokusai.config.manager import reset_config
 from hokusai.config.models import LLMGatewayConfig
 from hokusai.llm_gateway import (
     LLMGatewayContext,
@@ -28,14 +28,17 @@ from hokusai.llm_gateway import (
 
 @pytest.fixture(autouse=True)
 def _reset_global_config():
-    """各テスト後に process-global config を必ず reset する。
+    """各テストの前後で process-global config を必ず reset する。
 
     本ファイルの一部テストは `set_config(cfg)` で
     `hokusai.config.manager._config` を上書きする。後始末がないと後続テストに
-    config が leak して order-dependent flakiness を生む（PR #63 Copilot Round
-    1 指摘）。autouse fixture で毎テスト後に reset することで本ファイル内
-    だけでなく実行順次第で影響を受け得る後続ファイルにも影響しないようにする。
+    config が leak して order-dependent flakiness を生む。さらに**他テスト
+    モジュール（例: test_dashboard_auth.py）が reset せずに set_config する
+    場合、本ファイルの先頭テストが他ファイルから leak した config で開始
+    してしまう**ため、yield の前後どちらでも reset する（PR #63 Copilot Round
+    1-2 指摘）。
     """
+    reset_config()
     try:
         yield
     finally:
