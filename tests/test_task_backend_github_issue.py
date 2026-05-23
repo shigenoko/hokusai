@@ -149,6 +149,76 @@ class TestUpdateStatusGracefulDegrade:
         assert "⚠️" in captured.out
         assert "継続" in captured.out
 
+    def test_remove_label_includes_status_mapping_values(self):
+        """status_mapping を渡すと、その値（例 「進行中」「完了」）が削除
+        対象に含まれる（Issue #73 Copilot 指摘: 日本語ラベルが残らないように）"""
+        client = GitHubIssueClient(
+            repo="owner/repo",
+            status_mapping={
+                "in_progress": "進行中",
+                "reviewing": "対応待ち/レビュー中",
+                "done": "完了",
+            },
+        )
+
+        with patch(
+            "hokusai.integrations.task_backend.github_issue.ShellRunner"
+        ) as mock_runner_cls:
+            mock_runner = MagicMock()
+            mock_runner_cls.return_value = mock_runner
+
+            remove_targets: list[str] = []
+
+            def _side_effect(*args, **kwargs):
+                if "--remove-label" in args:
+                    idx = args.index("--remove-label")
+                    remove_targets.append(args[idx + 1])
+                return MagicMock(returncode=0, stdout="", stderr="")
+
+            mock_runner.run_gh.side_effect = _side_effect
+
+            client.update_status(
+                "https://github.com/owner/repo/issues/42", "進行中"
+            )
+
+        # 日本語ラベルが削除対象に含まれる（"進行中" 自身は除外 = これから追加するため）
+        assert "対応待ち/レビュー中" in remove_targets
+        assert "完了" in remove_targets
+        assert "進行中" not in remove_targets
+        # 英語 fallback も含まれる
+        assert "in-progress" in remove_targets
+        assert "done" in remove_targets
+
+    def test_unexpected_exception_message_is_truncated(self, capsys):
+        """想定外例外の reason はメッセージ先頭 200 文字に truncate
+        （Issue #73 Copilot 指摘: コメント「短く要約」と実装の整合）"""
+        client = GitHubIssueClient(repo="owner/repo")
+
+        with patch(
+            "hokusai.integrations.task_backend.github_issue.ShellRunner"
+        ) as mock_runner_cls:
+            mock_runner = MagicMock()
+            mock_runner_cls.return_value = mock_runner
+
+            long_msg = "X" * 500
+
+            def _side_effect(*args, **kwargs):
+                if "--add-label" in args:
+                    raise RuntimeError(long_msg)
+                return MagicMock(returncode=0, stdout="", stderr="")
+
+            mock_runner.run_gh.side_effect = _side_effect
+
+            result = client.update_status(
+                "https://github.com/owner/repo/issues/42", "進行中"
+            )
+
+        assert result.result == GitHubIssueResult.FAILED
+        # reason に含まれる 'X' の数は 200 以下
+        assert result.reason.count("X") <= 200
+        assert result.reason.count("X") >= 100  # 短すぎないこと
+
+
     def test_remove_label_failures_are_silent(self):
         """既存ラベル削除での失敗は継続（HOKUSAI を初めて入れた環境で
         in-progress/done/reviewing/open が無いケースの維持）"""

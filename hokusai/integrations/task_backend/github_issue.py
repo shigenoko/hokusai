@@ -47,14 +47,27 @@ class GitHubIssueOperationResult:
 class GitHubIssueClient(TaskBackendClient):
     """GitHub Issue をタスク管理として使用するクライアント"""
 
-    def __init__(self, repo: str | None = None):
+    # ハードコード英語ラベル（旧 HOKUSAI バージョンや英語環境への後方互換）
+    _LEGACY_ENGLISH_STATUS_LABELS = ("in-progress", "reviewing", "done", "open")
+
+    def __init__(
+        self,
+        repo: str | None = None,
+        status_mapping: dict[str, str] | None = None,
+    ):
         """
         初期化
 
         Args:
             repo: リポジトリ（owner/repo形式）。Noneの場合は現在のリポジトリを使用
+            status_mapping: 内部 status → 外部ラベル名 のマッピング
+                （例: `{"in_progress": "進行中", "reviewing": "対応待ち/レビュー中",
+                "done": "完了"}`）。update_status で既存ラベルを削除する際の
+                対象を決めるのに使う。`None` の場合はハードコード英語ラベル
+                のみ削除対象とする（Issue #73 Copilot 指摘）。
         """
         self.repo = repo
+        self.status_mapping = status_mapping or {}
 
     def _get_repo_arg(self) -> list[str]:
         """リポジトリ引数を取得"""
@@ -184,8 +197,14 @@ class GitHubIssueClient(TaskBackendClient):
 
         shell = ShellRunner()
 
-        # 既存のステータス関連ラベルを削除（存在しない場合はそのまま継続）
-        status_labels = ["in-progress", "reviewing", "done", "open"]
+        # 既存のステータス関連ラベルを削除（存在しない場合はそのまま継続）。
+        # `status_mapping` の値（実際に追加されうる外部ラベル名、例 "進行中"
+        # "対応待ち/レビュー中" "完了"）と英語 fallback の両方を削除対象に
+        # する。ハードコード英語のみだと DEFAULT_STATUS_MAPPING の日本語ラベル
+        # が残って複数ステータスが併存する問題を回避（Issue #73 Copilot 指摘）。
+        status_labels: list[str] = list(self._LEGACY_ENGLISH_STATUS_LABELS) + [
+            v for v in self.status_mapping.values() if v != status
+        ]
         for label in status_labels:
             try:
                 shell.run_gh(
@@ -230,9 +249,12 @@ class GitHubIssueClient(TaskBackendClient):
         except Exception as e:
             # gh CLI 未インストール (FileNotFoundError) / timeout
             # (subprocess.TimeoutExpired) / その他想定外の例外でも継続。
-            # 型名は記録するがメッセージ全文は伝播させず、reason に短く要約。
+            # 型名は記録、例外メッセージは先頭 200 文字に truncate して
+            # ログ肥大化を防ぐ（Issue #73 Copilot 指摘でコメントと実装の整合）。
+            exc_summary = str(e)[:200]
             reason = (
-                f"ラベル '{status}' 追加で想定外の例外 ({type(e).__name__}): {e}"
+                f"ラベル '{status}' 追加で想定外の例外 "
+                f"({type(e).__name__}): {exc_summary}"
             )
             logger.warning(reason)
             print(f"⚠️ GitHub Issueラベル更新失敗（継続）: {reason}")
