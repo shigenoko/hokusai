@@ -18,11 +18,29 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from hokusai.config.loaders import _parse_llm_gateway_config
+from hokusai.config.manager import reset_config
 from hokusai.config.models import LLMGatewayConfig
 from hokusai.llm_gateway import (
     LLMGatewayContext,
     LLMGatewayInterceptor,
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_global_config():
+    """各テスト後に process-global config を必ず reset する。
+
+    本ファイルの一部テストは `set_config(cfg)` で
+    `hokusai.config.manager._config` を上書きする。後始末がないと後続テストに
+    config が leak して order-dependent flakiness を生む（PR #63 Copilot Round
+    1 指摘）。autouse fixture で毎テスト後に reset することで本ファイル内
+    だけでなく実行順次第で影響を受け得る後続ファイルにも影響しないようにする。
+    """
+    try:
+        yield
+    finally:
+        reset_config()
+
 
 # ---------------------------------------------------------------------------
 # LLMGatewayConfig loader
@@ -754,6 +772,10 @@ def test_codex_client_interceptor_records_has_schema_flag(monkeypatch, caplog):
     audit_records = [
         r for r in caplog.records if "llm_gateway_audit" in r.message
     ]
+    # interceptor が必ず audit を 1 件出していることを先に確認
+    # （IndexError マスクで本来の失敗原因が分かりにくくなるのを防ぐ、
+    # PR #63 Copilot Round 1 指摘）
+    assert len(audit_records) == 1
     payload = json.loads(
         audit_records[0].message.split("llm_gateway_audit ", 1)[1]
     )
