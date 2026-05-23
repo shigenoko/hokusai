@@ -136,7 +136,12 @@ class CodexClient:
         return self._parse_output(result.stdout)
 
     def _invoke_llm_gateway_interceptor(
-        self, prompt: str, *, has_schema: bool
+        self,
+        prompt: str,
+        *,
+        has_schema: bool,
+        workflow_id: str | None = None,
+        phase: int | None = None,
     ) -> None:
         """LLM Gateway interceptor を呼ぶ（Issue #62 / Phase 1: log-only）。
 
@@ -159,6 +164,8 @@ class CodexClient:
                 purpose="cross_review",
                 prompt=prompt,
                 metadata={"has_schema": has_schema},
+                workflow_id=workflow_id,
+                phase=phase,
             )
         except Exception as exc:
             # 第一選択: dispatch.log_suppressed_exception を使い 3 client で

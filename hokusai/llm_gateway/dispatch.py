@@ -75,6 +75,8 @@ def dispatch_via_gateway(
     purpose: str,
     prompt: str,
     metadata: Mapping[str, object] | None = None,
+    workflow_id: str | None = None,
+    phase: int | None = None,
 ) -> None:
     """LLM 送信前 interceptor を呼ぶ共通 helper（Phase 1: log-only）。
 
@@ -86,6 +88,10 @@ def dispatch_via_gateway(
         prompt: 送信予定 prompt（interceptor は hash / length のみ記録、
             本文は audit に保存されない）
         metadata: 追加情報（has_schema / file_count / append_system_prompt_hash 等）
+        workflow_id: 呼び出し元 HOKUSAI workflow_id（state を持つ node から呼ばれた場合）。
+            指定されていれば SQLite `audit_logs` テーブルへの永続化が走る
+            （Issue #80 / M0.1）。
+        phase: 呼び出し元 phase 番号（state を持つ node から呼ばれた場合）。
 
     Returns:
         None。decision は Phase 1 では使わず、副作用（audit log 出力）のみ。
@@ -93,6 +99,14 @@ def dispatch_via_gateway(
     Notes:
         既存フローへの影響をゼロにするため例外を完全に握り潰す。Phase 5+ で
         block decision を返す時には呼び出し側の例外処理を見直す必要がある。
+
+        **workflow_id / phase の伝播状況** (Issue #80 / M0.1): 本 PR では
+        helper API に optional 引数として追加し、interceptor から SQLite
+        永続化経路に渡せるパスを整備した。各 client (ClaudeCodeClient /
+        CodexClient / GeminiClient) の `execute_*` / `review_*` メソッドから
+        workflow_id を受け取り dispatch_via_gateway に渡す配線は **後続 PR**
+        の課題（phase node 側で state["workflow_id"] / state["current_phase"]
+        を伝播させる必要があり、影響範囲が広いため別 scope）。
     """
     try:
         from ..config import get_config
@@ -107,6 +121,8 @@ def dispatch_via_gateway(
             provider=provider,
             model=model,
             purpose=purpose,
+            workflow_id=workflow_id,
+            phase=phase,
             metadata=dict(metadata or {}),
         )
         LLMGatewayInterceptor(gateway_config).intercept(context, prompt)

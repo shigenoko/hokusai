@@ -45,6 +45,23 @@ def _reset_global_config():
         reset_config()
 
 
+@pytest.fixture(autouse=True)
+def _reset_audit_store_cache_fixture():
+    """LLM Gateway interceptor の SQLiteStore モジュールキャッシュを各テスト
+    前後で clear する（Issue #80 Copilot Round 3 / Round 1 対応）。
+
+    tmp_path が毎テスト変わるためキャッシュが残ると無関係な path への接続を
+    保持し続け、テスト間で flaky を引き起こす。
+    """
+    from hokusai.llm_gateway.interceptor import _reset_audit_store_cache
+
+    _reset_audit_store_cache()
+    try:
+        yield
+    finally:
+        _reset_audit_store_cache()
+
+
 # ---------------------------------------------------------------------------
 # LLMGatewayConfig loader
 # ---------------------------------------------------------------------------
@@ -300,6 +317,269 @@ def test_interceptor_skips_audit_when_audit_log_disabled(caplog):
     assert decision.audit_emitted is False
     audit_records = [r for r in caplog.records if "llm_gateway_audit" in r.message]
     assert audit_records == []
+
+
+# ---------------------------------------------------------------------------
+# Issue #80 / M0.1: SQLite audit_logs テーブルへの永続化
+# ---------------------------------------------------------------------------
+
+
+def test_interceptor_persists_audit_to_sqlite_when_workflow_id_present(
+    tmp_path,
+):
+    """context.workflow_id が埋まっていれば SQLite audit_logs に INSERT される"""
+    import sqlite3
+
+    from hokusai.config import set_config
+    from hokusai.config.models import WorkflowConfig
+    from hokusai.persistence.sqlite_store import SQLiteStore
+
+    db_path = tmp_path / "workflow.db"
+    cfg = WorkflowConfig(
+        llm_gateway=LLMGatewayConfig(enabled=True, audit_log_enabled=True),
+        data_dir=tmp_path,
+    )
+    cfg.database_path = db_path
+    set_config(cfg)
+
+    # SQLiteStore を初期化してテーブルを作成 + workflow レコードを準備
+    # (audit_logs.workflow_id は workflows.workflow_id への FK)
+    store = SQLiteStore(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO workflows (workflow_id, task_url, state_json, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("wf-test-audit", "https://example/issue/1", "{}", "now", "now"),
+        )
+        conn.commit()
+
+    interceptor = LLMGatewayInterceptor(cfg.llm_gateway)
+    interceptor.intercept(
+        LLMGatewayContext(
+            provider="claude_code", workflow_id="wf-test-audit", phase=5
+        ),
+        "test prompt body",
+    )
+
+    # audit_logs テーブルに 1 行記録されている
+    logs = store.get_audit_logs("wf-test-audit")
+    assert len(logs) == 1
+    assert logs[0]["phase"] == 5
+    assert logs[0]["action"] == "llm_gateway_decision"
+    assert logs[0]["status"] == "log"
+    # details に entry 全体が記録されている（get_audit_logs は parse 済 dict を返す）
+    details = logs[0]["details"]
+    assert details["event"] == "llm_gateway_decision"
+    assert details["context"]["provider"] == "claude_code"
+
+
+def test_interceptor_skips_sqlite_persist_when_workflow_id_absent(
+    tmp_path, caplog
+):
+    """workflow_id が None / 空文字なら SQLite 書き込みを skip（orphan レコード
+    回避 + NOT NULL 違反回避。PRAGMA foreign_keys は SQLite デフォルト OFF
+    のため FK 自体は検証されない、Issue #80 Copilot Round 2 で説明整合化）"""
+    from hokusai.config import set_config
+    from hokusai.config.models import WorkflowConfig
+
+    db_path = tmp_path / "workflow.db"
+    cfg = WorkflowConfig(
+        llm_gateway=LLMGatewayConfig(enabled=True, audit_log_enabled=True),
+        data_dir=tmp_path,
+    )
+    cfg.database_path = db_path
+    set_config(cfg)
+
+    # SQLiteStore を初期化（テーブルだけ作る）
+    from hokusai.persistence.sqlite_store import SQLiteStore
+
+    SQLiteStore(db_path)
+
+    interceptor = LLMGatewayInterceptor(cfg.llm_gateway)
+    with caplog.at_level(logging.INFO, logger="hokusai.llm_gateway"):
+        decision = interceptor.intercept(
+            # workflow_id 指定なし → None のまま
+            LLMGatewayContext(provider="claude_code"),
+            "test",
+        )
+
+    assert decision.audit_emitted is True  # logger 経由は emit される
+    # logger 経由の audit は出ている
+    audit_records = [
+        r for r in caplog.records if "llm_gateway_audit" in r.message
+    ]
+    assert len(audit_records) == 1
+
+    # SQLite には INSERT されていない（workflow_id が無いため）
+    import sqlite3
+
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute("SELECT COUNT(*) FROM audit_logs").fetchone()
+        assert rows[0] == 0
+
+
+def test_interceptor_sqlite_persist_failure_does_not_propagate(
+    tmp_path, monkeypatch
+):
+    """SQLite 書き込み失敗時も呼び出し側に例外を伝播させない（fail-open 原則）"""
+    from hokusai.config import set_config
+    from hokusai.config.models import WorkflowConfig
+
+    # 存在しない path を指定して SQLite 接続を意図的に壊す経路の代わりに、
+    # SQLiteStore.add_audit_log を例外を投げる関数で差し替える
+    cfg = WorkflowConfig(
+        llm_gateway=LLMGatewayConfig(enabled=True, audit_log_enabled=True),
+        data_dir=tmp_path,
+    )
+    cfg.database_path = tmp_path / "workflow.db"
+    set_config(cfg)
+
+    def _raising_add_audit_log(self, **kwargs):
+        raise RuntimeError("simulated sqlite failure")
+
+    monkeypatch.setattr(
+        "hokusai.persistence.sqlite_store.SQLiteStore.add_audit_log",
+        _raising_add_audit_log,
+    )
+
+    interceptor = LLMGatewayInterceptor(cfg.llm_gateway)
+    # 例外が漏れず通常通り decision が返ってくる
+    decision = interceptor.intercept(
+        LLMGatewayContext(
+            provider="claude_code", workflow_id="wf-anything", phase=3
+        ),
+        "x",
+    )
+    assert decision.decision == "log"
+    assert decision.audit_emitted is True
+
+
+def test_interceptor_phase_is_normalized_consistently_in_logger_and_sqlite(
+    tmp_path, caplog
+):
+    """phase=None のとき logger と SQLite で同じ値 (0 に正規化) を使う
+    （Issue #80 Copilot Round 1 指摘: 同一レコード内の phase 表現を統一）"""
+    import sqlite3
+
+    from hokusai.config import set_config
+    from hokusai.config.models import WorkflowConfig
+    from hokusai.persistence.sqlite_store import SQLiteStore
+
+    db_path = tmp_path / "workflow.db"
+    cfg = WorkflowConfig(
+        llm_gateway=LLMGatewayConfig(enabled=True, audit_log_enabled=True),
+        data_dir=tmp_path,
+    )
+    cfg.database_path = db_path
+    set_config(cfg)
+
+    SQLiteStore(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO workflows (workflow_id, task_url, state_json, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("wf-phase-norm", "https://example/issue/1", "{}", "now", "now"),
+        )
+        conn.commit()
+
+    interceptor = LLMGatewayInterceptor(cfg.llm_gateway)
+    with caplog.at_level(logging.INFO, logger="hokusai.llm_gateway"):
+        interceptor.intercept(
+            # phase 未指定 → None
+            LLMGatewayContext(provider="claude_code", workflow_id="wf-phase-norm"),
+            "x",
+        )
+
+    # logger 側の audit entry を取得
+    audit_records = [
+        r for r in caplog.records if "llm_gateway_audit" in r.message
+    ]
+    assert len(audit_records) == 1
+    payload = json.loads(
+        audit_records[0].message.split("llm_gateway_audit ", 1)[1]
+    )
+    assert payload["context"]["phase"] == 0  # None → 0 に正規化
+
+    # SQLite 側の phase も 0
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT phase FROM audit_logs WHERE workflow_id = ?",
+            ("wf-phase-norm",),
+        ).fetchone()
+        assert row[0] == 0
+
+
+def test_interceptor_reuses_sqlite_store_across_intercepts(
+    tmp_path, monkeypatch
+):
+    """同 database_path への複数 intercept で SQLiteStore.__init__ が再実行
+    されない（Issue #80 Copilot Round 1/3 指摘: 監査ログ 1 件ごとに store を
+    生成すると _init_db が毎回走りレイテンシ / ロック競合の原因になる）。
+
+    private cache (`_AUDIT_STORE_CACHE`) には直接依存せず、SQLiteStore.__init__
+    の呼び出し回数を spy で外形的に検証する（Round 3 指摘: 実装詳細への
+    過度な依存を避ける）。
+    """
+    import sqlite3
+
+    from hokusai.config import set_config
+    from hokusai.config.models import WorkflowConfig
+    from hokusai.persistence.sqlite_store import SQLiteStore
+
+    db_path = tmp_path / "workflow.db"
+    cfg = WorkflowConfig(
+        llm_gateway=LLMGatewayConfig(enabled=True, audit_log_enabled=True),
+        data_dir=tmp_path,
+    )
+    cfg.database_path = db_path
+    set_config(cfg)
+
+    # SQLiteStore + workflow レコードを準備（test setup でも __init__ が走るので
+    # spy 開始は setup 完了後にする）
+    SQLiteStore(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO workflows (workflow_id, task_url, state_json, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("wf-reuse", "https://example/issue/1", "{}", "now", "now"),
+        )
+        conn.commit()
+
+    # SQLiteStore.__init__ の呼び出し回数を spy（dispatch helper / interceptor
+    # 経由の呼び出しだけを数える）
+    original_init = SQLiteStore.__init__
+    init_call_count = 0
+
+    def _counting_init(self, *args, **kwargs):
+        nonlocal init_call_count
+        init_call_count += 1
+        original_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(SQLiteStore, "__init__", _counting_init)
+
+    # 3 回 intercept しても SQLiteStore.__init__ は **1 回** しか呼ばれない
+    # （初回でキャッシュ、2-3 回目は再利用）
+    interceptor = LLMGatewayInterceptor(cfg.llm_gateway)
+    for i in range(1, 4):
+        interceptor.intercept(
+            LLMGatewayContext(
+                provider="claude_code",
+                workflow_id="wf-reuse",
+                phase=i,
+            ),
+            f"prompt-{i}",
+        )
+
+    assert init_call_count == 1, (
+        f"SQLiteStore.__init__ should be called only once for same database_path, "
+        f"but was called {init_call_count} times"
+    )
+
+    # 3 回分の audit_logs が記録されている（外形検証）
+    monkeypatch.setattr(SQLiteStore, "__init__", original_init)
+    store = SQLiteStore(db_path)
+    logs = store.get_audit_logs("wf-reuse")
+    assert len(logs) == 3
 
 
 def test_interceptor_hash_is_deterministic_for_same_prompt(caplog):

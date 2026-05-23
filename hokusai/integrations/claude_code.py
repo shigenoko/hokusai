@@ -234,6 +234,8 @@ class ClaudeCodeClient:
         purpose: str,
         *,
         append_system_prompt: str | None = None,
+        workflow_id: str | None = None,
+        phase: int | None = None,
     ) -> None:
         """LLM Gateway interceptor を呼んで decision を log する（#39 / Phase 1）。
 
@@ -285,6 +287,8 @@ class ClaudeCodeClient:
                 purpose=purpose,
                 prompt=prompt,
                 metadata=metadata,
+                workflow_id=workflow_id,
+                phase=phase,
             )
         except Exception as exc:
             # 第一選択: dispatch.log_suppressed_exception で 3 client 統一。
