@@ -17,16 +17,24 @@ from hokusai.integrations.task_backend.github_issue import (
     GitHubIssueOperationResult,
     GitHubIssueResult,
 )
-from hokusai.utils.shell import ShellError
+from hokusai.utils.shell import ShellError, ShellResult
 
 
 def _make_shell_error(stderr: str, returncode: int = 1) -> ShellError:
-    """ShellError のモック生成"""
-    result = MagicMock()
-    result.stderr = stderr
-    result.stdout = ""
-    result.returncode = returncode
-    result.cmd = "gh issue edit ..."
+    """ShellError を本物の `ShellResult` から組み立てる（PR #74 Copilot Round 2
+    指摘）。
+
+    `ShellError.__init__` は `result.command` (list[str]) を `' '.join()` する
+    ため、MagicMock で `cmd: str` を持たせるだけでは `TypeError` で例外生成
+    自体が失敗し、テストが不安定になる。本物の `ShellResult` を使って
+    interface 準拠を保証する。
+    """
+    result = ShellResult(
+        returncode=returncode,
+        stdout="",
+        stderr=stderr,
+        command=["gh", "issue", "edit", "42", "--add-label", "進行中"],
+    )
     return ShellError(result)
 
 
