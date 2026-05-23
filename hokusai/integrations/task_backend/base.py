@@ -31,35 +31,46 @@ class TaskBackendClient(ABC):
         ...
 
     @abstractmethod
-    def update_status(self, task_url: str, status: str) -> None:
+    def update_status(self, task_url: str, status: str) -> Any:
         """
         ステータスを更新
 
         Args:
             task_url: タスクのURL
             status: 新しいステータス
+
+        Returns:
+            実装依存。Notion バックエンドは `NotionOperationResult` を返し、
+            呼び出し側で audit log の生成に使う。それ以外の実装は `None` を
+            返してよい（戻り値を使わない呼び出し側との互換は維持される）。
         """
         ...
 
     @abstractmethod
-    def append_progress(self, task_url: str, content: str) -> None:
+    def append_progress(self, task_url: str, content: str) -> Any:
         """
         進捗記録を追記（末尾に追加）
 
         Args:
             task_url: タスクのURL
             content: 追記する内容（Markdown形式）
+
+        Returns:
+            実装依存。`update_status` と同じ規約。
         """
         ...
 
     @abstractmethod
-    def prepend_content(self, task_url: str, content: str) -> None:
+    def prepend_content(self, task_url: str, content: str) -> Any:
         """
         コンテンツを先頭に追記
 
         Args:
             task_url: タスクのURL
             content: 先頭に追記する内容（Markdown形式）
+
+        Returns:
+            実装依存。`update_status` と同じ規約。
         """
         ...
 
