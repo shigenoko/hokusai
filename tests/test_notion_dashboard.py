@@ -3305,6 +3305,40 @@ def test_check_db_share_health_treats_5xx_as_non_share_error(store, monkeypatch)
     assert "500" in msg
 
 
+def test_check_db_share_health_uses_preflight_client_with_max_attempts_one(
+    store, monkeypatch
+):
+    """preflight 用 client は max_attempts=1 で構築され、Notion outage 時の
+    ブロック時間を抑える（Issue #82 Copilot Round 3 指摘）"""
+    monkeypatch.setenv("TEST_TOKEN", "secret")
+    monkeypatch.setenv("TEST_DB", "db-network")
+
+    constructed_clients: list[dict] = []
+    original_init = NotionAPIClient.__init__
+
+    def _spy_init(self, api_token, **kwargs):
+        constructed_clients.append({"api_token": api_token, **kwargs})
+        original_init(self, api_token, **kwargs)
+
+    monkeypatch.setattr(NotionAPIClient, "__init__", _spy_init)
+    # retrieve_database は何でも成功にする（preflight client が使われた
+    # ことだけ検証）
+    monkeypatch.setattr(
+        NotionAPIClient, "retrieve_database", lambda self, db_id: {"id": db_id}
+    )
+
+    disp = NotionSyncDispatcher(store=store, config=_make_config())
+    disp.check_db_share_health()
+
+    # preflight 用 client は max_attempts=1 で生成されている
+    preflight_init_calls = [
+        c for c in constructed_clients if c.get("max_attempts") == 1
+    ]
+    assert preflight_init_calls, (
+        "preflight 用 NotionAPIClient (max_attempts=1) が生成されなかった"
+    )
+
+
 def test_check_db_share_health_does_not_false_positive_on_404_in_message(
     store, monkeypatch
 ):

@@ -126,9 +126,33 @@ class NotionSyncDispatcher:
             (False, "...") として返すだけで、例外は呼び出し側に伝播させない。
             呼び出し側（hokusai start）はこの結果を warning として表示し
             workflow 自体は継続する。
+
+            **preflight client**: 通常 dispatch 用の NotionAPIClient ではなく、
+            retry を 1 回に絞った専用 client を使う（Issue #82 Copilot Round 3
+            指摘）。本 helper は `hokusai start` 冒頭で呼ばれるため、Notion
+            outage 時に通常の retry policy （max_attempts=3, backoff_seconds=5
+            等）で各 DB を試すと最大 6 DB × N retry でブロック時間が数分に
+            膨れる。Preflight としては早く失敗してその情報を返す方が、
+            workflow start の起動時間を保てる。
         """
         if not self.is_configured():
             return {}
+
+        api_token = os.environ.get(self._config.api_token_env)
+        if not api_token:
+            # is_configured() で確認済だが念のため
+            return {}
+
+        # Preflight 専用の retry なし client（NotionAPIClient.__init__ は
+        # max_attempts=max(1, ...) なので 1 が下限）。timeout は通常 client
+        # の半分以下（5 秒）で、network 障害時のブロック時間を短くする。
+        preflight_api = NotionAPIClient(
+            api_token=api_token,
+            max_attempts=1,
+            backoff_seconds=0.5,
+            requests_per_second=self._config.rate_limit.requests_per_second,
+            timeout=5.0,
+        )
 
         # NotionDashboardConfig に存在する全 DB env を列挙
         db_envs = [
@@ -147,7 +171,7 @@ class NotionSyncDispatcher:
                 # env 未設定の DB は dogfooding 中も「未設定」が正しい状態なので skip
                 continue
             try:
-                self._get_api().retrieve_database(db_id)
+                preflight_api.retrieve_database(db_id)
                 results[env_name] = (True, None)
             except NotionAPIError as e:
                 # 404 (integration not shared) を構造化された status 属性で判定する
