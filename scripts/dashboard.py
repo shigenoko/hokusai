@@ -8377,13 +8377,13 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 {"success": False, "errors": [f"Unknown prompt ID: {prompt_id}"]},
                 status_code=404,
             )
-        except ValueError as e:
-            self._send_json_response(
-                {"success": False, "errors": [str(e)]}, status_code=400
-            )
         except json.JSONDecodeError:
             self._send_json_response(
                 {"success": False, "errors": ["JSONパースエラー"]}, status_code=400
+            )
+        except ValueError as e:
+            self._send_json_response(
+                {"success": False, "errors": [str(e)]}, status_code=400
             )
         except Exception as e:
             self._send_json_response(

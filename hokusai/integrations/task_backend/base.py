@@ -5,7 +5,22 @@ Task Backend Base
 """
 
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
+
+
+@runtime_checkable
+class TaskOperationResult(Protocol):
+    """task backend 操作の構造化結果プロトコル。
+
+    `update_status` / `append_progress` / `prepend_content` の戻り値の最小
+    インターフェース。呼び出し側は `result.result.value` と `result.reason`
+    を audit log の生成に使う。
+
+    実装例: `hokusai.integrations.task_backend.notion.NotionOperationResult`
+    """
+
+    result: Any  # enum-like — `.value` で str を取り出せることを想定
+    reason: str | None
 
 
 class TaskBackendClient(ABC):
@@ -31,35 +46,54 @@ class TaskBackendClient(ABC):
         ...
 
     @abstractmethod
-    def update_status(self, task_url: str, status: str) -> None:
+    def update_status(
+        self, task_url: str, status: str
+    ) -> "TaskOperationResult | None":
         """
         ステータスを更新
 
         Args:
             task_url: タスクのURL
             status: 新しいステータス
+
+        Returns:
+            複数の backend が構造化結果（`TaskOperationResult` 準拠 dataclass）を
+            返し得る。呼び出し側は `hasattr(result, 'result')` で audit log を
+            生成する想定（phase1_prepare.py 参照）。Notion は
+            `NotionOperationResult`、GitHub Issue は `GitHubIssueOperationResult`
+            を返す（Issue #73 で追加）。`None` を返す実装も互換性のため許容。
         """
         ...
 
     @abstractmethod
-    def append_progress(self, task_url: str, content: str) -> None:
+    def append_progress(
+        self, task_url: str, content: str
+    ) -> "TaskOperationResult | None":
         """
         進捗記録を追記（末尾に追加）
 
         Args:
             task_url: タスクのURL
             content: 追記する内容（Markdown形式）
+
+        Returns:
+            実装依存。`update_status` と同じ規約。
         """
         ...
 
     @abstractmethod
-    def prepend_content(self, task_url: str, content: str) -> None:
+    def prepend_content(
+        self, task_url: str, content: str
+    ) -> "TaskOperationResult | None":
         """
         コンテンツを先頭に追記
 
         Args:
             task_url: タスクのURL
             content: 先頭に追記する内容（Markdown形式）
+
+        Returns:
+            実装依存。`update_status` と同じ規約。
         """
         ...
 
