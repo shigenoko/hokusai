@@ -658,3 +658,171 @@ def test_claude_code_client_skips_interceptor_when_llm_gateway_missing(
     assert result == "ok"
     audit_records = [r for r in caplog.records if "llm_gateway_audit" in r.message]
     assert audit_records == []
+
+
+# ---------------------------------------------------------------------------
+# CodexClient → interceptor 配線（Issue #62）
+# ---------------------------------------------------------------------------
+
+
+class _FakeCompletedProcess:
+    """subprocess.run の戻り値モック（CodexClient.review_document が使う形）"""
+
+    def __init__(
+        self,
+        stdout: str = '{"summary": "ok", "issues": []}',
+        stderr: str = "",
+        returncode: int = 0,
+    ):
+        self.stdout = stdout
+        self.stderr = stderr
+        self.returncode = returncode
+
+
+def _make_codex_client(monkeypatch, model: str = "codex-mini-latest"):
+    """CodexClient を codex コマンド検出スキップ付きで生成"""
+    from hokusai.integrations.codex import CodexClient
+
+    monkeypatch.setattr(
+        CodexClient, "_find_codex_command", lambda self: "/usr/bin/false"
+    )
+    return CodexClient(model=model)
+
+
+def test_codex_client_invokes_interceptor_on_review(monkeypatch, caplog):
+    """CodexClient.review_document が呼ばれると interceptor も呼ばれ、
+    provider="codex" / model=self.model が audit に記録される。"""
+    from hokusai.config import set_config
+    from hokusai.config.models import WorkflowConfig
+
+    cfg = WorkflowConfig(
+        llm_gateway=LLMGatewayConfig(enabled=True, audit_log_enabled=True),
+    )
+    set_config(cfg)
+
+    client = _make_codex_client(monkeypatch, model="codex-mini-latest")
+    # 実 subprocess を起動しない
+    monkeypatch.setattr(
+        "hokusai.integrations.codex.subprocess.run",
+        lambda *a, **kw: _FakeCompletedProcess(),
+    )
+
+    with caplog.at_level(logging.INFO, logger="hokusai.llm_gateway"):
+        result = client.review_document(
+            document="hello world", review_prompt="review please"
+        )
+    assert result == {"summary": "ok", "issues": []}
+
+    audit_records = [
+        r for r in caplog.records if "llm_gateway_audit" in r.message
+    ]
+    assert len(audit_records) == 1
+    payload = json.loads(
+        audit_records[0].message.split("llm_gateway_audit ", 1)[1]
+    )
+    assert payload["context"]["provider"] == "codex"
+    assert payload["context"]["model"] == "codex-mini-latest"
+    assert payload["context"]["purpose"] == "cross_review"
+    # schema_path 省略時は has_schema=False
+    assert payload["context"]["metadata"]["has_schema"] is False
+    assert payload["decision"] == "log"
+
+
+def test_codex_client_interceptor_records_has_schema_flag(monkeypatch, caplog):
+    """schema_path を渡すと metadata.has_schema が True になる"""
+    from hokusai.config import set_config
+    from hokusai.config.models import WorkflowConfig
+
+    cfg = WorkflowConfig(
+        llm_gateway=LLMGatewayConfig(enabled=True, audit_log_enabled=True),
+    )
+    set_config(cfg)
+
+    client = _make_codex_client(monkeypatch)
+    monkeypatch.setattr(
+        "hokusai.integrations.codex.subprocess.run",
+        lambda *a, **kw: _FakeCompletedProcess(),
+    )
+
+    with caplog.at_level(logging.INFO, logger="hokusai.llm_gateway"):
+        client.review_document(
+            document="doc",
+            review_prompt="prompt",
+            schema_path="/fake/schema.json",
+        )
+
+    audit_records = [
+        r for r in caplog.records if "llm_gateway_audit" in r.message
+    ]
+    payload = json.loads(
+        audit_records[0].message.split("llm_gateway_audit ", 1)[1]
+    )
+    assert payload["context"]["metadata"]["has_schema"] is True
+
+
+def test_codex_client_interceptor_swallows_exceptions(monkeypatch):
+    """interceptor が例外を投げても review_document は副作用なく続行する"""
+    client = _make_codex_client(monkeypatch)
+    monkeypatch.setattr(
+        "hokusai.integrations.codex.subprocess.run",
+        lambda *a, **kw: _FakeCompletedProcess(),
+    )
+    # interceptor 内で get_config を壊して例外を発生させる
+    def _raising_get_config():
+        raise RuntimeError("config broken")
+
+    monkeypatch.setattr("hokusai.config.get_config", _raising_get_config)
+
+    # 例外が漏れず通常結果を返すこと
+    result = client.review_document(document="d", review_prompt="r")
+    assert result == {"summary": "ok", "issues": []}
+
+
+def test_codex_client_skips_interceptor_when_llm_gateway_missing(
+    monkeypatch, caplog
+):
+    """llm_gateway 属性が config にない場合は audit を出さず透過する"""
+    from hokusai.config import set_config
+    from hokusai.config.models import WorkflowConfig
+
+    cfg = WorkflowConfig()
+    cfg.llm_gateway = None  # type: ignore[assignment]
+    set_config(cfg)
+
+    client = _make_codex_client(monkeypatch)
+    monkeypatch.setattr(
+        "hokusai.integrations.codex.subprocess.run",
+        lambda *a, **kw: _FakeCompletedProcess(),
+    )
+
+    with caplog.at_level(logging.INFO, logger="hokusai.llm_gateway"):
+        result = client.review_document(document="d", review_prompt="r")
+    assert result == {"summary": "ok", "issues": []}
+    audit_records = [
+        r for r in caplog.records if "llm_gateway_audit" in r.message
+    ]
+    assert audit_records == []
+
+
+def test_codex_client_proceeds_when_gateway_disabled(monkeypatch, caplog):
+    """gateway disabled でも subprocess 呼び出しは続行する（block しない）"""
+    from hokusai.config import set_config
+    from hokusai.config.models import WorkflowConfig
+
+    cfg = WorkflowConfig(llm_gateway=LLMGatewayConfig(enabled=False))
+    set_config(cfg)
+
+    client = _make_codex_client(monkeypatch)
+    monkeypatch.setattr(
+        "hokusai.integrations.codex.subprocess.run",
+        lambda *a, **kw: _FakeCompletedProcess(),
+    )
+
+    with caplog.at_level(logging.INFO, logger="hokusai.llm_gateway"):
+        result = client.review_document(document="d", review_prompt="r")
+    assert result == {"summary": "ok", "issues": []}
+    # disabled なので audit log は出ない
+    audit_records = [
+        r for r in caplog.records if "llm_gateway_audit" in r.message
+    ]
+    assert audit_records == []
