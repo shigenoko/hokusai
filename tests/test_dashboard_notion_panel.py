@@ -94,7 +94,11 @@ def test_get_notion_dispatcher_returns_dispatcher(isolated_dashboard):
         data_dir=isolated_dashboard.DB_PATH.parent,
         database_path=isolated_dashboard.DB_PATH,
         checkpoint_db_path=isolated_dashboard.DB_PATH.parent / "cp.db",
-        notion_dashboard=NotionDashboardConfig(enabled=True),
+        notion_dashboard=NotionDashboardConfig(
+            enabled=True,
+            api_token_env="NONEXISTENT_TOKEN",
+            workflows_db_id_env="NONEXISTENT_DB",
+        ),
     )
     set_config(cfg)
     disp = isolated_dashboard._get_notion_dispatcher()

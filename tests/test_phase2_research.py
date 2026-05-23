@@ -526,6 +526,10 @@ class TestPhase2RawOutputSave:
 class TestVerifySubpageContent:
     """_verify_subpage_content の検証テスト"""
 
+    @pytest.fixture(autouse=True)
+    def _clear_skip_notion(self, monkeypatch):
+        monkeypatch.delenv("HOKUSAI_SKIP_NOTION", raising=False)
+
     def _build_state(self):
         phase_template = {
             "status": "pending",
