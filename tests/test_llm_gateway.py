@@ -435,6 +435,116 @@ def test_interceptor_sqlite_persist_failure_does_not_propagate(
     assert decision.audit_emitted is True
 
 
+def test_interceptor_phase_is_normalized_consistently_in_logger_and_sqlite(
+    tmp_path, caplog
+):
+    """phase=None のとき logger と SQLite で同じ値 (0 に正規化) を使う
+    （Issue #80 Copilot Round 1 指摘: 同一レコード内の phase 表現を統一）"""
+    import sqlite3
+
+    from hokusai.config import set_config
+    from hokusai.config.models import WorkflowConfig
+    from hokusai.persistence.sqlite_store import SQLiteStore
+
+    db_path = tmp_path / "workflow.db"
+    cfg = WorkflowConfig(
+        llm_gateway=LLMGatewayConfig(enabled=True, audit_log_enabled=True),
+        data_dir=tmp_path,
+    )
+    cfg.database_path = db_path
+    set_config(cfg)
+
+    SQLiteStore(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO workflows (workflow_id, task_url, state_json, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("wf-phase-norm", "https://example/issue/1", "{}", "now", "now"),
+        )
+        conn.commit()
+
+    interceptor = LLMGatewayInterceptor(cfg.llm_gateway)
+    with caplog.at_level(logging.INFO, logger="hokusai.llm_gateway"):
+        interceptor.intercept(
+            # phase 未指定 → None
+            LLMGatewayContext(provider="claude_code", workflow_id="wf-phase-norm"),
+            "x",
+        )
+
+    # logger 側の audit entry を取得
+    audit_records = [
+        r for r in caplog.records if "llm_gateway_audit" in r.message
+    ]
+    assert len(audit_records) == 1
+    payload = json.loads(
+        audit_records[0].message.split("llm_gateway_audit ", 1)[1]
+    )
+    assert payload["context"]["phase"] == 0  # None → 0 に正規化
+
+    # SQLite 側の phase も 0
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT phase FROM audit_logs WHERE workflow_id = ?",
+            ("wf-phase-norm",),
+        ).fetchone()
+        assert row[0] == 0
+
+
+def test_interceptor_reuses_sqlite_store_across_intercepts(tmp_path):
+    """SQLiteStore は database_path 単位で再利用される（Issue #80 Copilot Round 1
+    指摘: 監査ログ 1 件ごとに store を生成すると _init_db が毎回走り
+    レイテンシ / ロック競合の原因になる）"""
+    import sqlite3
+
+    from hokusai.config import set_config
+    from hokusai.config.models import WorkflowConfig
+    from hokusai.persistence.sqlite_store import SQLiteStore
+
+    db_path = tmp_path / "workflow.db"
+    cfg = WorkflowConfig(
+        llm_gateway=LLMGatewayConfig(enabled=True, audit_log_enabled=True),
+        data_dir=tmp_path,
+    )
+    cfg.database_path = db_path
+    set_config(cfg)
+
+    SQLiteStore(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO workflows (workflow_id, task_url, state_json, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("wf-reuse", "https://example/issue/1", "{}", "now", "now"),
+        )
+        conn.commit()
+
+    interceptor = LLMGatewayInterceptor(cfg.llm_gateway)
+
+    # 1 回目の intercept で SQLiteStore がキャッシュされる
+    interceptor.intercept(
+        LLMGatewayContext(
+            provider="claude_code", workflow_id="wf-reuse", phase=1
+        ),
+        "first",
+    )
+    db_path_key = str(db_path)
+    assert db_path_key in interceptor._audit_store_cache
+    first_store = interceptor._audit_store_cache[db_path_key]
+
+    # 2 回目の intercept で同じ instance が再利用される
+    interceptor.intercept(
+        LLMGatewayContext(
+            provider="claude_code", workflow_id="wf-reuse", phase=2
+        ),
+        "second",
+    )
+    assert interceptor._audit_store_cache[db_path_key] is first_store
+
+    # 2 回分の audit_logs が記録されている
+    store = SQLiteStore(db_path)
+    logs = store.get_audit_logs("wf-reuse")
+    assert len(logs) == 2
+
+
 def test_interceptor_hash_is_deterministic_for_same_prompt(caplog):
     """同じ prompt は同じ prompt_hash を返す（dedupe / 再現性のため）。
 

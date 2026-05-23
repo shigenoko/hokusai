@@ -59,6 +59,12 @@ class LLMGatewayInterceptor:
 
     def __init__(self, config: LLMGatewayConfig):
         self._config = config
+        # SQLiteStore の lazy 初期化 + 再利用キャッシュ（Issue #80 Copilot Round 1
+        # 指摘）。`SQLiteStore.__init__` が DDL/PRAGMA/INDEX 作成を含むため、
+        # 監査ログ 1 件ごとに生成するとレイテンシ / ロック競合の原因になる。
+        # database_path 単位でキャッシュ（profile 切替 / テストで path が変わる
+        # ケースに対応するため key を database_path にする）。
+        self._audit_store_cache: dict[str, object] = {}
 
     def intercept(
         self, context: LLMGatewayContext, prompt: str
@@ -169,10 +175,17 @@ class LLMGatewayInterceptor:
         **永続化** (Issue #80 / M0.1): logger.info で 1 行構造化ログを出すと
         同時に、`context.workflow_id` が埋まっていれば SQLite `audit_logs`
         テーブルにも INSERT する。Phase 2 enforcement で「なぜ block されたか」
-        を後追いできる土台。workflow_id が None / "" のときは FK 制約違反を
-        避けるため SQLite 書き込みを skip（logger 出力は継続）。
+        を後追いできる土台。workflow_id が None / "" のときは orphan レコード
+        回避と NOT NULL 違反回避のため SQLite 書き込みを skip（logger 出力は
+        継続）。なお SQLite 側は `PRAGMA foreign_keys=OFF` デフォルトのため、
+        FK 自体は検証されない。
         """
         prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
+        # phase を logger / SQLite で同じ値に揃える（None なら 0 sentinel に正規化）。
+        # SQLite 側は `audit_logs.phase` が INTEGER NOT NULL のため None を入れられず、
+        # logger 側だけ None で残ると同一レコード内で表現が割れるので統一する
+        # （Issue #80 Copilot Round 1 指摘）。
+        phase_normalized = context.phase if context.phase is not None else 0
         # dataclasses.asdict は MappingProxyType を deepcopy しようとして
         # `cannot pickle 'mappingproxy' object` で落ちるため、context dict は
         # 明示的に組み立てる（metadata は dict にコピーして展開）。
@@ -181,7 +194,7 @@ class LLMGatewayInterceptor:
             "model": context.model,
             "purpose": context.purpose,
             "workflow_id": context.workflow_id,
-            "phase": context.phase,
+            "phase": phase_normalized,
             "metadata": dict(context.metadata),
         }
         entry = {
@@ -220,12 +233,13 @@ class LLMGatewayInterceptor:
 
         # SQLite audit_logs テーブルへの永続化（Issue #80 / M0.1）。
         # logger.info 出力とは独立に SQLite に書く。workflow_id が無い
-        # interceptor 呼び出し（CLI 起動初期 / テスト等）は FK 制約違反を
-        # 避けるため skip。書き込み失敗は完全に握り潰す（fail-open 原則）。
+        # interceptor 呼び出し（CLI 起動初期 / テスト等）は orphan レコード
+        # 回避と NOT NULL 違反回避のため skip。書き込み失敗は完全に握り潰す
+        # （fail-open 原則）。
         if context.workflow_id:
             self._persist_audit_to_sqlite(
                 workflow_id=context.workflow_id,
-                phase=context.phase if context.phase is not None else 0,
+                phase=phase_normalized,
                 decision=decision,
                 entry=entry,
             )
@@ -246,13 +260,21 @@ class LLMGatewayInterceptor:
 
         失敗時は debug log に型名 + frame のみ残して呼び出し側へは伝播
         させない（`dispatch.log_suppressed_exception` と同じ思想）。
+
+        SQLiteStore は database_path 単位でキャッシュし、同 path での 2 回目
+        以降の呼び出しは DDL/PRAGMA/INDEX の再実行を避ける（Issue #80 Copilot
+        Round 1 指摘: レイテンシ / ロック競合対策）。
         """
         try:
             from ..config import get_config
             from ..persistence.sqlite_store import SQLiteStore
 
             config = get_config()
-            store = SQLiteStore(config.database_path)
+            db_path_key = str(config.database_path)
+            store = self._audit_store_cache.get(db_path_key)
+            if store is None:
+                store = SQLiteStore(config.database_path)
+                self._audit_store_cache[db_path_key] = store
             store.add_audit_log(
                 workflow_id=workflow_id,
                 phase=phase,
