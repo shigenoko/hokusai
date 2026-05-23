@@ -38,11 +38,19 @@ def log_suppressed_exception(message: str, exc: BaseException) -> None:
         message: ログの先頭メッセージ（呼び出し文脈の説明、user-controlled な
             値を含めない）
         exc: 抑制した例外
+
+    Notes:
+        本関数自体は **絶対に例外を投げない**。`exc.__traceback__ is None`
+        （未 raise の例外や traceback が失われたケース）でも空 frame として
+        log を出すだけにする（PR #67 Copilot Round 2 指摘）。
     """
-    frames = traceback.extract_tb(exc.__traceback__)
-    frame_summary = [
-        f"{f.filename}:{f.lineno} in {f.name}" for f in frames
-    ]
+    if exc.__traceback__ is None:
+        frame_summary: list[str] = []
+    else:
+        frames = traceback.extract_tb(exc.__traceback__)
+        frame_summary = [
+            f"{f.filename}:{f.lineno} in {f.name}" for f in frames
+        ]
     logger.debug(
         "%s (type=%s, frames=%s)",
         message,

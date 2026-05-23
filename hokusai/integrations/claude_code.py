@@ -246,39 +246,51 @@ class ClaudeCodeClient:
         `hokusai.llm_gateway.dispatch_via_gateway` の docstring を参照
         （PR #66 で 3 client から DRY 化）。
         """
-        from ..llm_gateway import dispatch_via_gateway
-        from ..llm_gateway.dispatch import log_suppressed_exception
+        try:
+            # 軽量パス（dispatch module）から直接 import し、`__init__.py` の
+            # policy/decisions 等まで巻き込まれる依存を避ける。import 時例外
+            # （循環参照 / 依存欠落）も含めて握り潰すため try/except で囲む
+            # （PR #67 Copilot Round 2 指摘）。
+            from ..llm_gateway.dispatch import (
+                dispatch_via_gateway,
+                log_suppressed_exception,
+            )
 
-        metadata: dict[str, object] = {}
-        if append_system_prompt:
-            # encode が失敗（不正サロゲート等で UnicodeEncodeError）した場合
-            # でもワークフローを落とさないよう metadata 構築自体を try/except
-            # で握り潰し、helper 呼び出しは継続する。append_system_prompt の
-            # hash/length は audit の補助情報であり、欠落しても interceptor 配線
-            # 全体は機能する（PR #67 Copilot Round 1 指摘）。
-            try:
-                import hashlib
+            metadata: dict[str, object] = {}
+            if append_system_prompt:
+                # encode が失敗（不正サロゲート等で UnicodeEncodeError）した
+                # 場合でもワークフローを落とさないよう metadata 構築自体を
+                # try/except で握り潰し、helper 呼び出しは継続する。
+                # append_system_prompt の hash/length は audit の補助情報で
+                # あり、欠落しても interceptor 配線全体は機能する。
+                try:
+                    import hashlib
 
-                encoded = append_system_prompt.encode("utf-8")
-                metadata["append_system_prompt_length"] = len(append_system_prompt)
-                metadata["append_system_prompt_hash"] = hashlib.sha256(
-                    encoded
-                ).hexdigest()[:16]
-            except Exception as exc:
-                # exc_info を使わずサニタイズした log を残す（user-controlled な
-                # append_system_prompt が例外メッセージに混入するリスクを排除）
-                log_suppressed_exception(
-                    "append_system_prompt の hash 計算に失敗。metadata を省略して継続",
-                    exc,
-                )
+                    encoded = append_system_prompt.encode("utf-8")
+                    metadata["append_system_prompt_length"] = len(
+                        append_system_prompt
+                    )
+                    metadata["append_system_prompt_hash"] = hashlib.sha256(
+                        encoded
+                    ).hexdigest()[:16]
+                except Exception as exc:
+                    log_suppressed_exception(
+                        "append_system_prompt の hash 計算に失敗。metadata を省略して継続",
+                        exc,
+                    )
 
-        dispatch_via_gateway(
-            provider="claude_code",
-            model="",
-            purpose=purpose,
-            prompt=prompt,
-            metadata=metadata,
-        )
+            dispatch_via_gateway(
+                provider="claude_code",
+                model="",
+                purpose=purpose,
+                prompt=prompt,
+                metadata=metadata,
+            )
+        except Exception:
+            # log_suppressed_exception 自体が import できていない可能性が
+            # あるため fallback として標準 logger を直接使う（メッセージ本文
+            # は含めない: secret/PII が混入するリスク排除）
+            logger.debug("LLM Gateway interceptor 呼び出しに失敗（import 含む）")
 
     def _parse_skill_result(self, skill: str, output: str) -> dict[str, Any]:
         """

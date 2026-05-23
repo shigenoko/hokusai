@@ -142,18 +142,29 @@ class CodexClient:
 
         共通 dispatch helper への薄いラッパー。provider="codex" /
         model=self.model / purpose="cross_review" を埋める。詳細な safety
-        pattern と log-only 動作は `hokusai.llm_gateway.dispatch_via_gateway`
+        pattern と log-only 動作は `hokusai.llm_gateway.dispatch.dispatch_via_gateway`
         の docstring を参照（PR #66 で 3 client から DRY 化）。
-        """
-        from ..llm_gateway import dispatch_via_gateway
 
-        dispatch_via_gateway(
-            provider="codex",
-            model=self.model,
-            purpose="cross_review",
-            prompt=prompt,
-            metadata={"has_schema": has_schema},
-        )
+        **既存フローへの影響をゼロに保つため**、import を含めて try/except
+        で握り潰す。`hokusai.llm_gateway.dispatch` から直接 import することで
+        `__init__.py` の policy/decisions 等まで巻き込まれる依存を軽量化する
+        （PR #67 Copilot Round 2 指摘）。
+        """
+        try:
+            from ..llm_gateway.dispatch import dispatch_via_gateway
+
+            dispatch_via_gateway(
+                provider="codex",
+                model=self.model,
+                purpose="cross_review",
+                prompt=prompt,
+                metadata={"has_schema": has_schema},
+            )
+        except Exception:
+            # log_suppressed_exception 自体が import できない可能性があるため
+            # 標準 logger.debug を fallback として直接使う（メッセージ本文も
+            # 含めない: secret/PII が呼び出し側経由で混入するリスク排除）
+            logger.debug("LLM Gateway interceptor 呼び出しに失敗（import 含む）")
 
     def _parse_output(self, output: str) -> dict[str, Any]:
         """Codex出力をパース"""

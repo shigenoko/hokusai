@@ -252,18 +252,26 @@ class GeminiClient:
         共通 dispatch helper への薄いラッパー。provider="gemini" /
         model=self.model を埋め、purpose は呼び出し側（review_document か
         generate）で渡す。詳細な safety pattern と log-only 動作は
-        `hokusai.llm_gateway.dispatch_via_gateway` の docstring を参照
+        `hokusai.llm_gateway.dispatch.dispatch_via_gateway` の docstring を参照
         （PR #66 で 3 client から DRY 化）。
-        """
-        from ..llm_gateway import dispatch_via_gateway
 
-        dispatch_via_gateway(
-            provider="gemini",
-            model=self.model,
-            purpose=purpose,
-            prompt=prompt,
-            metadata=metadata or {},
-        )
+        **既存フローへの影響をゼロに保つため**、import を含めて try/except
+        で握り潰す。軽量パス（`..llm_gateway.dispatch`）から直接 import する
+        ことで `__init__.py` の policy/decisions 等まで巻き込まれる依存を
+        避ける（PR #67 Copilot Round 2 指摘）。
+        """
+        try:
+            from ..llm_gateway.dispatch import dispatch_via_gateway
+
+            dispatch_via_gateway(
+                provider="gemini",
+                model=self.model,
+                purpose=purpose,
+                prompt=prompt,
+                metadata=metadata or {},
+            )
+        except Exception:
+            logger.debug("LLM Gateway interceptor 呼び出しに失敗（import 含む）")
 
     def _run_with_stdin_prompt(
         self,

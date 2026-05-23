@@ -1239,6 +1239,50 @@ def test_log_suppressed_exception_does_not_leak_args(caplog):
     assert sensitive not in log_text  # 例外メッセージは記録されない
 
 
+def test_log_suppressed_exception_handles_null_traceback(caplog):
+    """exc.__traceback__ が None の例外（未 raise 等）を渡しても本関数自体は
+    例外を投げず空 frame として log を出す（PR #67 Copilot Round 2 指摘）"""
+    from hokusai.llm_gateway.dispatch import log_suppressed_exception
+
+    # 未 raise の例外は __traceback__ が None
+    exc = RuntimeError("never raised")
+    assert exc.__traceback__ is None
+
+    with caplog.at_level(logging.DEBUG, logger="hokusai.llm_gateway"):
+        # 関数自体が例外を投げないこと
+        log_suppressed_exception("null tb test", exc)
+
+    log_text = " ".join(r.getMessage() for r in caplog.records)
+    assert "null tb test" in log_text
+    assert "RuntimeError" in log_text
+    # 空 frame として記録される
+    assert "frames=[]" in log_text
+
+
+def test_dispatch_helper_swallows_import_error_at_callsite(monkeypatch, tmp_path):
+    """3 client は dispatch module の import が失敗してもワークフローを
+    落とさない（PR #67 Copilot Round 2 指摘）。CodexClient を例として検証。"""
+    import sys
+
+    from hokusai.integrations.codex import CodexClient
+
+    # codex の `_find_codex_command` をスキップ
+    monkeypatch.setattr(
+        CodexClient, "_find_codex_command", lambda self: "/usr/bin/false"
+    )
+    client = CodexClient(model="codex-mini-latest")
+
+    # subprocess 自体は mock しないと test 環境で失敗するのでパス。
+    # 重要なのは _invoke_llm_gateway_interceptor が例外を漏らさないこと。
+    # dispatch module import を壊して呼ぶ
+    monkeypatch.setitem(sys.modules, "hokusai.llm_gateway.dispatch", None)
+
+    # 直接 _invoke_llm_gateway_interceptor を呼ぶ
+    # （review_document を経由すると subprocess も走るため）
+    client._invoke_llm_gateway_interceptor("test prompt", has_schema=False)
+    # 例外が漏れず戻ってくれば OK
+
+
 def test_dispatch_helper_copies_metadata(caplog):
     """metadata は helper 内で dict コピーされ、呼び出し後に元 dict を書き換えても
     audit には影響しない（LLMGatewayContext が MappingProxyType でラップ済だが
