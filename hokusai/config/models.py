@@ -249,9 +249,15 @@ class LLMGatewayAllowedModelsConfig:
 
     - default: 通常利用可能 model のホワイトリスト
     - high_cost_requires_gate: Human Approval gate を要求する高額 model
+
+    `default` は要件 §4.2 上「必須」だが、後方互換のため `None` を許容して
+    「未指定」と「明示的に空配列（=deny-all）」を区別できる型にしている。
+    `None` = 未指定（後続 enforcement PR では skip 扱い、または warning）。
+    `[]` = 明示的 allowlist 空（後続 enforcement PR で deny-all 扱いを検討）。
+    後続 PR で確定する。
     """
 
-    default: list[str] = field(default_factory=list)
+    default: list[str] | None = None
     high_cost_requires_gate: list[str] = field(default_factory=list)
 
 
@@ -330,9 +336,12 @@ class LLMGatewayConfig:
     - dry_run: 送信は行うが decision を「dry-run」として log する評価モード
     - log_only: decision を block せず log のみとする（Phase 1 既定 True）
     - audit_log_enabled: interceptor 通過時に構造化 log entry を残すか
-    - allowed_providers: 利用可能 provider 名のリスト（既定 `[]`、空時は
-      Phase 1 後続実装で「未指定 = enforcement skip」として解釈予定）
+    - allowed_providers: 利用可能 provider 名のリスト。要件 §4.2 上「必須」
+      だが後方互換のため `None` を許容（未指定 = 後続 enforcement PR で
+      skip 扱い）。明示的に `[]` を指定すると「allowlist 空 = deny-all」と
+      して後続 PR で扱う方針。
     - allowed_models: default / high_cost_requires_gate の model リスト
+      （`default` も同じく未指定 / 空 を区別する）
     - spend_cap: 月次 / 日次 / workflow / phase 単位 jpy cap
     - pii_redaction: PII / secret detector 設定
     - approvals: Human Approval 必要条件
@@ -343,7 +352,7 @@ class LLMGatewayConfig:
     dry_run: bool = False
     log_only: bool = True
     audit_log_enabled: bool = True
-    allowed_providers: list[str] = field(default_factory=list)
+    allowed_providers: list[str] | None = None
     allowed_models: LLMGatewayAllowedModelsConfig = field(
         default_factory=LLMGatewayAllowedModelsConfig
     )

@@ -138,10 +138,12 @@ def test_llm_gateway_config_defaults():
     assert cfg.dry_run is False
     assert cfg.log_only is True
     assert cfg.audit_log_enabled is True
-    # 新フィールド（Issue #58）
-    assert cfg.allowed_providers == []
+    # 新フィールド（Issue #58）。allowed_providers / allowed_models.default は
+    # 「未指定 (None)」と「明示空配列 ([])」を区別する型（Copilot 指摘で
+    # 要件 §4.2 必須項目との整合を保つため）
+    assert cfg.allowed_providers is None
     assert isinstance(cfg.allowed_models, LLMGatewayAllowedModelsConfig)
-    assert cfg.allowed_models.default == []
+    assert cfg.allowed_models.default is None
     assert cfg.allowed_models.high_cost_requires_gate == []
     assert isinstance(cfg.spend_cap, LLMGatewaySpendCapConfig)
     assert cfg.spend_cap.monthly_jpy is None
@@ -164,7 +166,8 @@ def test_llm_gateway_config_defaults():
 def test_loader_returns_defaults_when_section_missing():
     cfg = _parse_llm_gateway_config({})
     assert cfg.enabled is False
-    assert cfg.allowed_providers == []
+    # キー未指定 = None（要件 §4.2 必須項目との整合 / 後方互換）
+    assert cfg.allowed_providers is None
 
 
 def test_loader_returns_defaults_when_section_not_dict():
@@ -209,6 +212,7 @@ def test_loader_parses_full_schema():
     }
     cfg = _parse_llm_gateway_config(raw)
     assert cfg.enabled is True
+    # 明示指定された list はそのまま採用
     assert cfg.allowed_providers == ["openai", "anthropic"]
     assert cfg.allowed_models.default == ["gpt-5.4", "claude-sonnet-4.5"]
     assert cfg.allowed_models.high_cost_requires_gate == ["gpt-5.5"]
@@ -302,7 +306,38 @@ def test_loader_preserves_backward_compat_with_minimal_schema():
     cfg = _parse_llm_gateway_config(raw)
     assert cfg.enabled is True
     assert cfg.log_only is False
-    # 新フィールドは既定値
-    assert cfg.allowed_providers == []
+    # 新フィールドは既定値（allowed_providers は None = 未指定）
+    assert cfg.allowed_providers is None
     assert cfg.spend_cap.monthly_jpy is None
     assert cfg.pii_redaction.enabled is False
+
+
+def test_loader_distinguishes_unspecified_from_explicit_empty_allowlist():
+    """allowed_providers / allowed_models.default は「未指定 (None)」と
+    「明示的に空配列 ([])」を区別する（Copilot 指摘で要件 §4.2 必須項目
+    との整合を保つため）"""
+    # 明示的に空配列 → []（後続 enforcement PR で deny-all 解釈を検討）
+    raw_empty = {
+        "llm_gateway": {
+            "allowed_providers": [],
+            "allowed_models": {"default": []},
+        }
+    }
+    cfg_empty = _parse_llm_gateway_config(raw_empty)
+    assert cfg_empty.allowed_providers == []
+    assert cfg_empty.allowed_models.default == []
+
+    # キー未指定 → None（後方互換、enforcement skip）
+    raw_missing = {"llm_gateway": {"enabled": True}}
+    cfg_missing = _parse_llm_gateway_config(raw_missing)
+    assert cfg_missing.allowed_providers is None
+    assert cfg_missing.allowed_models.default is None
+
+    # 型不正（dict 等）→ None として扱う（未指定と同等）
+    raw_invalid = {
+        "llm_gateway": {
+            "allowed_providers": {"not": "a list"},
+        }
+    }
+    cfg_invalid = _parse_llm_gateway_config(raw_invalid)
+    assert cfg_invalid.allowed_providers is None

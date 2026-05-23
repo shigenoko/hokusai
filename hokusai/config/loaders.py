@@ -392,8 +392,8 @@ def _parse_llm_gateway_config(config_dict: dict) -> LLMGatewayConfig:
         audit_log_enabled=_bool_or_default(
             "audit_log_enabled", defaults.audit_log_enabled
         ),
-        allowed_providers=_parse_str_list(
-            raw.get("allowed_providers"), defaults.allowed_providers
+        allowed_providers=_parse_str_list_or_none(
+            raw.get("allowed_providers"), key_present="allowed_providers" in raw
         ),
         allowed_models=_parse_llm_gateway_allowed_models(
             raw.get("allowed_models")
@@ -418,14 +418,44 @@ def _parse_str_list(raw: object, default: list[str]) -> list[str]:
     return [v for v in raw if isinstance(v, str)]
 
 
+def _parse_str_list_or_none(
+    raw: object, *, key_present: bool
+) -> list[str] | None:
+    """YAML から「未指定 (None)」と「明示的に空配列 ([])」を区別する list[str] 抽出。
+
+    要件 §4.2 の `allowed_providers` / `allowed_models.default` は必須項目
+    だが、後方互換のため未指定（YAML にキーなし）も許容する。Issue #58 で
+    `None` = 未指定 / `[]` = 明示空 allowlist の意味付けを採用（後続
+    enforcement PR で deny-all 解釈を確定する）。
+
+    Args:
+        raw: YAML から取り出した生値（dict.get の戻り）
+        key_present: YAML 上でキーが明示指定されていたか（`"key" in raw`）
+
+    Returns:
+        - キー未指定 → `None`
+        - キーありかつ非 list → `None`（型不正なので未指定と同等扱い）
+        - キーありかつ list → str 要素のみ抽出（[] も保持）
+    """
+    if not key_present:
+        return None
+    if not isinstance(raw, list):
+        return None
+    return [v for v in raw if isinstance(v, str)]
+
+
 def _parse_llm_gateway_allowed_models(raw: object):
     from .models import LLMGatewayAllowedModelsConfig
 
     defaults = LLMGatewayAllowedModelsConfig()
     if not isinstance(raw, dict):
         return defaults
+    # default は None / [] / [...] を区別する（allowed_providers と同じ方針）
+    default_value = _parse_str_list_or_none(
+        raw.get("default"), key_present="default" in raw
+    )
     return LLMGatewayAllowedModelsConfig(
-        default=_parse_str_list(raw.get("default"), defaults.default),
+        default=default_value,
         high_cost_requires_gate=_parse_str_list(
             raw.get("high_cost_requires_gate"),
             defaults.high_cost_requires_gate,
