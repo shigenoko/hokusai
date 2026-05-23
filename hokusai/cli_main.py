@@ -1719,9 +1719,16 @@ def _print_notion_db_share_warnings(config) -> None:
     で確認する。share されていない DB があれば warning として一覧表示し、
     workflow start 自体は継続する（fail-open）。
 
-    Notion 機能が無効化されている / 必要 env が揃っていない場合は何もしない。
+    以下の場合は何もしない（早期 return）:
+    - Notion 機能が無効化されている (`notion_dashboard.enabled=False`)
+    - `HOKUSAI_SKIP_NOTION=1` が設定されている（他 Notion ヘルパーと同じく
+      opt-out signal として尊重する。Issue #82 Copilot Round 1 指摘）
     """
+    import os
+
     try:
+        if os.environ.get("HOKUSAI_SKIP_NOTION") == "1":
+            return
         notion_cfg = getattr(config, "notion_dashboard", None)
         if notion_cfg is None or not notion_cfg.enabled:
             return

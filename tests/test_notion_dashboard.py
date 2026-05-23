@@ -3282,3 +3282,34 @@ def test_check_db_share_health_handles_unexpected_exception(store, monkeypatch):
     assert msg is not None
     assert "RuntimeError" in msg
     assert "connection refused" in msg
+
+
+def test_print_notion_db_share_warnings_skips_when_skip_notion_env(
+    monkeypatch, capsys
+):
+    """HOKUSAI_SKIP_NOTION=1 のとき check そのものを実行せず warning も出さない
+    （Issue #82 Copilot Round 1 指摘: 他 Notion ヘルパーの opt-out 規約と一致）"""
+    from hokusai.cli_main import _print_notion_db_share_warnings
+
+    monkeypatch.setenv("HOKUSAI_SKIP_NOTION", "1")
+
+    # NotionAPIClient.retrieve_database が呼ばれたら例外を投げて、
+    # 呼ばれていないことを保証する
+    def _should_not_be_called(self, db_id):
+        raise AssertionError(
+            "retrieve_database should not be called when HOKUSAI_SKIP_NOTION=1"
+        )
+
+    monkeypatch.setattr(NotionAPIClient, "retrieve_database", _should_not_be_called)
+
+    # share されていない DB がある config を模擬（enabled=True、env も揃って
+    # いれば本来 warning が出る状況だが SKIP_NOTION=1 なので何も起きない）
+    class _MockConfig:
+        notion_dashboard = _make_config(enabled=True)
+        database_path = "/tmp/__hokusai_test_db__.sqlite"
+
+    _print_notion_db_share_warnings(_MockConfig())
+
+    captured = capsys.readouterr()
+    assert "Notion DB share check" not in captured.out
+    assert "⚠️" not in captured.out
