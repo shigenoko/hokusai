@@ -9,6 +9,20 @@ from typing import Any, Protocol, runtime_checkable
 
 
 @runtime_checkable
+class ResultValue(Protocol):
+    """`.value: str` を持つ enum 風オブジェクトの最小プロトコル。
+
+    `TaskOperationResult.result` の型として使い、`result.result.value` で
+    audit log 用の文字列を取り出せることを型レベルで保証する。
+
+    実装例: `hokusai.integrations.task_backend.notion.NotionResult`
+    （`str, Enum` を継承し `value` は str）
+    """
+
+    value: str
+
+
+@runtime_checkable
 class TaskOperationResult(Protocol):
     """task backend 操作の構造化結果プロトコル。
 
@@ -19,7 +33,7 @@ class TaskOperationResult(Protocol):
     実装例: `hokusai.integrations.task_backend.notion.NotionOperationResult`
     """
 
-    result: Any  # enum-like — `.value` で str を取り出せることを想定
+    result: ResultValue  # `.value: str` を持つ enum 風オブジェクト
     reason: str | None
 
 
