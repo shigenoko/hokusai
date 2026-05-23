@@ -94,8 +94,12 @@ class CodexClient:
         # LLM Gateway interceptor (Issue #62 / Phase 1: log-only)
         # provider="codex" / model=self.model / purpose="cross_review" として
         # 評価する。Gateway 無効化や例外時は副作用なしで透過する。
+        # `has_schema` は実 CLI 呼び出し（後段の `if schema_path:`）と判定基準を
+        # 揃えるため `bool(schema_path)` で評価する。空文字列も「未指定」と
+        # 同等に扱い、audit metadata と実 invocation の意味を一致させる
+        # （PR #63 Copilot Round 3 指摘）。
         self._invoke_llm_gateway_interceptor(
-            full_prompt, has_schema=schema_path is not None
+            full_prompt, has_schema=bool(schema_path)
         )
 
         cmd = [

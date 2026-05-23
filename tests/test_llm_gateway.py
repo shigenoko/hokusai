@@ -749,6 +749,41 @@ def test_codex_client_invokes_interceptor_on_review(monkeypatch, caplog):
     assert payload["decision"] == "log"
 
 
+def test_codex_client_interceptor_treats_empty_schema_path_as_missing(
+    monkeypatch, caplog
+):
+    """schema_path="" は CLI に --output-schema を渡さない (`if schema_path:` で
+    falsy) ため、audit の `has_schema` も False で揃える（PR #63 Copilot Round 3
+    指摘: audit metadata と実 invocation の意味を一致させる）"""
+    from hokusai.config import set_config
+    from hokusai.config.models import WorkflowConfig
+
+    cfg = WorkflowConfig(
+        llm_gateway=LLMGatewayConfig(enabled=True, audit_log_enabled=True),
+    )
+    set_config(cfg)
+
+    client = _make_codex_client(monkeypatch)
+    monkeypatch.setattr(
+        "hokusai.integrations.codex.subprocess.run",
+        lambda *a, **kw: _FakeCompletedProcess(),
+    )
+
+    with caplog.at_level(logging.INFO, logger="hokusai.llm_gateway"):
+        client.review_document(
+            document="d", review_prompt="r", schema_path=""
+        )
+
+    audit_records = [
+        r for r in caplog.records if "llm_gateway_audit" in r.message
+    ]
+    assert len(audit_records) == 1
+    payload = json.loads(
+        audit_records[0].message.split("llm_gateway_audit ", 1)[1]
+    )
+    assert payload["context"]["metadata"]["has_schema"] is False
+
+
 def test_codex_client_interceptor_records_has_schema_flag(monkeypatch, caplog):
     """schema_path を渡すと metadata.has_schema が True になる"""
     from hokusai.config import set_config
