@@ -45,6 +45,23 @@ def _reset_global_config():
         reset_config()
 
 
+@pytest.fixture(autouse=True)
+def _reset_audit_store_cache_fixture():
+    """LLM Gateway interceptor の SQLiteStore モジュールキャッシュを各テスト
+    前後で clear する（Issue #80 Copilot Round 3 / Round 1 対応）。
+
+    tmp_path が毎テスト変わるためキャッシュが残ると無関係な path への接続を
+    保持し続け、テスト間で flaky を引き起こす。
+    """
+    from hokusai.llm_gateway.interceptor import _reset_audit_store_cache
+
+    _reset_audit_store_cache()
+    try:
+        yield
+    finally:
+        _reset_audit_store_cache()
+
+
 # ---------------------------------------------------------------------------
 # LLMGatewayConfig loader
 # ---------------------------------------------------------------------------
@@ -492,10 +509,17 @@ def test_interceptor_phase_is_normalized_consistently_in_logger_and_sqlite(
         assert row[0] == 0
 
 
-def test_interceptor_reuses_sqlite_store_across_intercepts(tmp_path):
-    """SQLiteStore は database_path 単位で再利用される（Issue #80 Copilot Round 1
-    指摘: 監査ログ 1 件ごとに store を生成すると _init_db が毎回走り
-    レイテンシ / ロック競合の原因になる）"""
+def test_interceptor_reuses_sqlite_store_across_intercepts(
+    tmp_path, monkeypatch
+):
+    """同 database_path への複数 intercept で SQLiteStore.__init__ が再実行
+    されない（Issue #80 Copilot Round 1/3 指摘: 監査ログ 1 件ごとに store を
+    生成すると _init_db が毎回走りレイテンシ / ロック競合の原因になる）。
+
+    private cache (`_AUDIT_STORE_CACHE`) には直接依存せず、SQLiteStore.__init__
+    の呼び出し回数を spy で外形的に検証する（Round 3 指摘: 実装詳細への
+    過度な依存を避ける）。
+    """
     import sqlite3
 
     from hokusai.config import set_config
@@ -510,6 +534,8 @@ def test_interceptor_reuses_sqlite_store_across_intercepts(tmp_path):
     cfg.database_path = db_path
     set_config(cfg)
 
+    # SQLiteStore + workflow レコードを準備（test setup でも __init__ が走るので
+    # spy 開始は setup 完了後にする）
     SQLiteStore(db_path)
     with sqlite3.connect(db_path) as conn:
         conn.execute(
@@ -519,32 +545,41 @@ def test_interceptor_reuses_sqlite_store_across_intercepts(tmp_path):
         )
         conn.commit()
 
+    # SQLiteStore.__init__ の呼び出し回数を spy（dispatch helper / interceptor
+    # 経由の呼び出しだけを数える）
+    original_init = SQLiteStore.__init__
+    init_call_count = 0
+
+    def _counting_init(self, *args, **kwargs):
+        nonlocal init_call_count
+        init_call_count += 1
+        original_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(SQLiteStore, "__init__", _counting_init)
+
+    # 3 回 intercept しても SQLiteStore.__init__ は **1 回** しか呼ばれない
+    # （初回でキャッシュ、2-3 回目は再利用）
     interceptor = LLMGatewayInterceptor(cfg.llm_gateway)
+    for i in range(1, 4):
+        interceptor.intercept(
+            LLMGatewayContext(
+                provider="claude_code",
+                workflow_id="wf-reuse",
+                phase=i,
+            ),
+            f"prompt-{i}",
+        )
 
-    # 1 回目の intercept で SQLiteStore がキャッシュされる
-    interceptor.intercept(
-        LLMGatewayContext(
-            provider="claude_code", workflow_id="wf-reuse", phase=1
-        ),
-        "first",
+    assert init_call_count == 1, (
+        f"SQLiteStore.__init__ should be called only once for same database_path, "
+        f"but was called {init_call_count} times"
     )
-    db_path_key = str(db_path)
-    assert db_path_key in interceptor._audit_store_cache
-    first_store = interceptor._audit_store_cache[db_path_key]
 
-    # 2 回目の intercept で同じ instance が再利用される
-    interceptor.intercept(
-        LLMGatewayContext(
-            provider="claude_code", workflow_id="wf-reuse", phase=2
-        ),
-        "second",
-    )
-    assert interceptor._audit_store_cache[db_path_key] is first_store
-
-    # 2 回分の audit_logs が記録されている
+    # 3 回分の audit_logs が記録されている（外形検証）
+    monkeypatch.setattr(SQLiteStore, "__init__", original_init)
     store = SQLiteStore(db_path)
     logs = store.get_audit_logs("wf-reuse")
-    assert len(logs) == 2
+    assert len(logs) == 3
 
 
 def test_interceptor_hash_is_deterministic_for_same_prompt(caplog):

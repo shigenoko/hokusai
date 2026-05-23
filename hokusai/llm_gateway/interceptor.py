@@ -27,6 +27,27 @@ if TYPE_CHECKING:
     # （_audit_store_cache の型注釈を明確化するため、Issue #80 Copilot Round 2 指摘）
     from ..persistence.sqlite_store import SQLiteStore
 
+
+# SQLiteStore のモジュールレベルキャッシュ（Issue #80 Copilot Round 3 指摘）。
+# dispatch_via_gateway が毎回 LLMGatewayInterceptor を new するため、interceptor
+# instance 上のキャッシュは効かない（毎回新しい dict が作られて再利用されない）。
+# モジュールレベルに移すことで、同 database_path への 2 回目以降の呼び出しで
+# SQLiteStore.__init__()（DDL/PRAGMA/INDEX 作成）の再実行を避ける。
+#
+# テスト間の干渉を避けるため `_reset_audit_store_cache()` で明示的に clear
+# できる。本番では interceptor 寿命より長く生存して再利用される。
+_AUDIT_STORE_CACHE: dict[str, "SQLiteStore"] = {}
+
+
+def _reset_audit_store_cache() -> None:
+    """SQLiteStore モジュールキャッシュを clear する（テスト用）。
+
+    テスト間で database_path が変わるケース（tmp_path 毎回違う）で前回の
+    キャッシュが残ると無関係な接続を保持し続けるため、テストの autouse
+    fixture から呼ぶことを想定。
+    """
+    _AUDIT_STORE_CACHE.clear()
+
 logger = get_logger("llm_gateway")
 
 
@@ -65,12 +86,9 @@ class LLMGatewayInterceptor:
 
     def __init__(self, config: LLMGatewayConfig):
         self._config = config
-        # SQLiteStore の lazy 初期化 + 再利用キャッシュ（Issue #80 Copilot Round 1
-        # 指摘）。`SQLiteStore.__init__` が DDL/PRAGMA/INDEX 作成を含むため、
-        # 監査ログ 1 件ごとに生成するとレイテンシ / ロック競合の原因になる。
-        # database_path 単位でキャッシュ（profile 切替 / テストで path が変わる
-        # ケースに対応するため key を database_path にする）。
-        self._audit_store_cache: dict[str, "SQLiteStore"] = {}
+        # SQLiteStore キャッシュはモジュールレベル (_AUDIT_STORE_CACHE) で管理する。
+        # interceptor instance 上に持つと dispatch_via_gateway が毎回 new するため
+        # 効かない（Issue #80 Copilot Round 3 指摘）。
 
     def intercept(
         self, context: LLMGatewayContext, prompt: str
@@ -267,9 +285,11 @@ class LLMGatewayInterceptor:
         失敗時は debug log に型名 + frame のみ残して呼び出し側へは伝播
         させない（`dispatch.log_suppressed_exception` と同じ思想）。
 
-        SQLiteStore は database_path 単位でキャッシュし、同 path での 2 回目
-        以降の呼び出しは DDL/PRAGMA/INDEX の再実行を避ける（Issue #80 Copilot
-        Round 1 指摘: レイテンシ / ロック競合対策）。
+        SQLiteStore は database_path 単位でモジュールレベルキャッシュし、同
+        path での 2 回目以降の呼び出しは DDL/PRAGMA/INDEX の再実行を避ける
+        （Issue #80 Copilot Round 1/3 指摘: レイテンシ / ロック競合対策。
+        dispatch_via_gateway が interceptor を毎回 new するためモジュール
+        レベルに置く必要がある）。
         """
         try:
             from ..config import get_config
@@ -277,10 +297,10 @@ class LLMGatewayInterceptor:
 
             config = get_config()
             db_path_key = str(config.database_path)
-            store = self._audit_store_cache.get(db_path_key)
+            store = _AUDIT_STORE_CACHE.get(db_path_key)
             if store is None:
                 store = SQLiteStore(config.database_path)
-                self._audit_store_cache[db_path_key] = store
+                _AUDIT_STORE_CACHE[db_path_key] = store
             store.add_audit_log(
                 workflow_id=workflow_id,
                 phase=phase,
