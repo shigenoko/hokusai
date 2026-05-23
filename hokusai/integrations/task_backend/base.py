@@ -5,7 +5,22 @@ Task Backend Base
 """
 
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
+
+
+@runtime_checkable
+class TaskOperationResult(Protocol):
+    """task backend 操作の構造化結果プロトコル。
+
+    `update_status` / `append_progress` / `prepend_content` の戻り値の最小
+    インターフェース。呼び出し側は `result.result.value` と `result.reason`
+    を audit log の生成に使う。
+
+    実装例: `hokusai.integrations.task_backend.notion.NotionOperationResult`
+    """
+
+    result: Any  # enum-like — `.value` で str を取り出せることを想定
+    reason: str | None
 
 
 class TaskBackendClient(ABC):
@@ -31,7 +46,9 @@ class TaskBackendClient(ABC):
         ...
 
     @abstractmethod
-    def update_status(self, task_url: str, status: str) -> Any:
+    def update_status(
+        self, task_url: str, status: str
+    ) -> "TaskOperationResult | None":
         """
         ステータスを更新
 
@@ -40,14 +57,16 @@ class TaskBackendClient(ABC):
             status: 新しいステータス
 
         Returns:
-            実装依存。Notion バックエンドは `NotionOperationResult` を返し、
-            呼び出し側で audit log の生成に使う。それ以外の実装は `None` を
-            返してよい（戻り値を使わない呼び出し側との互換は維持される）。
+            Notion バックエンドは `NotionOperationResult` を返し、呼び出し側で
+            audit log の生成に使う。それ以外の実装は `None` を返してよい
+            （戻り値を使わない呼び出し側との互換は維持される）。
         """
         ...
 
     @abstractmethod
-    def append_progress(self, task_url: str, content: str) -> Any:
+    def append_progress(
+        self, task_url: str, content: str
+    ) -> "TaskOperationResult | None":
         """
         進捗記録を追記（末尾に追加）
 
@@ -61,7 +80,9 @@ class TaskBackendClient(ABC):
         ...
 
     @abstractmethod
-    def prepend_content(self, task_url: str, content: str) -> Any:
+    def prepend_content(
+        self, task_url: str, content: str
+    ) -> "TaskOperationResult | None":
         """
         コンテンツを先頭に追記
 
