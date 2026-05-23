@@ -497,6 +497,80 @@ def test_workflows_db_ignores_operator_on_non_started_event():
 
 
 # ---------------------------------------------------------------------------
+# Supersedes / Cancel Reason payload（Issue #56 / 要件 §9.3.2 引き継ぎ運用）
+# ---------------------------------------------------------------------------
+
+
+def test_workflows_db_writes_supersedes_on_workflow_started():
+    """payload に supersedes_workflow_page_id が含まれる場合、Supersedes
+    リレーションが workflow_started event でのみ書き込まれる。"""
+    api = _RecordingAPI(query_result=[{"id": "p"}])
+    client = WorkflowsDBClient(api=api, database_id="db1")
+    client.apply_event("workflow_started", {
+        "workflow_id": "wf-new",
+        "task_title": "Handover test",
+        "supersedes_workflow_page_id": "wf-prior-page-id",
+    })
+    props = api.calls[-1][1]["properties"]
+    assert props["Supersedes"]["relation"] == [{"id": "wf-prior-page-id"}]
+
+
+def test_workflows_db_omits_supersedes_when_payload_lacks_it():
+    api = _RecordingAPI(query_result=[{"id": "p"}])
+    client = WorkflowsDBClient(api=api, database_id="db1")
+    client.apply_event("workflow_started", {
+        "workflow_id": "wf-1",
+        "task_title": "Normal start",
+    })
+    props = api.calls[-1][1]["properties"]
+    assert "Supersedes" not in props
+
+
+def test_workflows_db_ignores_supersedes_on_non_started_event():
+    """workflow_started 以外で誤って supersedes_workflow_page_id が混入しても
+    Supersedes は書き込まない（Notion 側の既存値温存、Operator と同じ invariant）"""
+    api = _RecordingAPI(query_result=[{"id": "p"}])
+    client = WorkflowsDBClient(api=api, database_id="db1")
+    client.apply_event("phase_changed", {
+        "workflow_id": "wf-1",
+        "current_phase": 5,
+        "supersedes_workflow_page_id": "wf-prior",
+    })
+    props = api.calls[-1][1]["properties"]
+    assert "Supersedes" not in props
+
+
+def test_workflows_db_writes_cancel_reason_when_payload_includes_it():
+    """payload に cancel_reason があれば Cancel Reason rich_text が書かれる
+    （phase_changed や workflow_canceled いずれの event でも対応）"""
+    api = _RecordingAPI(query_result=[{"id": "p"}])
+    client = WorkflowsDBClient(api=api, database_id="db1")
+    client.apply_event("phase_changed", {
+        "workflow_id": "wf-1",
+        "status": "canceled",
+        "cancel_reason": "引き継ぎのため停止",
+    })
+    props = api.calls[-1][1]["properties"]
+    assert (
+        props["Cancel Reason"]["rich_text"][0]["text"]["content"]
+        == "引き継ぎのため停止"
+    )
+    assert props["Status"]["select"]["name"] == "Canceled"
+
+
+def test_workflows_db_omits_cancel_reason_when_payload_value_is_empty():
+    """cancel_reason='' のような falsy 値は no-op（既存値温存）"""
+    api = _RecordingAPI(query_result=[{"id": "p"}])
+    client = WorkflowsDBClient(api=api, database_id="db1")
+    client.apply_event("phase_changed", {
+        "workflow_id": "wf-1",
+        "cancel_reason": "",
+    })
+    props = api.calls[-1][1]["properties"]
+    assert "Cancel Reason" not in props
+
+
+# ---------------------------------------------------------------------------
 # update_database API（Issue #21 / v0.4.8、migration 用）
 # ---------------------------------------------------------------------------
 

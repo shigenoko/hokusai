@@ -346,6 +346,30 @@ class WorkflowsDBClient:
         ):
             props["Operator"] = _rich_text(str(payload["operator"]))
 
+        # Supersedes: workflow_started event でのみ書き込む（Issue #56 /
+        # 要件 §9.3.2 引き継ぎフロー）。以降の event で誤って payload に
+        # supersedes_workflow_page_id が混入しても Notion 側の既存値を温存
+        # するため event_type ガードを掛ける（Operator と同じ invariant）。
+        # 後付けで Supersedes を変更したい運用は手動 Notion 編集 or
+        # set_supersedes API 経由に委ねる。
+        if (
+            event_type == EVENT_WORKFLOW_STARTED
+            and "supersedes_workflow_page_id" in payload
+            and payload["supersedes_workflow_page_id"]
+        ):
+            props["Supersedes"] = {
+                "relation": [
+                    {"id": str(payload["supersedes_workflow_page_id"])}
+                ]
+            }
+
+        # Cancel Reason: workflow_canceled / phase_changed (status=canceled)
+        # 時のみ書き込む。Status と独立して上書きすると古い理由が新しい運用
+        # に紛れ込むため、event 種別をガードしない代わりに「payload に明示
+        # 指定がある場合のみ」書く。空文字は no-op（既存値温存）。
+        if "cancel_reason" in payload and payload["cancel_reason"]:
+            props["Cancel Reason"] = _rich_text(str(payload["cancel_reason"]))
+
         # Last Updated は常に書き戻す
         props["Last Updated"] = _date(payload.get("last_updated") or datetime.now().isoformat())
 

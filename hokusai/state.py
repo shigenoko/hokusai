@@ -246,6 +246,14 @@ class WorkflowState(TypedDict):
     # バックで再解決する（互換動作）。
     operator: Optional[str]
 
+    # === 引き継ぎ運用（Issue #56 / 要件 §9.3.2 / Workgraph Phase 7） ===
+    # `hokusai start --supersedes <wf-A>` で指定された旧 workflow ID。
+    # workflow_started dispatch 時に Notion Workflows DB の page_id に解決
+    # して Supersedes リレーションへ書き込まれる。後段の `hokusai prime`
+    # は本フィールドを経由しないが、Workflows DB レコードの Supersedes
+    # から世代遡及（PR #53）するので、書き込みのみが本フィールドの責務。
+    supersedes_workflow_id: Optional[str]
+
     # === Phase 4: 作業計画 ===
     research_result: Optional[str]  # task-researchの出力（Phase 2）
     design_result: Optional[str]  # Phase 3 設計チェック結果
