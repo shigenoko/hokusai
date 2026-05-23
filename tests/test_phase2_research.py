@@ -10,12 +10,11 @@ Phase 2 事前調査ノード / 抽出ロジックのテスト
 """
 
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from hokusai.nodes.phase2_research import _extract_research_report
-
 
 # ---------------------------------------------------------------------------
 # _extract_research_report テスト
