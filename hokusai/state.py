@@ -426,6 +426,7 @@ def create_initial_state(
         workflow_gates_blocked_reason=None,
         pending_project_memories=[],
         operator=None,
+        supersedes_workflow_id=None,
         research_result=None,
         design_result=None,
         work_plan=None,

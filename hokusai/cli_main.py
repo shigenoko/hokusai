@@ -1725,6 +1725,16 @@ def _sync_workflow_cancel_reason(
     from .integrations.notion_dashboard.client import NotionAPIClient
     from .integrations.notion_dashboard.workflows_db import WorkflowsDBClient
 
+    # HOKUSAI_SKIP_NOTION=1 はユーザの「Notion なしで続行」選択。docstring と
+    # 実装を整合させるため明示的に skip する（Copilot 指摘）。
+    if os.environ.get("HOKUSAI_SKIP_NOTION") == "1":
+        print(
+            "⚠ HOKUSAI_SKIP_NOTION=1 のため Cancel Reason は記録しません "
+            "（worktree 削除は完了）",
+            file=sys.stderr,
+        )
+        return
+
     notion_cfg = getattr(config, "notion_dashboard", None)
     if notion_cfg is None or not getattr(notion_cfg, "enabled", False):
         print(
@@ -1777,7 +1787,14 @@ def _handle_cleanup(args, config):
 
     store = SQLiteStore(config.database_path)
 
-    cancel_reason = getattr(args, "cancel_reason", None)
+    # --cancel-reason を strip して空白のみは None 扱い（Copilot 指摘:
+    # 空白だけの値で Notion 側 Cancel Reason を見た目空で上書きしないため）
+    raw_cancel_reason = getattr(args, "cancel_reason", None)
+    cancel_reason = (
+        raw_cancel_reason.strip()
+        if isinstance(raw_cancel_reason, str)
+        else None
+    ) or None
 
     if args.workflow_id:
         # 指定 workflow の worktree を削除
