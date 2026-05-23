@@ -331,12 +331,14 @@ def save_to_subpage_or_create(
 
     Notes:
         `HOKUSAI_SKIP_NOTION=1` のとき副作用なく state をそのまま返す。
-        他の Notion ヘルパー（line 67 / 117 / 202 / 263）と同パターン。
-        Notion 接続が無い環境で workflow を止めないため（Issue #75）。
+        他の Notion ヘルパー（`save_content_to_notion` /
+        `create_phase_subpage` / `update_subpage_content` /
+        `append_to_subpage`）と同パターン。Notion 接続が無い環境で workflow
+        を止めないため（Issue #75）。
     """
     if os.environ.get("HOKUSAI_SKIP_NOTION") == "1":
         logger.info(
-            f"HOKUSAI_SKIP_NOTION=1: Phase {phase} 子ページ作成をスキップ"
+            f"HOKUSAI_SKIP_NOTION=1: Phase {phase} 子ページ保存をスキップ"
         )
         return state
 
