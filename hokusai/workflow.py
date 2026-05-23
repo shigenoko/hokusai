@@ -723,11 +723,14 @@ class WorkflowRunner:
             api_token = os.environ.get(notion_cfg.api_token_env, "").strip()
             if not api_token:
                 return None
+            # dispatcher 側の NotionAPIClient 初期化と同じ retry / rate_limit
+            # 設定を使う（Copilot 指摘: 設定値を反映しないと dispatcher と
+            # 不整合なリトライ挙動になる）。
             api = NotionAPIClient(
                 api_token=api_token,
-                requests_per_second=getattr(
-                    notion_cfg.rate_limit, "requests_per_second", 3.0
-                ),
+                max_attempts=notion_cfg.retry.max_attempts,
+                backoff_seconds=notion_cfg.retry.backoff_seconds,
+                requests_per_second=notion_cfg.rate_limit.requests_per_second,
             )
             wf_client = WorkflowsDBClient(api=api, database_id=db_id)
             return wf_client.find_workflow_page_id(workflow_id)

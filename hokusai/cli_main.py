@@ -1754,11 +1754,13 @@ def _sync_workflow_cancel_reason(
         return
 
     try:
+        # dispatcher 側と同じ retry / rate_limit 設定でクライアントを初期化
+        # （Copilot 指摘: 既定値のままだとリトライ挙動が他経路と不整合）
         api = NotionAPIClient(
             api_token=api_token,
-            requests_per_second=getattr(
-                notion_cfg.rate_limit, "requests_per_second", 3.0
-            ),
+            max_attempts=notion_cfg.retry.max_attempts,
+            backoff_seconds=notion_cfg.retry.backoff_seconds,
+            requests_per_second=notion_cfg.rate_limit.requests_per_second,
         )
         client = WorkflowsDBClient(api=api, database_id=db_id)
         client.apply_event(
