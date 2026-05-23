@@ -3284,8 +3284,29 @@ def test_check_db_share_health_handles_unexpected_exception(store, monkeypatch):
     assert "connection refused" in msg
 
 
+def test_check_db_share_health_treats_5xx_as_non_share_error(store, monkeypatch):
+    """500 系の API エラーは「integration not shared」ではなく一般エラーとして扱う
+    （404 検出と区別。SonarCloud 経路の安定性確認）"""
+    monkeypatch.setenv("TEST_TOKEN", "secret")
+    monkeypatch.setenv("TEST_DB", "db-5xx")
+
+    def _raise_5xx(self, db_id):
+        raise NotionAPIError(500, "Internal server error", code="server_error")
+
+    monkeypatch.setattr(NotionAPIClient, "retrieve_database", _raise_5xx)
+
+    disp = NotionSyncDispatcher(store=store, config=_make_config())
+    results = disp.check_db_share_health()
+    ok, msg = results["TEST_DB"]
+    assert ok is False
+    # 404 検出ではないので「integration not shared」は付かない
+    assert msg is not None
+    assert "integration not shared" not in msg
+    assert "500" in msg
+
+
 def test_print_notion_db_share_warnings_skips_when_skip_notion_env(
-    monkeypatch, capsys
+    monkeypatch, capsys, tmp_path
 ):
     """HOKUSAI_SKIP_NOTION=1 のとき check そのものを実行せず warning も出さない
     （Issue #82 Copilot Round 1 指摘: 他 Notion ヘルパーの opt-out 規約と一致）"""
@@ -3303,10 +3324,12 @@ def test_print_notion_db_share_warnings_skips_when_skip_notion_env(
     monkeypatch.setattr(NotionAPIClient, "retrieve_database", _should_not_be_called)
 
     # share されていない DB がある config を模擬（enabled=True、env も揃って
-    # いれば本来 warning が出る状況だが SKIP_NOTION=1 なので何も起きない）
+    # いれば本来 warning が出る状況だが SKIP_NOTION=1 なので何も起きない）。
+    # database_path は tmp_path 配下を使い世界書き込み可能ディレクトリ
+    # （/tmp 直下）を避ける（SonarCloud python:S5443 対応）。
     class _MockConfig:
         notion_dashboard = _make_config(enabled=True)
-        database_path = "/tmp/__hokusai_test_db__.sqlite"
+        database_path = str(tmp_path / "hokusai_test_db.sqlite")
 
     _print_notion_db_share_warnings(_MockConfig())
 

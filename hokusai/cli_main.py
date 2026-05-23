@@ -724,7 +724,10 @@ def main():
             # 必要 env が揃っているケースで、各 DB に integration が share
             # されているかを retrieve_database で事前確認する。失敗があれば
             # warning を表示するが workflow start は継続（fail-open）。
-            _print_notion_db_share_warnings(config)
+            # `--dry-run` のときは API call を抑止する（check_notion_connection
+            # と同じ規約、Issue #82 Copilot Round 2 指摘）。
+            if not getattr(args, "dry_run", False):
+                _print_notion_db_share_warnings(config)
 
             workflow_id = runner.start(
                 args.task_url,
