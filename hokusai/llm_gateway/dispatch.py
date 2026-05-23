@@ -15,11 +15,40 @@ helper に集約することで、3 client に同じ修正を 3 回入れる必�
 
 from __future__ import annotations
 
+import traceback
 from typing import Mapping
 
 from ..logging_config import get_logger
 
 logger = get_logger("llm_gateway")
+
+
+def log_suppressed_exception(message: str, exc: BaseException) -> None:
+    """LLM Gateway 例外を **メッセージ本文を含めずに** debug ログに残す。
+
+    `logger.debug(..., exc_info=True)` だと `exc.args` の文字列が traceback
+    と共に log stream に流れてしまい、prompt や secret が呼び出し側から
+    例外メッセージに混入したケースで PII が log にこぼれるリスクがある
+    （PR #67 Copilot Round 1 指摘 / 要件 §14 受け入れ基準）。
+
+    本関数は例外型名 + frame 一覧（ファイル / 行番号 / 関数名）のみを
+    debug ログに出し、`str(exc)` 由来の文字列は一切 log に含めない。
+
+    Args:
+        message: ログの先頭メッセージ（呼び出し文脈の説明、user-controlled な
+            値を含めない）
+        exc: 抑制した例外
+    """
+    frames = traceback.extract_tb(exc.__traceback__)
+    frame_summary = [
+        f"{f.filename}:{f.lineno} in {f.name}" for f in frames
+    ]
+    logger.debug(
+        "%s (type=%s, frames=%s)",
+        message,
+        type(exc).__name__,
+        frame_summary,
+    )
 
 
 def dispatch_via_gateway(
@@ -64,7 +93,9 @@ def dispatch_via_gateway(
             metadata=dict(metadata or {}),
         )
         LLMGatewayInterceptor(gateway_config).intercept(context, prompt)
-    except Exception:
-        # exc_info=True でスタックトレースを残し、メッセージは出さない
-        # （メッセージ経由で secret/PII が log にこぼれるリスクを避けるため）
-        logger.debug("LLM Gateway interceptor 内例外を抑制", exc_info=True)
+    except Exception as exc:
+        # exc_info=True は exc.args 経由で例外メッセージ本文を log に流すため、
+        # 代わりに log_suppressed_exception で type + frame のみを記録する
+        # （secret/PII が prompt 由来で例外メッセージに混入するリスクを排除、
+        # PR #67 Copilot Round 1 指摘 / 要件 §14）。
+        log_suppressed_exception("LLM Gateway interceptor 内例外を抑制", exc)

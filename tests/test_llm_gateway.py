@@ -613,6 +613,40 @@ def test_claude_code_client_interceptor_swallows_exceptions(monkeypatch, tmp_pat
     assert result == "ok"
 
 
+def test_claude_code_client_swallows_append_system_prompt_encode_error(
+    monkeypatch, tmp_path
+):
+    """append_system_prompt の hash 計算が UnicodeEncodeError 等で失敗しても
+    workflow を落とさず metadata を省略して継続する（PR #67 Copilot Round 1
+    指摘）。encode は helper の try/except 範囲外で実行されるため、metadata
+    構築自体を try/except でラップしている必要がある。"""
+    from hokusai.config import set_config
+    from hokusai.config.models import WorkflowConfig
+    from hokusai.integrations.claude_code import ClaudeCodeClient
+
+    cfg = WorkflowConfig(
+        llm_gateway=LLMGatewayConfig(enabled=True, audit_log_enabled=True),
+    )
+    set_config(cfg)
+
+    client = ClaudeCodeClient(working_dir=tmp_path)
+    monkeypatch.setattr(ClaudeCodeClient, "claude_path", "/usr/bin/false")
+    monkeypatch.setattr(
+        "hokusai.integrations.claude_code.ShellRunner",
+        lambda cwd=None: type(
+            "S", (), {"run": lambda self, cmd, timeout: _FakeShellResult()}
+        )(),
+    )
+
+    # 不正サロゲートを含む文字列 → utf-8 encode で UnicodeEncodeError
+    bad_prompt = "valid\ud800tail"
+    result = client._run_claude_code(
+        "main", timeout=10, append_system_prompt=bad_prompt
+    )
+    # 例外が漏れず通常結果を返すこと
+    assert result == "ok"
+
+
 def test_claude_code_client_includes_append_system_prompt_hash_in_metadata(
     monkeypatch, caplog, tmp_path
 ):
@@ -1158,6 +1192,51 @@ def test_dispatch_helper_swallows_exceptions(monkeypatch):
         purpose="cross_review",
         prompt="p",
     )
+
+
+def test_dispatch_helper_sanitizes_exception_message_from_log(
+    monkeypatch, caplog
+):
+    """例外メッセージに含まれる secret/PII が debug log にこぼれないことを検証
+    （PR #67 Copilot Round 1 指摘）。`exc_info=True` を使うと exc.args の
+    文字列が traceback に含まれてしまうため、`log_suppressed_exception` で
+    type + frame だけ記録する設計にしている。"""
+    from hokusai.llm_gateway import dispatch_via_gateway
+
+    secret_text = "SECRET-12345-DO-NOT-LEAK"
+
+    def _raising_get_config():
+        raise RuntimeError(secret_text)
+
+    monkeypatch.setattr("hokusai.config.get_config", _raising_get_config)
+
+    with caplog.at_level(logging.DEBUG, logger="hokusai.llm_gateway"):
+        dispatch_via_gateway(
+            provider="codex", model="m", purpose="p", prompt="x"
+        )
+
+    # debug log は出ているが、secret 文字列は含まれない
+    log_messages = " ".join(r.getMessage() for r in caplog.records)
+    assert "LLM Gateway interceptor 内例外を抑制" in log_messages
+    assert "RuntimeError" in log_messages  # 型名は OK
+    assert secret_text not in log_messages  # メッセージ本文は NG
+
+
+def test_log_suppressed_exception_does_not_leak_args(caplog):
+    """`log_suppressed_exception` 単体で `str(exc)` が log に流れないことを検証"""
+    from hokusai.llm_gateway.dispatch import log_suppressed_exception
+
+    sensitive = "TOKEN=abc123_secret"
+    try:
+        raise ValueError(sensitive)
+    except ValueError as exc:
+        with caplog.at_level(logging.DEBUG, logger="hokusai.llm_gateway"):
+            log_suppressed_exception("test prefix", exc)
+
+    log_text = " ".join(r.getMessage() for r in caplog.records)
+    assert "test prefix" in log_text
+    assert "ValueError" in log_text  # type 名は記録される
+    assert sensitive not in log_text  # 例外メッセージは記録されない
 
 
 def test_dispatch_helper_copies_metadata(caplog):
