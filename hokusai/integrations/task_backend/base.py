@@ -5,15 +5,19 @@ Task Backend Base
 """
 
 from abc import ABC, abstractmethod
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol
 
 
-@runtime_checkable
 class ResultValue(Protocol):
     """`.value: str` を持つ enum 風オブジェクトの最小プロトコル。
 
     `TaskOperationResult.result` の型として使い、`result.result.value` で
     audit log 用の文字列を取り出せることを型レベルで保証する。
+
+    Note: 静的型チェック (mypy/pyright) 専用。`isinstance` での runtime
+    検証は PEP 544 の制約上、属性の存在/型を確実に検証できないため
+    `@runtime_checkable` は付けない。呼び出し側で runtime 判定が必要な
+    場合は `hasattr(result, 'value')` を明示的に使うこと。
 
     実装例: `hokusai.integrations.task_backend.notion.NotionResult`
     （`str, Enum` を継承し `value` は str）
@@ -22,13 +26,16 @@ class ResultValue(Protocol):
     value: str
 
 
-@runtime_checkable
 class TaskOperationResult(Protocol):
     """task backend 操作の構造化結果プロトコル。
 
     `update_status` / `append_progress` / `prepend_content` の戻り値の最小
     インターフェース。呼び出し側は `result.result.value` と `result.reason`
     を audit log の生成に使う。
+
+    Note: `ResultValue` と同様、静的型チェック専用（`@runtime_checkable`
+    なし）。呼び出し側 (`phase1_prepare` / `phase10_record` /
+    `notion_helpers`) は `hasattr(result, 'result')` で runtime 分岐する。
 
     実装例: `hokusai.integrations.task_backend.notion.NotionOperationResult`
     """
