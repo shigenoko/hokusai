@@ -244,26 +244,116 @@ class NotionDashboardConfig:
 
 
 @dataclass
+class LLMGatewayAllowedModelsConfig:
+    """LLM Gateway allowed_models 設定（Issue #58 / 要件 §4.1）。
+
+    - default: 通常利用可能 model のホワイトリスト
+    - high_cost_requires_gate: Human Approval gate を要求する高額 model
+    """
+
+    default: list[str] = field(default_factory=list)
+    high_cost_requires_gate: list[str] = field(default_factory=list)
+
+
+@dataclass
+class LLMGatewaySpendCapConfig:
+    """LLM Gateway spend cap 設定（Issue #58 / 要件 §4.1）。
+
+    各 cap は省略可（`None` で無制限）。`fail_mode` は cap 超過時の挙動。
+    既定 `block`（超過したら送信不可）。値の妥当性は loader 側で検証する。
+    """
+
+    monthly_jpy: int | None = None
+    daily_jpy: int | None = None
+    per_workflow_jpy: int | None = None
+    per_phase_jpy: int | None = None
+    fail_mode: str = "block"
+
+
+@dataclass
+class LLMGatewayPiiRedactionConfig:
+    """LLM Gateway PII / secret detector 設定（Issue #58 / 要件 §4.1 / §7）。
+
+    - enabled: detector を有効化するか
+    - rules: 適用する detector 名のリスト（`DetectorRule` 列挙の値）
+    - default_action: 検出時の既定 action（`RedactionAction` 列挙の値）
+    - fail_mode: detector 実行不能時の挙動（`FailMode` 列挙の値）
+    """
+
+    enabled: bool = False
+    rules: list[str] = field(default_factory=list)
+    default_action: str = "redact"
+    fail_mode: str = "block"
+
+
+@dataclass
+class LLMGatewayApprovalsConfig:
+    """LLM Gateway Human Approval 必要条件設定（Issue #58 / 要件 §4.1 / §8）。
+
+    各キーは `"required"` / `"optional"` / `"disabled"` のいずれかを取る。
+    既定はすべて `"disabled"`（Phase 1 では approval 未実装のため）。
+    """
+
+    high_cost_model: str = "disabled"
+    pii_send_without_redaction: str = "disabled"
+    policy_override: str = "disabled"
+
+
+@dataclass
+class LLMGatewayAuditConfig:
+    """LLM Gateway audit log 粒度設定（Issue #58 / 要件 §4.1 / §9）。
+
+    - store_prompt_hash: prompt の sha256 hash を保存するか
+    - store_redacted_preview: redaction 後の preview 文字列を保存するか
+    - store_full_prompt: prompt 本文をそのまま保存するか（debug 用、既定 False）
+    """
+
+    store_prompt_hash: bool = True
+    store_redacted_preview: bool = False
+    store_full_prompt: bool = False
+
+
+@dataclass
 class LLMGatewayConfig:
     """LLM Gateway（送信前 governance layer）設定（#39 / v0.6.0〜）
 
     docs/hokusai-llm-gateway-requirements.md §13.3 の rollout を段階導入する。
-    Phase 1 (本フィールド導入時点) は step 1（config schema）と step 8a
-    （Claude interceptor）のみ。decision は常に `log` のみで block しない。
+    Phase 1 step 1（config schema）+ step 8a（Claude interceptor）は #39
+    で実装済み。Issue #58 で要件 §4.1 のフル schema（allowed_providers /
+    allowed_models / spend_cap / pii_redaction / approvals / audit）を追加。
+    decision は依然として `log` のみで実 enforcement は後続 PR。
 
     - enabled: Gateway 全体の ON/OFF。False なら interceptor は no-op
-    - dry_run: 送信は行うが decision を「dry-run」として log する評価モード。
-      Phase 1 では `log_only=True` と同じ挙動（block しない）。Phase 5+ で
-      block 候補を試走するときに意味を持つ
-    - log_only: decision を block せず log のみとする（Phase 1 既定 True）。
-      Phase 5+ で False にすると block decision が有効化される
+    - dry_run: 送信は行うが decision を「dry-run」として log する評価モード
+    - log_only: decision を block せず log のみとする（Phase 1 既定 True）
     - audit_log_enabled: interceptor 通過時に構造化 log entry を残すか
+    - allowed_providers: 利用可能 provider 名のリスト（既定 `[]`、空時は
+      Phase 1 後続実装で「未指定 = enforcement skip」として解釈予定）
+    - allowed_models: default / high_cost_requires_gate の model リスト
+    - spend_cap: 月次 / 日次 / workflow / phase 単位 jpy cap
+    - pii_redaction: PII / secret detector 設定
+    - approvals: Human Approval 必要条件
+    - audit: audit log 粒度
     """
 
     enabled: bool = False
     dry_run: bool = False
     log_only: bool = True
     audit_log_enabled: bool = True
+    allowed_providers: list[str] = field(default_factory=list)
+    allowed_models: LLMGatewayAllowedModelsConfig = field(
+        default_factory=LLMGatewayAllowedModelsConfig
+    )
+    spend_cap: LLMGatewaySpendCapConfig = field(
+        default_factory=LLMGatewaySpendCapConfig
+    )
+    pii_redaction: LLMGatewayPiiRedactionConfig = field(
+        default_factory=LLMGatewayPiiRedactionConfig
+    )
+    approvals: LLMGatewayApprovalsConfig = field(
+        default_factory=LLMGatewayApprovalsConfig
+    )
+    audit: LLMGatewayAuditConfig = field(default_factory=LLMGatewayAuditConfig)
 
 
 @dataclass
