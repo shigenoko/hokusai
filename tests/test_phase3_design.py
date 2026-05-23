@@ -9,10 +9,9 @@ Phase 3 設計チェックノードのテスト
 - NOTION_WRITE_TOOLS: Notion書き込み遮断
 """
 
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
-
 
 # ---------------------------------------------------------------------------
 # 直接プロンプト実行テスト
@@ -273,6 +272,10 @@ class TestValidateDesignOutput:
 
 class TestVerifyDesignSubpageContent:
     """_verify_design_subpage_content の検証テスト"""
+
+    @pytest.fixture(autouse=True)
+    def _clear_skip_notion(self, monkeypatch):
+        monkeypatch.delenv("HOKUSAI_SKIP_NOTION", raising=False)
 
     def _build_state(self):
         phase_template = {
