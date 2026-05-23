@@ -720,6 +720,12 @@ def main():
             if from_phase and from_phase > 1:
                 print_from_phase_start(from_phase, branch)
 
+            # M0.2: Notion DB share 健全性チェック（Issue #82）。enabled かつ
+            # 必要 env が揃っているケースで、各 DB に integration が share
+            # されているかを retrieve_database で事前確認する。失敗があれば
+            # warning を表示するが workflow start は継続（fail-open）。
+            _print_notion_db_share_warnings(config)
+
             workflow_id = runner.start(
                 args.task_url,
                 from_phase=from_phase,
@@ -1703,6 +1709,51 @@ def _handle_profile_doctor(name: str, registry, *, deep: bool = False) -> int:
 
     print("OK: 問題ありません")
     return 0
+
+
+def _print_notion_db_share_warnings(config) -> None:
+    """Notion DB share の健全性を事前チェックして warning を表示する（Issue #82 / M0.2）。
+
+    `hokusai start` 冒頭で呼び、Notion 側で integration "HOKUSAI" に
+    Workflows / PR / Memory 等の各 DB が share されているかを retrieve_database
+    で確認する。share されていない DB があれば warning として一覧表示し、
+    workflow start 自体は継続する（fail-open）。
+
+    Notion 機能が無効化されている / 必要 env が揃っていない場合は何もしない。
+    """
+    try:
+        notion_cfg = getattr(config, "notion_dashboard", None)
+        if notion_cfg is None or not notion_cfg.enabled:
+            return
+
+        from .integrations.notion_dashboard.dispatcher import NotionSyncDispatcher
+        from .persistence.sqlite_store import SQLiteStore
+
+        store = SQLiteStore(config.database_path)
+        dispatcher = NotionSyncDispatcher(store, notion_cfg)
+
+        results = dispatcher.check_db_share_health()
+        failed = [(env, msg) for env, (ok, msg) in results.items() if not ok]
+        if not failed:
+            return
+
+        print(
+            f"⚠️  Notion DB share check で {len(failed)} 件の問題が見つかりました:"
+        )
+        for env, msg in failed:
+            print(f"   - {env}: {msg}")
+        print(
+            "   integration \"HOKUSAI\" を該当 DB に share してください。"
+            "workflow は継続しますが、Notion 同期は outbox 経由でリトライされ続けます。"
+        )
+    except Exception as exc:
+        # 健全性チェック自体が失敗しても workflow start を止めない。
+        # logger は main() 内 local なので module level get_logger を使う
+        from .logging_config import get_logger
+
+        get_logger("cli_main").debug(
+            "Notion DB share check 自体が失敗 (type=%s)", type(exc).__name__
+        )
 
 
 def _sync_workflow_cancel_reason(

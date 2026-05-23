@@ -15,7 +15,6 @@ import tempfile
 import urllib.error
 from io import BytesIO
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -35,7 +34,6 @@ from hokusai.integrations.notion_dashboard.client import (
 from hokusai.integrations.notion_dashboard.dispatcher import NotionSyncDispatcher
 from hokusai.integrations.notion_dashboard.workflows_db import WorkflowsDBClient
 from hokusai.persistence.sqlite_store import SQLiteStore
-
 
 # ---------------------------------------------------------------------------
 # 設定パース
@@ -1794,6 +1792,7 @@ def test_build_notion_payload_includes_design_when_failed():
 def _make_runner():
     """SQLite を temp に逃がして WorkflowRunner を生成"""
     import tempfile
+
     from hokusai.config import set_config
     from hokusai.config.models import WorkflowConfig
 
@@ -3206,3 +3205,80 @@ def test_set_supersedes_raises_when_property_missing_after_pruning():
     client = WorkflowsDBClient(api=api, database_id="wf-db")
     with pytest.raises(NotionAPIError):
         client.set_supersedes("page-x", "page-prior")
+
+
+# ---------------------------------------------------------------------------
+# Issue #82 / M0.2: NotionSyncDispatcher.check_db_share_health
+# ---------------------------------------------------------------------------
+
+
+def test_check_db_share_health_returns_empty_when_not_configured(store):
+    """is_configured()=False のとき空 dict を返す（M0.2 / Issue #82）"""
+    disp = NotionSyncDispatcher(store=store, config=_make_config(enabled=False))
+    assert disp.check_db_share_health() == {}
+
+
+def test_check_db_share_health_skips_unset_env_vars(store, monkeypatch):
+    """env が設定されていない DB は dict に含めない（skip）"""
+    monkeypatch.setenv("TEST_TOKEN", "secret")
+    monkeypatch.setenv("TEST_DB", "db-workflows")
+    # 他の DB env を明示的に削除（dev 環境で leak している可能性に対処）
+    for env_name in [
+        "HOKUSAI_NOTION_PR_DB_ID",
+        "HOKUSAI_NOTION_REVIEW_ISSUES_DB_ID",
+        "HOKUSAI_NOTION_WORK_ITEMS_DB_ID",
+        "HOKUSAI_NOTION_WORKFLOW_GATES_DB_ID",
+        "HOKUSAI_NOTION_PROJECT_MEMORY_DB_ID",
+    ]:
+        monkeypatch.delenv(env_name, raising=False)
+
+    # NotionAPIClient.retrieve_database が成功するようパッチ
+    monkeypatch.setattr(
+        NotionAPIClient, "retrieve_database", lambda self, db_id: {"id": db_id}
+    )
+
+    disp = NotionSyncDispatcher(store=store, config=_make_config())
+    results = disp.check_db_share_health()
+    # TEST_DB のみ含まれ、他は env 未設定なので skip
+    assert list(results.keys()) == ["TEST_DB"]
+    assert results["TEST_DB"] == (True, None)
+
+
+def test_check_db_share_health_detects_404_as_share_missing(store, monkeypatch):
+    """404 エラーは「integration not shared」として警告する"""
+    monkeypatch.setenv("TEST_TOKEN", "secret")
+    monkeypatch.setenv("TEST_DB", "db-not-shared")
+
+    def _raise_404(self, db_id):
+        raise NotionAPIError(
+            404, "Could not find database with ID: ...", code="object_not_found"
+        )
+
+    monkeypatch.setattr(NotionAPIClient, "retrieve_database", _raise_404)
+
+    disp = NotionSyncDispatcher(store=store, config=_make_config())
+    results = disp.check_db_share_health()
+    ok, msg = results["TEST_DB"]
+    assert ok is False
+    assert msg is not None
+    assert "integration not shared" in msg
+    assert "404" in msg
+
+
+def test_check_db_share_health_handles_unexpected_exception(store, monkeypatch):
+    """retrieve_database が想定外の例外を投げても fail-open で結果を返す"""
+    monkeypatch.setenv("TEST_TOKEN", "secret")
+    monkeypatch.setenv("TEST_DB", "db-network-error")
+
+    def _raise_runtime(self, db_id):
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(NotionAPIClient, "retrieve_database", _raise_runtime)
+
+    disp = NotionSyncDispatcher(store=store, config=_make_config())
+    results = disp.check_db_share_health()
+    ok, msg = results["TEST_DB"]
+    assert ok is False
+    assert msg is not None
+    assert "RuntimeError" in msg
+    assert "connection refused" in msg
