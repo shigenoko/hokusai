@@ -430,7 +430,30 @@ def test_interceptor_policy_hits_high_cost_model(caplog):
     assert "high_cost_model" in decision.policy_hits
 
 
-def test_interceptor_policy_hits_multiple_concurrent(caplog):
+def test_interceptor_policy_hits_skip_when_model_empty(caplog):
+    """context.model が空文字 (呼び出し側で取得不可) のときは allowed_models
+    系の evaluation を skip（Copilot Round 1 指摘）。空を「allowlist にない」と
+    判定すると常時 unknown_model hit で audit が誤検知だらけになるため。"""
+    from hokusai.config.models import LLMGatewayAllowedModelsConfig
+
+    config = _make_config(
+        allowed_models=LLMGatewayAllowedModelsConfig(
+            default=["claude-3-5-sonnet"],
+            high_cost_requires_gate=["claude-3-opus"],
+        )
+    )
+    interceptor = LLMGatewayInterceptor(config)
+    with caplog.at_level(logging.INFO, logger="hokusai.llm_gateway"):
+        decision = interceptor.intercept(
+            # model="" (default) — ClaudeCodeClient 等が model を埋めない実態に相当
+            LLMGatewayContext(provider="claude_code"),
+            "p",
+        )
+    assert "unknown_model" not in decision.policy_hits
+    assert "high_cost_model" not in decision.policy_hits
+
+
+def test_interceptor_policy_hits_multiple_hits(caplog):
     """複数 hit が同時に発生する: unknown_provider + unknown_model + high_cost"""
     from hokusai.config.models import LLMGatewayAllowedModelsConfig
 

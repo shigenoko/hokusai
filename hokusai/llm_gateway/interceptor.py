@@ -116,11 +116,18 @@ class LLMGatewayInterceptor:
 
         - `allowed_providers`: None なら未指定として skip（要件 §4.2）。
           list なら context.provider が含まれない場合 "unknown_provider" を hit。
-        - `allowed_models.default`: None なら skip。list なら context.model が
-          含まれない場合 "unknown_model" を hit。
-        - `allowed_models.high_cost_requires_gate`: 空 list なら skip。非空で
-          context.model が含まれる場合 "high_cost_model" を hit（後続 PR で
-          approval gate と接続される予定）。
+        - `allowed_models.default`: None なら skip。list でも context.model が
+          空文字（呼び出し側で取得できなかった場合）のときは誤検知防止のため
+          skip。それ以外で context.model が含まれない場合 "unknown_model" を hit。
+        - `allowed_models.high_cost_requires_gate`: 空 list なら skip。非空でも
+          context.model が空文字なら skip。context.model が含まれる場合
+          "high_cost_model" を hit（後続 PR で approval gate と接続される予定）。
+
+        **空 model の扱い**: `LLMGatewayContext.model` は呼び出し側が model 名を
+        取得できないとき "" になる（例: `ClaudeCodeClient` は現状 model を context
+        に埋めない）。空文字を「allowlist にない」と判定すると `unknown_model`
+        が常時 hit して audit が誤検知だらけになるため、空文字は評価 skip と
+        する（Copilot Round 1 指摘）。
         """
         hits: list[str] = []
 
@@ -131,16 +138,18 @@ class LLMGatewayInterceptor:
         ):
             hits.append(POLICY_HIT_UNKNOWN_PROVIDER)
 
-        allowed_default = self._config.allowed_models.default
-        if (
-            allowed_default is not None
-            and context.model not in allowed_default
-        ):
-            hits.append(POLICY_HIT_UNKNOWN_MODEL)
+        # 空 model は誤検知防止のため allowed_models 系の evaluation を skip
+        if context.model:
+            allowed_default = self._config.allowed_models.default
+            if (
+                allowed_default is not None
+                and context.model not in allowed_default
+            ):
+                hits.append(POLICY_HIT_UNKNOWN_MODEL)
 
-        high_cost = self._config.allowed_models.high_cost_requires_gate
-        if high_cost and context.model in high_cost:
-            hits.append(POLICY_HIT_HIGH_COST_MODEL)
+            high_cost = self._config.allowed_models.high_cost_requires_gate
+            if high_cost and context.model in high_cost:
+                hits.append(POLICY_HIT_HIGH_COST_MODEL)
 
         return tuple(hits)
 
