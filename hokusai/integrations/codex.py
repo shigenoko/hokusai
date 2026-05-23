@@ -91,6 +91,17 @@ class CodexClient:
             f"---\n\n{document}"
         )
 
+        # LLM Gateway interceptor (Issue #62 / Phase 1: log-only)
+        # provider="codex" / model=self.model / purpose="cross_review" として
+        # 評価する。Gateway 無効化や例外時は副作用なしで透過する。
+        # `has_schema` は実 CLI 呼び出し（後段の `if schema_path:`）と判定基準を
+        # 揃えるため `bool(schema_path)` で評価する。空文字列も「未指定」と
+        # 同等に扱い、audit metadata と実 invocation の意味を一致させる
+        # （PR #63 Copilot Round 3 指摘）。
+        self._invoke_llm_gateway_interceptor(
+            full_prompt, has_schema=bool(schema_path)
+        )
+
         cmd = [
             self.codex_path,
             "exec",
@@ -123,6 +134,41 @@ class CodexClient:
 
         # JSON出力をパース
         return self._parse_output(result.stdout)
+
+    def _invoke_llm_gateway_interceptor(
+        self, prompt: str, *, has_schema: bool
+    ) -> None:
+        """LLM Gateway interceptor を呼ぶ（Issue #62 / Phase 1: log-only）。
+
+        ClaudeCodeClient._invoke_llm_gateway_interceptor と同じ safety pattern:
+        - Gateway が無効化（enabled=False）なら interceptor 内部で no-op
+        - audit_log_enabled なら構造化 log entry が logger に流れる
+        - decision は Phase 1 では常に "log" / "skipped" で値は使わない
+        - **既存フローへの影響をゼロにするため例外は完全に握り潰す**。
+          stack trace は `exc_info=True` で debug ログにのみ残し、メッセージ
+          経由で secret/PII が log にこぼれないよう本文は出さない。
+
+        provider="codex" / model=self.model を context に詰めるため、PR #61 で
+        追加した policy_hits 評価（unknown_model / high_cost_model）が
+        Codex callsite 経由で初めて意味を持つ。
+        """
+        try:
+            from ..config import get_config
+            from ..llm_gateway import LLMGatewayContext, LLMGatewayInterceptor
+
+            config = get_config()
+            gateway_config = getattr(config, "llm_gateway", None)
+            if gateway_config is None:
+                return
+            context = LLMGatewayContext(
+                provider="codex",
+                model=self.model,
+                purpose="cross_review",
+                metadata={"has_schema": has_schema},
+            )
+            LLMGatewayInterceptor(gateway_config).intercept(context, prompt)
+        except Exception:
+            logger.debug("LLM Gateway interceptor 内例外を抑制", exc_info=True)
 
     def _parse_output(self, output: str) -> dict[str, Any]:
         """Codex出力をパース"""
