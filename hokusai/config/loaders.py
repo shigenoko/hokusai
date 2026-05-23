@@ -435,13 +435,25 @@ def _parse_str_list_or_none(
     Returns:
         - キー未指定 → `None`
         - キーありかつ非 list → `None`（型不正なので未指定と同等扱い）
-        - キーありかつ list → str 要素のみ抽出（[] も保持）
+        - キーありかつ明示 `[]` → `[]`（ユーザーが明示した空 allowlist）
+        - キーありかつ list（str 要素を含む）→ str 要素のみ抽出
+        - キーありかつ非空 list だが str 要素が 1 つもない（例: `[42]`）→ `None`
+          （filter 後 [] と explicit [] の semantic flip を防ぐため、型不正と
+          同等扱いで未指定に倒す）
     """
     if not key_present:
         return None
     if not isinstance(raw, list):
         return None
-    return [v for v in raw if isinstance(v, str)]
+    if not raw:
+        # 明示的に空配列 → そのまま保持
+        return []
+    filtered = [v for v in raw if isinstance(v, str)]
+    if not filtered:
+        # 元 list は非空だが str が 1 つもない → 不正値として None に倒す
+        # （explicit [] と区別する: filter 後 [] になると semantic が flip する）
+        return None
+    return filtered
 
 
 def _parse_llm_gateway_allowed_models(raw: object):

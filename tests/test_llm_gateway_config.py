@@ -362,3 +362,28 @@ def test_loader_distinguishes_unspecified_from_explicit_empty_allowlist():
     }
     cfg_invalid = _parse_llm_gateway_config(raw_invalid)
     assert cfg_invalid.allowed_providers is None
+
+
+def test_loader_treats_all_non_string_list_as_unspecified_not_empty():
+    """allowed_providers / allowed_models.default が非空 list だが str 要素が
+    1 つもない場合（例: `[42]`）、filter 後 `[]` と explicit `[]` が同義に
+    なって semantic flip するため、None に倒す（Copilot Round 5 指摘）。"""
+    raw = {
+        "llm_gateway": {
+            "allowed_providers": [42, True, None],  # 非空だが str なし
+            "allowed_models": {"default": [{"obj": "x"}]},
+        }
+    }
+    cfg = _parse_llm_gateway_config(raw)
+    # explicit [] とは区別される: 「不正値だったので未指定扱い」を意味する None
+    assert cfg.allowed_providers is None
+    assert cfg.allowed_models.default is None
+
+    # 一部 str を含む場合は str 要素のみ抽出（既存挙動を維持）
+    raw_partial = {
+        "llm_gateway": {
+            "allowed_providers": ["openai", 42, "anthropic"],
+        }
+    }
+    cfg_partial = _parse_llm_gateway_config(raw_partial)
+    assert cfg_partial.allowed_providers == ["openai", "anthropic"]

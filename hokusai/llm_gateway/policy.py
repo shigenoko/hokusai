@@ -1,6 +1,6 @@
-"""LLM Gateway policy 関連の定数列挙（Issue #58 / 要件 §7.1 / §8.2）
+"""LLM Gateway policy 関連の定数列挙（Issue #58 / 要件 §7.1 / §8.1 / §8.2）
 
-- `DetectorRule`: PII / secret detector の rule 名（YAML
+- `DetectorRule`: PII / secret detector の rule 名（要件 §7.1。YAML
   `pii_redaction.rules` の取りうる値）。
 - `ApprovalReason`: Human Approval gate が必要になる条件名（要件 §8.1）。
 - `ApprovalGateType`: 作成される Workflow Gate の type（要件 §8.2、既存
