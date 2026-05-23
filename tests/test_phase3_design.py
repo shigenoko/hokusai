@@ -9,10 +9,9 @@ Phase 3 設計チェックノードのテスト
 - NOTION_WRITE_TOOLS: Notion書き込み遮断
 """
 
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
-
 
 # ---------------------------------------------------------------------------
 # 直接プロンプト実行テスト
