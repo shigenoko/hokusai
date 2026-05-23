@@ -150,9 +150,11 @@ class NotionSyncDispatcher:
                 self._get_api().retrieve_database(db_id)
                 results[env_name] = (True, None)
             except NotionAPIError as e:
-                # NotionAPIError("Notion API error 404: ...") の形なので 404 を文字列で判定
+                # 404 (integration not shared) を構造化された status 属性で判定する
+                # （Issue #82 Copilot Round 2 指摘: 文字列 substring 検索だと
+                # DB ID や validation text に "404" が含まれるケースで誤検出する）。
                 msg = str(e)
-                if "404" in msg:
+                if e.status == 404:
                     results[env_name] = (
                         False,
                         f"integration not shared with DB (404): {msg[:160]}",

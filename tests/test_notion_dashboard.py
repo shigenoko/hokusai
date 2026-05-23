@@ -3305,6 +3305,38 @@ def test_check_db_share_health_treats_5xx_as_non_share_error(store, monkeypatch)
     assert "500" in msg
 
 
+def test_check_db_share_health_does_not_false_positive_on_404_in_message(
+    store, monkeypatch
+):
+    """エラーメッセージに偶然 "404" の文字列が含まれていても、status が 404 で
+    なければ「integration not shared」誤検出しない（Issue #82 Copilot Round 2
+    指摘: 構造化 status での判定）"""
+    monkeypatch.setenv("TEST_TOKEN", "secret")
+    monkeypatch.setenv("TEST_DB", "db-validation-error")
+
+    def _raise_validation_with_404_in_msg(self, db_id):
+        # status は 400 だが、message に "404" を含む偶発ケース
+        raise NotionAPIError(
+            400,
+            "validation_error: database id 404-abc-def is malformed",
+            code="validation_error",
+        )
+
+    monkeypatch.setattr(
+        NotionAPIClient, "retrieve_database", _raise_validation_with_404_in_msg
+    )
+
+    disp = NotionSyncDispatcher(store=store, config=_make_config())
+    results = disp.check_db_share_health()
+    ok, msg = results["TEST_DB"]
+    assert ok is False
+    # 偽陽性ガード: message に "404" が含まれていても integration not shared
+    # と分類しない
+    assert msg is not None
+    assert "integration not shared" not in msg
+    assert "validation_error" in msg
+
+
 def test_print_notion_db_share_warnings_skips_when_skip_notion_env(
     monkeypatch, capsys, tmp_path
 ):
