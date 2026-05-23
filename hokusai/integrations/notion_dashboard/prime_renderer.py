@@ -46,6 +46,10 @@ MEMORY_TYPE_HEADINGS: dict[str, str] = {
     MEMORY_TYPE_POLICY_NOTE: "Policy Notes（コンプライアンス）",
 }
 
+# title / status の欠落表示（SonarCloud 文字列重複対策: 定数化）
+_UNTITLED = "(untitled)"
+_UNKNOWN_STATUS = "(unknown)"
+
 
 def render_prime_markdown(
     *,
@@ -53,19 +57,31 @@ def render_prime_markdown(
     profile: str | None,
     current_phase: str | None,
     memories: list[dict],
+    work_items: list[dict] | None = None,
+    review_issues: list[dict] | None = None,
+    gates: list[dict] | None = None,
 ) -> str:
-    """active Memory のリストを Agent prompt 向け Markdown へ整形する。
+    """active Memory + workgraph context のリストを Agent prompt 向け
+    Markdown へ整形する（Workgraph 完成 / Issue #54）。
 
-    Memory Type ごとに `## Heading` で section 化し、各 entry を以下の形式で
-    出力する:
+    出力順序（要件 §8.4 で「先に必要な情報」を冒頭に並べる方針）:
+    1. Handover Notes（前任引き継ぎ）
+    2. 残り Memory Type（project_rule / architecture_decision など）
+    3. Work Items（ready / in_progress）
+    4. Review Issues（open）
+    5. Workflow Gates（pending / blocked / open）
 
-        ### {Name}
-        **Type:** {memory_type} / **Applies To:** phase1, phase2
-        > {Summary or Content}
+    空のセクションは省略する。
 
     Returns:
-        UTF-8 Markdown 文字列。空入力時はヘッダのみの最小出力を返す。
+        UTF-8 Markdown 文字列。
     """
+    # Markdown 側は「未取得」と「空」を区別する必要がないため None を [] に
+    # 正規化（JSON renderer は None / [] を区別保持、Copilot 指摘）。
+    work_items = work_items or []
+    review_issues = review_issues or []
+    gates = gates or []
+
     lines: list[str] = []
     lines.append(f"# HOKUSAI Prime Context — workflow `{workflow_id}`")
     meta_bits = []
@@ -78,35 +94,62 @@ def render_prime_markdown(
         lines.append(" / ".join(meta_bits))
     lines.append("")
 
-    if not memories:
-        lines.append("_active Project Memory はありません_")
+    has_any = bool(memories) or bool(work_items) or bool(review_issues) or bool(gates)
+    if not has_any:
+        lines.append("_active な workgraph context はありません_")
         lines.append("")
         return "\n".join(lines)
 
-    grouped: dict[str, list[dict]] = {}
-    for page in memories:
-        mtype = _extract_select_name(page, "Type") or "unknown"
-        grouped.setdefault(mtype, []).append(page)
+    # Memory セクション
+    if memories:
+        grouped: dict[str, list[dict]] = {}
+        for page in memories:
+            mtype = _extract_select_name(page, "Type") or "unknown"
+            grouped.setdefault(mtype, []).append(page)
 
-    for mtype in MEMORY_TYPE_DISPLAY_ORDER:
-        entries = grouped.get(mtype)
-        if not entries:
-            continue
-        heading = MEMORY_TYPE_HEADINGS.get(mtype, mtype)
-        lines.append(f"## {heading}")
+        for mtype in MEMORY_TYPE_DISPLAY_ORDER:
+            entries = grouped.get(mtype)
+            if not entries:
+                continue
+            heading = MEMORY_TYPE_HEADINGS.get(mtype, mtype)
+            lines.append(f"## {heading}")
+            lines.append("")
+            for entry in entries:
+                lines.extend(_render_memory_entry(entry, mtype))
+                lines.append("")
+
+        # 知らない type（DB schema drift 想定外）は Memory 末尾に出す
+        for mtype, entries in grouped.items():
+            if mtype in MEMORY_TYPE_DISPLAY_ORDER:
+                continue
+            lines.append(f"## {mtype}")
+            lines.append("")
+            for entry in entries:
+                lines.extend(_render_memory_entry(entry, mtype))
+                lines.append("")
+
+    # Work Items（ready / in_progress 両方を含む。Copilot 指摘で見出しを実態に整合）
+    if work_items:
+        lines.append("## Work Items（ready / in_progress）")
         lines.append("")
-        for entry in entries:
-            lines.extend(_render_memory_entry(entry, mtype))
+        for wi in work_items:
+            lines.extend(_render_work_item_entry(wi))
             lines.append("")
 
-    # 知らない type（DB schema drift 想定外）は末尾に出す
-    for mtype, entries in grouped.items():
-        if mtype in MEMORY_TYPE_DISPLAY_ORDER:
-            continue
-        lines.append(f"## {mtype}")
+    # Review Issues
+    if review_issues:
+        lines.append("## Open Review Issues（未解消の指摘）")
         lines.append("")
-        for entry in entries:
-            lines.extend(_render_memory_entry(entry, mtype))
+        for issue in review_issues:
+            lines.extend(_render_review_issue_entry(issue))
+            lines.append("")
+
+    # Gates（pending / blocked / open を含む。Copilot 指摘で見出しを実態に整合）
+    if gates:
+        lines.append("## Workflow Gates（pending / blocked / open）")
+        lines.append("")
+        for gate in gates:
+            lines.extend(_render_gate_entry(gate))
             lines.append("")
 
     return "\n".join(lines).rstrip() + "\n"
@@ -118,17 +161,42 @@ def render_prime_json(
     profile: str | None,
     current_phase: str | None,
     memories: list[dict],
+    work_items: list[dict] | None = None,
+    review_issues: list[dict] | None = None,
+    gates: list[dict] | None = None,
 ) -> str:
-    """active Memory を Agent / 自動処理向け JSON へ整形する。
+    """active Memory + workgraph context を Agent / 自動処理向け JSON へ整形
+    する（Workgraph 完成 / Issue #54）。
 
-    Markdown 版との差分: 表示順 / 整形を行わず、`memories` 配列に Memory の
-    生 property を抜き出した dict を入れる。後段で別形式に再変換しやすい。
+    Markdown 版との差分: 表示順 / 整形を行わず、各カテゴリ配列に raw 抜き出し
+    dict を入れる。
+
+    「未取得」（DB ID 未設定 / 取得 skip）と「取得済みだが 0 件」を呼び出し
+    側で区別できるよう、`None` は JSON 上 `null` として保持し、`[]` は空配列
+    として保持する（Copilot 指摘: 以前は `or []` で両者を潰していた）。
+    呼び出し側が「未取得」を「未対応領域」として扱うか「0 件」と同等に扱うか
+    を選択できる。
     """
     payload: dict[str, Any] = {
         "workflow_id": workflow_id,
         "profile": profile,
         "current_phase": current_phase,
         "memories": [_extract_memory_dict(page) for page in memories],
+        "work_items": (
+            [_extract_work_item_dict(p) for p in work_items]
+            if work_items is not None
+            else None
+        ),
+        "review_issues": (
+            [_extract_review_issue_dict(p) for p in review_issues]
+            if review_issues is not None
+            else None
+        ),
+        "gates": (
+            [_extract_gate_dict(p) for p in gates]
+            if gates is not None
+            else None
+        ),
     }
     return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
 
@@ -139,7 +207,7 @@ def render_prime_json(
 
 
 def _render_memory_entry(page: dict, memory_type: str) -> list[str]:
-    name = _extract_title(page, "Name") or "(untitled)"
+    name = _extract_title(page, "Name") or _UNTITLED
     applies = _extract_multi_select(page, "Applies To")
     summary = _extract_rich_text(page, "Summary")
     content = _extract_rich_text(page, "Content")
@@ -163,6 +231,111 @@ def _render_memory_entry(page: dict, memory_type: str) -> list[str]:
         for ln in body.splitlines() or [""]:
             out.append(f"> {ln}" if ln else ">")
     return out
+
+
+def _render_work_item_entry(page: dict) -> list[str]:
+    title = _extract_title(page, "Title") or _UNTITLED
+    status = _extract_select_name(page, "Status") or _UNKNOWN_STATUS
+    phase = _extract_select_name(page, "Phase")
+    out: list[str] = [f"### {title}"]
+    meta = [f"**Status:** `{status}`"]
+    if phase:
+        meta.append(f"**Phase:** `{phase}`")
+    out.append(" / ".join(meta))
+    description = _extract_rich_text(page, "Description").strip()
+    if description:
+        for ln in description.splitlines() or [""]:
+            out.append(f"> {ln}" if ln else ">")
+    return out
+
+
+def _render_review_issue_entry(page: dict) -> list[str]:
+    title = _extract_title(page, "Title") or _UNTITLED
+    severity = _extract_select_name(page, "Severity") or _UNKNOWN_STATUS
+    source = _extract_select_name(page, "Source")
+    rule_id = _extract_rich_text(page, "Rule ID")
+    file_path = _extract_rich_text(page, "File Path")
+    out: list[str] = [f"### {title}"]
+    meta = [f"**Severity:** `{severity}`"]
+    if source:
+        meta.append(f"**Source:** `{source}`")
+    if rule_id:
+        meta.append(f"**Rule:** `{rule_id}`")
+    if file_path:
+        meta.append(f"**File:** `{file_path}`")
+    out.append(" / ".join(meta))
+    message = _extract_rich_text(page, "Message").strip()
+    if message:
+        for ln in message.splitlines() or [""]:
+            out.append(f"> {ln}" if ln else ">")
+    return out
+
+
+def _render_gate_entry(page: dict) -> list[str]:
+    name = _extract_title(page, "Name") or _UNTITLED
+    status = _extract_select_name(page, "Status") or _UNKNOWN_STATUS
+    gate_type = _extract_select_name(page, "Gate Type")
+    # Required By Phase は Workflow Gates DB 上 number プロパティなので
+    # number から読み取って `phase{n}` に整形する（Copilot 指摘で rich_text
+    # 読み出しから修正）。1..10 の整数なら `phase{n}`、それ以外は数値そのまま。
+    required_phase_num = _extract_number(page, "Required By Phase")
+    out: list[str] = [f"### {name}"]
+    meta = [f"**Status:** `{status}`"]
+    if gate_type:
+        meta.append(f"**Type:** `{gate_type}`")
+    if required_phase_num is not None:
+        if isinstance(required_phase_num, int) and 1 <= required_phase_num <= 10:
+            meta.append(f"**Required by:** `phase{required_phase_num}`")
+        else:
+            meta.append(f"**Required by:** `{required_phase_num}`")
+    out.append(" / ".join(meta))
+    description = _extract_rich_text(page, "Description").strip()
+    if description:
+        for ln in description.splitlines() or [""]:
+            out.append(f"> {ln}" if ln else ">")
+    return out
+
+
+def _extract_work_item_dict(page: dict) -> dict[str, Any]:
+    return {
+        "id": page.get("id"),
+        "title": _extract_title(page, "Title"),
+        "status": _extract_select_name(page, "Status"),
+        "phase": _extract_select_name(page, "Phase"),
+        "description": _extract_rich_text(page, "Description"),
+    }
+
+
+def _extract_review_issue_dict(page: dict) -> dict[str, Any]:
+    return {
+        "id": page.get("id"),
+        "title": _extract_title(page, "Title"),
+        "status": _extract_select_name(page, "Status"),
+        "severity": _extract_select_name(page, "Severity"),
+        "source": _extract_select_name(page, "Source"),
+        "rule_id": _extract_rich_text(page, "Rule ID"),
+        "file_path": _extract_rich_text(page, "File Path"),
+        "message": _extract_rich_text(page, "Message"),
+    }
+
+
+def _extract_gate_dict(page: dict) -> dict[str, Any]:
+    return {
+        "id": page.get("id"),
+        "name": _extract_title(page, "Name"),
+        "status": _extract_select_name(page, "Status"),
+        "gate_type": _extract_select_name(page, "Gate Type"),
+        # Required By Phase は number プロパティ。整数で JSON 出力する
+        # （Copilot 指摘: rich_text 読み出しは常に空になる schema 不整合）
+        "required_by_phase": _extract_number(page, "Required By Phase"),
+        "description": _extract_rich_text(page, "Description"),
+    }
+
+
+def _extract_number(page: dict, prop_name: str):
+    """Notion `number` プロパティの値を抜き出す（None / 数値）。"""
+    prop = (page.get("properties") or {}).get(prop_name) or {}
+    return prop.get("number")
 
 
 def _extract_memory_dict(page: dict) -> dict[str, Any]:
@@ -189,28 +362,14 @@ def _extract_rich_text(page: dict, prop_name: str) -> str:
 
 
 def _join_rich_text_items(items: list[dict]) -> str:
-    """Notion の rich_text / title array の全要素を連結して 1 つの文字列にする。
+    """Notion rich_text / title array の全要素を連結する（共通 helper 経由）。
 
-    Notion は装飾 / メンション / リンクで rich_text を複数 element に分割する
-    ため、先頭要素だけ読むと後続のテキストが欠落する。各 element は
-    `plain_text` をまず採用し、無ければ `text.content` でフォールバック
-    （mention / equation 等で `text` キーが無いケースに耐性を持たせる）。
-    Copilot 指摘。
+    SonarCloud duplication 対策で `_text_helpers.join_rich_text_items` に
+    実装を集約し、本モジュールでは wrapper として呼び出す。詳細は同 module
+    の docstring 参照。
     """
-    parts: list[str] = []
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        plain = item.get("plain_text")
-        if isinstance(plain, str) and plain:
-            parts.append(plain)
-            continue
-        text = item.get("text")
-        if isinstance(text, dict):
-            content = text.get("content")
-            if isinstance(content, str) and content:
-                parts.append(content)
-    return "".join(parts)
+    from ._text_helpers import join_rich_text_items
+    return join_rich_text_items(items)
 
 
 def _extract_select_name(page: dict, prop_name: str) -> str | None:

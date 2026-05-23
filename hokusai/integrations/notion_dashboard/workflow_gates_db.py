@@ -219,6 +219,55 @@ class WorkflowGatesDBClient:
             properties["Decision Reason"] = _rich_text(decision_reason)
         return self._submit_with_property_pruning(page_id, properties)
 
+    def list_pending_gates_for_workflow(
+        self,
+        workflow_page_id: str | None,
+        *,
+        max_pages: int = 5,
+    ) -> list[dict]:
+        """指定 workflow に紐づく pending / blocked / open な Gate を取得する
+        （Workgraph 完成 / Issue #54 / 要件 §8.4 `hokusai prime` 統合表示）。
+
+        サーバ側 filter: AND(Status in {pending, blocked, open}, Workflow contains
+        workflow_page_id)。「次に必要な人間判断」と「blocking 状態」を統合した
+        ビューを prime 出力に提供する用途。ページネーション / 部分結果保持 /
+        truncation warning は共通 `_pagination.paginate_query` に集約。
+        """
+        if not workflow_page_id:
+            return []
+        from ._pagination import paginate_query
+        return paginate_query(
+            api=self._api,
+            database_id=self._database_id,
+            filter_={
+                "and": [
+                    {
+                        "or": [
+                            {
+                                "property": "Status",
+                                "select": {"equals": GATE_STATUS_PENDING},
+                            },
+                            {
+                                "property": "Status",
+                                "select": {"equals": GATE_STATUS_BLOCKED},
+                            },
+                            {
+                                "property": "Status",
+                                "select": {"equals": GATE_STATUS_OPEN},
+                            },
+                        ]
+                    },
+                    {
+                        "property": "Workflow",
+                        "relation": {"contains": workflow_page_id},
+                    },
+                ]
+            },
+            label="list_pending_gates_for_workflow",
+            max_pages=max_pages,
+            logger=logger,
+        )
+
     def find_by_dedupe_key(self, dedupe_key: str) -> str | None:
         """dedupe_key で既存レコードを検索する。"""
         if not dedupe_key:

@@ -1116,14 +1116,39 @@ def _handle_prime(args, config) -> int:
             notion_cfg.project_memory_db_id_env, ""
         ).strip()
 
-    # Workflows DB ID も Supersedes 世代遡及で使う（Issue #52 / 要件 §8.4）
+    # Workflows DB ID は handover_note 世代遡及 / workgraph context 統合で使う
+    # （Issue #52 / #54 / 要件 §8.4）
     workflows_db_id = ""
+    work_items_db_id = ""
+    review_issues_db_id = ""
+    workflow_gates_db_id = ""
     if notion_cfg is not None and getattr(notion_cfg, "enabled", False):
         workflows_db_id = os.environ.get(
             getattr(notion_cfg, "workflows_db_id_env", ""), ""
         ).strip()
+        work_items_db_id = os.environ.get(
+            getattr(notion_cfg, "work_items_db_id_env", ""), ""
+        ).strip()
+        review_issues_db_id = os.environ.get(
+            getattr(notion_cfg, "review_issues_db_id_env", ""), ""
+        ).strip()
+        workflow_gates_db_id = os.environ.get(
+            getattr(notion_cfg, "workflow_gates_db_id_env", ""), ""
+        ).strip()
 
     memories: list[dict] = []
+    # workgraph context 3 カテゴリは「未取得」と「取得済み 0 件」を JSON 出力
+    # で区別するため None で初期化（Copilot 指摘）。`None` のままになる条件:
+    #   1. 該当 DB ID が未設定（環境変数未設定 / profile config 未対応）
+    #   2. workflows_db_id が未設定で workflow_page_id を解決できない
+    #      （3 カテゴリは全て Workflow relation で絞るため必須）
+    #   3. workflows_db_id があっても `find_workflow_page_id` が None を返した
+    #      （workflow が Notion 側に未同期 / Workflows DB に存在しない）
+    # 各 DB ID + workflow_page_id が揃って fetch を実際に試みた場合のみ list
+    # に切り替え、API 障害時も list（部分結果保持）として返る。
+    work_items: list[dict] | None = None
+    review_issues: list[dict] | None = None
+    gates: list[dict] | None = None
     if api_token and db_id:
         try:
             api = NotionAPIClient(
@@ -1138,31 +1163,80 @@ def _handle_prime(args, config) -> int:
                 phase=resolved_phase,
                 types=memory_types,
             )
-            # handover_note 世代遡及（要件 §8.4 lookup rule）。Workflows DB ID
-            # 未設定 / API 障害なら skip（graceful degrade）。--type で
-            # handover_note を除外している場合も skip（呼び出し側意図を尊重）。
+            # handover_note 世代遡及 + workgraph context 統合（要件 §8.4）。
+            # Workflows DB ID 未設定 / API 障害なら handover skip（graceful
+            # degrade）。--type で handover_note を除外している場合も skip。
             inject_handover = bool(workflows_db_id) and (
                 memory_types is None
                 or "handover_note" in (memory_types or [])
             )
-            if inject_handover:
+            # workflow_page_id 解決は handover 注入 OR workgraph context fetch
+            # の少なくとも 1 つが必要な場合に限る（Copilot 指摘: 不要な
+            # find_workflow_page_id 呼び出しを避けて API 呼び出しを最小化）。
+            need_page_id = inject_handover or bool(
+                work_items_db_id or review_issues_db_id or workflow_gates_db_id
+            )
+            current_page_id = None
+            wf_client = None
+            if workflows_db_id and need_page_id:
                 from .integrations.notion_dashboard.workflows_db import (
                     WorkflowsDBClient,
                 )
                 wf_client = WorkflowsDBClient(
                     api=api, database_id=workflows_db_id
                 )
+                current_page_id = wf_client.find_workflow_page_id(workflow_id)
+
+            if inject_handover and wf_client is not None and current_page_id:
+                # 解決済の current_page_id を渡して重複検索を避ける（Copilot 指摘）
                 handover_memories = _collect_handover_notes(
                     wf_client=wf_client,
                     pm_client=client,
                     workflow_id=workflow_id,
                     profile=resolved_profile,
+                    start_page_id=current_page_id,
                 )
                 memories = _merge_memories_dedup(memories, handover_memories)
+
+            # workgraph context fetch（current workflow に紐づく ready Work Item /
+            # open Review Issue / pending Gate）。各 DB ID 未設定なら該当 section
+            # を skip（既存 graceful degrade と整合、Issue #54）。
+            if current_page_id and work_items_db_id:
+                from .integrations.notion_dashboard.work_items_db import (
+                    WorkItemsDBClient,
+                )
+                wi_client = WorkItemsDBClient(
+                    api=api, database_id=work_items_db_id
+                )
+                work_items = wi_client.list_ready_work_items_for_workflow(
+                    current_page_id
+                )
+            if current_page_id and review_issues_db_id:
+                from .integrations.notion_dashboard.review_issues_db import (
+                    ReviewIssuesDBClient,
+                )
+                ri_client = ReviewIssuesDBClient(
+                    api=api, database_id=review_issues_db_id
+                )
+                review_issues = ri_client.list_open_review_issues_for_workflow(
+                    current_page_id
+                )
+            if current_page_id and workflow_gates_db_id:
+                from .integrations.notion_dashboard.workflow_gates_db import (
+                    WorkflowGatesDBClient,
+                )
+                wg_client = WorkflowGatesDBClient(
+                    api=api, database_id=workflow_gates_db_id
+                )
+                gates = wg_client.list_pending_gates_for_workflow(
+                    current_page_id
+                )
         except Exception as e:
-            # 障害時は memory 0 件で続行（warning は stderr）
+            # Notion fetch（Memory / Workflows / Work Items / Review Issues /
+            # Gates いずれか）で例外が出た場合、取得済みの部分結果で続行
+            # （Copilot 指摘で「Project Memory」固有メッセージ → generic 化）。
             print(
-                f"⚠ Project Memory 取得に失敗（memory 無しで続行）: {e}",
+                f"⚠ prime context（Notion）取得で失敗（部分結果で続行）: {e}",
                 file=sys.stderr,
             )
 
@@ -1173,6 +1247,9 @@ def _handle_prime(args, config) -> int:
                 profile=resolved_profile,
                 current_phase=resolved_phase,
                 memories=memories,
+                work_items=work_items,
+                review_issues=review_issues,
+                gates=gates,
             )
         )
     else:
@@ -1182,6 +1259,9 @@ def _handle_prime(args, config) -> int:
                 profile=resolved_profile,
                 current_phase=resolved_phase,
                 memories=memories,
+                work_items=work_items,
+                review_issues=review_issues,
+                gates=gates,
             )
         )
     return 0
@@ -1194,11 +1274,13 @@ def _collect_handover_notes(
     workflow_id: str,
     profile: str | None,
     max_depth: int = 3,
+    start_page_id: str | None = None,
 ) -> list[dict]:
     """Supersedes リレーションを辿って active handover_note を集める
     （Workgraph Phase 7 / Issue #52 / 要件 §8.4 lookup rule）。
 
-    - 起点 workflow_id → page_id を解決
+    - 起点 workflow_id → page_id を解決（`start_page_id` で事前解決済みのものを
+      渡せば再検索を skip、Issue #54 Copilot 指摘）
     - `get_supersedes` で旧 workflow page_id を取得（最大 `max_depth` 世代まで遡る）
     - 各旧 workflow について `find_handover_notes_for_workflow` を呼び active を集める
     - 環状回避: 訪問済 page_id は再訪しない
@@ -1212,7 +1294,8 @@ def _collect_handover_notes(
         NotionRateLimitError,
     )
 
-    start_page_id = wf_client.find_workflow_page_id(workflow_id)
+    if start_page_id is None:
+        start_page_id = wf_client.find_workflow_page_id(workflow_id)
     if not start_page_id:
         return []
 

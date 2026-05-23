@@ -8,6 +8,85 @@ quality gate を fail させていた（PR #41 Round 9 対応で集約）。
 from __future__ import annotations
 
 
+class FakeNotionAPIWithPruning:
+    """NotionAPIClient の共通 fake（property_not_found リトライ対応）。
+
+    Issue #54 / Workgraph 完成で SonarCloud duplication（test_work_items_db /
+    test_review_issues_db / test_workflow_gates_db で同形の `_FakeAPI` class
+    が重複検出）を解消するため、共通基底として本 module に集約。
+
+    Args:
+        existing_id: `query_database` が `{"results": [{"id": ...}]}` を返す
+            ようにしたい時に指定。None なら常に空。
+        missing_property: 指定すると `create_page` / `update_page` の初回呼び
+            出しで property_not_found を 1 度だけ返す（pruning リトライ検証用）。
+        missing_property_quote: Notion API のエラーメッセージで property 名を
+            囲む引用符（`"` または `'`）。
+    """
+
+    def __init__(
+        self,
+        *,
+        existing_id: str | None = None,
+        missing_property: str | None = None,
+        missing_property_quote: str = '"',
+    ):
+        self._existing_id = existing_id
+        self._missing_property = missing_property
+        self._missing_property_quote = missing_property_quote
+        self.query_calls: list[tuple[str, dict | None]] = []
+        self.create_calls: list[dict] = []
+        self.update_calls: list[tuple[str, dict]] = []
+        self._first_create_call = True
+        self._first_update_call = True
+
+    def query_database(
+        self,
+        database_id: str,
+        *,
+        filter_: dict | None = None,
+        start_cursor: str | None = None,
+        page_size: int | None = None,
+    ) -> dict:
+        self.query_calls.append((database_id, filter_))
+        if self._existing_id:
+            return {"results": [{"id": self._existing_id}]}
+        return {"results": []}
+
+    def create_page(self, payload: dict) -> dict:
+        import copy as _copy
+        self.create_calls.append(_copy.deepcopy(payload))
+        if (
+            self._missing_property
+            and self._first_create_call
+            and self._missing_property in payload["properties"]
+        ):
+            self._first_create_call = False
+            self._raise_missing_property()
+        return {"id": "new-page-id", "properties": payload["properties"]}
+
+    def update_page(self, page_id: str, payload: dict) -> dict:
+        import copy as _copy
+        self.update_calls.append((page_id, _copy.deepcopy(payload)))
+        if (
+            self._missing_property
+            and self._first_update_call
+            and self._missing_property in payload["properties"]
+        ):
+            self._first_update_call = False
+            self._raise_missing_property()
+        return {"id": page_id, "properties": payload["properties"]}
+
+    def _raise_missing_property(self) -> None:
+        from hokusai.integrations.notion_dashboard.client import NotionAPIError
+        q = self._missing_property_quote
+        raise NotionAPIError(
+            400,
+            f"{q}{self._missing_property}{q} is not a property that exists.",
+            code="validation_error",
+        )
+
+
 class NotionRecordingAPI:
     """NotionAPIClient のテスト用 fake。query / create / update 呼び出しを記録する。
 

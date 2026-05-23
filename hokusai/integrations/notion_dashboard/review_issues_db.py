@@ -185,6 +185,43 @@ class ReviewIssuesDBClient:
         )
         return self._submit_with_property_pruning(existing_page_id, properties)
 
+    def list_open_review_issues_for_workflow(
+        self,
+        workflow_page_id: str | None,
+        *,
+        max_pages: int = 5,
+    ) -> list[dict]:
+        """指定 workflow に紐づく open な Review Issue を取得する
+        （Workgraph 完成 / Issue #54 / 要件 §8.4 `hokusai prime` 統合表示）。
+
+        サーバ側 filter: AND(Status == open, Workflow contains workflow_page_id)。
+        Phase 6 verify / Phase 7 review の未解消指摘を prime 出力に含める用途。
+        ページネーション / 部分結果保持 / truncation warning は共通
+        `_pagination.paginate_query` に集約。
+        """
+        if not workflow_page_id:
+            return []
+        from ._pagination import paginate_query
+        return paginate_query(
+            api=self._api,
+            database_id=self._database_id,
+            filter_={
+                "and": [
+                    {
+                        "property": "Status",
+                        "select": {"equals": STATUS_OPEN},
+                    },
+                    {
+                        "property": "Workflow",
+                        "relation": {"contains": workflow_page_id},
+                    },
+                ]
+            },
+            label="list_open_review_issues_for_workflow",
+            max_pages=max_pages,
+            logger=logger,
+        )
+
     def find_by_dedupe_key(self, dedupe_key: str) -> str | None:
         """dedupe_key で既存レコードを検索する。"""
         if not dedupe_key:

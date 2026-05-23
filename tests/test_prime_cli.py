@@ -101,7 +101,7 @@ def test_prime_returns_0_with_empty_memory_when_db_id_missing(
     assert rc == 0
     body = out.getvalue()
     assert "# HOKUSAI Prime Context — workflow `wf-1`" in body
-    assert "_active Project Memory はありません_" in body
+    assert "_active な workgraph context はありません_" in body
 
 
 def test_prime_resolves_profile_and_phase_from_state(
@@ -119,7 +119,8 @@ def test_prime_resolves_profile_and_phase_from_state(
 
     class _FakeAPI:
         def __init__(self, *a, **kw):
-            pass
+            # no-op fake constructor: テスト fixture は state を持たない
+            return
 
         def query_database(self, *args, **kwargs):
             captured_calls.append(kwargs)
@@ -153,7 +154,8 @@ def test_prime_normalizes_int_current_phase_to_phase_string(
 
     class _FakeClient:
         def __init__(self, *, api, database_id):
-            pass
+            # no-op fake constructor: テスト fixture は state を持たない
+            return
 
         def list_active_memories(self, *, profile, phase, types, **kwargs):
             captured_phase.append(phase)
@@ -161,7 +163,8 @@ def test_prime_normalizes_int_current_phase_to_phase_string(
 
     class _FakeAPI:
         def __init__(self, *a, **kw):
-            pass
+            # no-op fake constructor: テスト fixture は state を持たない
+            return
 
     monkeypatch.setattr(
         "hokusai.integrations.notion_dashboard.client.NotionAPIClient", _FakeAPI
@@ -192,7 +195,8 @@ def test_prime_cli_phase_overrides_state(tmp_path, monkeypatch, captured):
 
     class _FakeAPI:
         def __init__(self, *a, **kw):
-            pass
+            # no-op fake constructor: テスト fixture は state を持たない
+            return
 
         def query_database(self, *args, **kwargs):
             return {"results": [], "has_more": False}
@@ -230,7 +234,7 @@ def test_prime_swallows_notion_failure_and_returns_0(
     with redirect_stdout(out), redirect_stderr(err):
         rc = _handle_prime(args, cfg)
     assert rc == 0
-    assert "Project Memory 取得に失敗" in err.getvalue()
+    assert "prime context（Notion）取得で失敗" in err.getvalue()
     assert "# HOKUSAI Prime Context" in out.getvalue()
 
 
@@ -260,7 +264,8 @@ def test_prime_reloads_config_when_state_profile_differs(
 
     class _FakeAPI:
         def __init__(self, *a, **kw):
-            pass
+            # no-op fake constructor: テスト fixture は state を持たない
+            return
 
         def query_database(self, *args, **kwargs):
             return {"results": [], "has_more": False}
@@ -295,7 +300,8 @@ def test_prime_does_not_reload_config_when_profile_arg_present(
 
     class _FakeAPI:
         def __init__(self, *a, **kw):
-            pass
+            # no-op fake constructor: テスト fixture は state を持たない
+            return
 
         def query_database(self, *args, **kwargs):
             return {"results": [], "has_more": False}
@@ -331,7 +337,8 @@ def test_prime_passes_types_filter_to_client(tmp_path, monkeypatch, captured):
 
     class _FakeAPI:
         def __init__(self, *a, **kw):
-            pass
+            # no-op fake constructor: テスト fixture は state を持たない
+            return
 
     monkeypatch.setattr("hokusai.integrations.notion_dashboard.client.NotionAPIClient", _FakeAPI)
     monkeypatch.setattr(
@@ -369,7 +376,8 @@ def test_prime_injects_handover_notes_via_supersedes_chain(
 
     class _FakeWFClient:
         def __init__(self, *, api, database_id):
-            pass
+            # no-op fake constructor: テスト fixture は state を持たない
+            return
 
         def find_workflow_page_id(self, workflow_id):
             return "wf-page-current"
@@ -382,7 +390,8 @@ def test_prime_injects_handover_notes_via_supersedes_chain(
 
     class _FakeMemClient:
         def __init__(self, *, api, database_id):
-            pass
+            # no-op fake constructor: テスト fixture は state を持たない
+            return
 
         def list_active_memories(self, *, profile, phase, types, **kwargs):
             return [
@@ -398,7 +407,8 @@ def test_prime_injects_handover_notes_via_supersedes_chain(
 
     class _FakeAPI:
         def __init__(self, *a, **kw):
-            pass
+            # no-op fake constructor: テスト fixture は state を持たない
+            return
 
     monkeypatch.setattr(
         "hokusai.integrations.notion_dashboard.client.NotionAPIClient", _FakeAPI
@@ -441,7 +451,8 @@ def test_prime_traverses_multiple_supersedes_generations(
 
     class _FakeWFClient:
         def __init__(self, *, api, database_id):
-            pass
+            # no-op fake constructor: テスト fixture は state を持たない
+            return
 
         def find_workflow_page_id(self, workflow_id):
             return "wf-page-current"
@@ -451,7 +462,8 @@ def test_prime_traverses_multiple_supersedes_generations(
 
     class _FakeMemClient:
         def __init__(self, *, api, database_id):
-            pass
+            # no-op fake constructor: テスト fixture は state を持たない
+            return
 
         def list_active_memories(self, **kwargs):
             return []
@@ -464,7 +476,8 @@ def test_prime_traverses_multiple_supersedes_generations(
 
     class _FakeAPI:
         def __init__(self, *a, **kw):
-            pass
+            # no-op fake constructor: テスト fixture は state を持たない
+            return
 
     monkeypatch.setattr(
         "hokusai.integrations.notion_dashboard.client.NotionAPIClient", _FakeAPI
@@ -512,14 +525,16 @@ def test_prime_skips_handover_lookup_when_workflows_db_id_unset(
 
     class _FakeMemClient:
         def __init__(self, *, api, database_id):
-            pass
+            # no-op fake constructor: テスト fixture は state を持たない
+            return
 
         def list_active_memories(self, **kwargs):
             return []
 
     class _FakeAPI:
         def __init__(self, *a, **kw):
-            pass
+            # no-op fake constructor: テスト fixture は state を持たない
+            return
 
     monkeypatch.setattr(
         "hokusai.integrations.notion_dashboard.client.NotionAPIClient", _FakeAPI
@@ -556,7 +571,8 @@ def test_prime_handover_lookup_avoids_cycles(
 
     class _FakeWFClient:
         def __init__(self, *, api, database_id):
-            pass
+            # no-op fake constructor: テスト fixture は state を持たない
+            return
 
         def find_workflow_page_id(self, workflow_id):
             return "wf-page-A"
@@ -569,7 +585,8 @@ def test_prime_handover_lookup_avoids_cycles(
 
     class _FakeMemClient:
         def __init__(self, *, api, database_id):
-            pass
+            # no-op fake constructor: テスト fixture は state を持たない
+            return
 
         def list_active_memories(self, **kwargs):
             return []
@@ -580,7 +597,8 @@ def test_prime_handover_lookup_avoids_cycles(
 
     class _FakeAPI:
         def __init__(self, *a, **kw):
-            pass
+            # no-op fake constructor: テスト fixture は state を持たない
+            return
 
     monkeypatch.setattr(
         "hokusai.integrations.notion_dashboard.client.NotionAPIClient", _FakeAPI
@@ -629,28 +647,41 @@ def test_prime_skips_handover_when_type_filter_excludes_it(
     monkeypatch.setenv("TEST_MEMORY_DB", "pm-db")
     monkeypatch.setenv("TEST_WORKFLOWS_DB", "wf-db")
 
-    handover_called: list = []
+    supersedes_called: list = []
+    handover_lookup_called: list = []
 
     class _FakeWFClient:
         def __init__(self, *, api, database_id):
-            handover_called.append("ctor")
+            # no-op fake constructor: テスト fixture は state を持たない
+            return
 
         def find_workflow_page_id(self, workflow_id):
             return "wf-page"
 
         def get_supersedes(self, page_id):
+            # handover 経路に入ったら呼ばれる。Issue #54 で workgraph context
+            # 統合のため WorkflowsDBClient 自体は --type 指定時も生成される
+            # が、_collect_handover_notes は呼ばれない（= get_supersedes に
+            # 来ない）ことで検証する。
+            supersedes_called.append("get_supersedes")
             return []
 
     class _FakeMemClient:
         def __init__(self, *, api, database_id):
-            pass
+            # no-op fake constructor: テスト fixture は state を持たない
+            return
 
         def list_active_memories(self, **kwargs):
             return []
 
+        def find_handover_notes_for_workflow(self, page_id, **kwargs):
+            handover_lookup_called.append(page_id)
+            return []
+
     class _FakeAPI:
         def __init__(self, *a, **kw):
-            pass
+            # no-op fake constructor: テスト fixture は state を持たない
+            return
 
     monkeypatch.setattr(
         "hokusai.integrations.notion_dashboard.client.NotionAPIClient", _FakeAPI
@@ -673,5 +704,163 @@ def test_prime_skips_handover_when_type_filter_excludes_it(
     with redirect_stdout(out), redirect_stderr(err):
         rc = _handle_prime(args, cfg)
     assert rc == 0
-    # WorkflowsDBClient は生成すらされない
-    assert handover_called == []
+    # handover note 取得経路は走らない（get_supersedes も find_handover も呼ばれない）
+    assert supersedes_called == []
+    assert handover_lookup_called == []
+
+
+# ---------------------------------------------------------------------------
+# workgraph context 統合（Issue #54 / 要件 §8.4 完成）
+# ---------------------------------------------------------------------------
+
+
+def _make_baseline_workgraph_fakes():
+    """test_prime_injects_workgraph_context_when_all_db_ids_set と
+    test_prime_skips_workgraph_context_when_db_ids_unset で共通する
+    Workflows / ProjectMemory / NotionAPI の fake class セット（SonarCloud
+    duplication 対策で共通化）。返り値は (FakeAPI, FakeWFClient, FakeMemClient)
+    の 3 つ組。"""
+
+    class _FakeWFClient:
+        def __init__(self, *, api, database_id):
+            # no-op fake constructor: テスト fixture は state を持たない
+            return
+
+        def find_workflow_page_id(self, workflow_id):
+            return "wf-page-1"
+
+        def get_supersedes(self, page_id):
+            return []
+
+    class _FakeMemClient:
+        def __init__(self, *, api, database_id):
+            # no-op fake constructor: テスト fixture は state を持たない
+            return
+
+        def list_active_memories(self, **kwargs):
+            return []
+
+        def find_handover_notes_for_workflow(self, page_id, **kwargs):
+            return []
+
+    class _FakeAPI:
+        def __init__(self, *a, **kw):
+            # no-op fake constructor: テスト fixture は state を持たない
+            return
+
+    return _FakeAPI, _FakeWFClient, _FakeMemClient
+
+
+def _apply_baseline_workgraph_patches(monkeypatch, fake_api, fake_wf, fake_mem):
+    """fake_api / fake_wf / fake_mem を Notion 各モジュールへ monkeypatch する
+    共通 helper（SonarCloud duplication 対策で共通化）。"""
+    monkeypatch.setattr(
+        "hokusai.integrations.notion_dashboard.client.NotionAPIClient", fake_api
+    )
+    monkeypatch.setattr(
+        "hokusai.integrations.notion_dashboard.project_memory_db.ProjectMemoryDBClient",
+        fake_mem,
+    )
+    monkeypatch.setattr(
+        "hokusai.integrations.notion_dashboard.workflows_db.WorkflowsDBClient",
+        fake_wf,
+    )
+
+
+def test_prime_injects_workgraph_context_when_all_db_ids_set(
+    tmp_path, monkeypatch, captured
+):
+    """全 DB ID 設定済みなら work_items / review_issues / gates も prime に統合"""
+    out, err = captured
+    cfg = _make_config(tmp_path)
+    _seed_workflow(cfg)
+    monkeypatch.setenv("TEST_API_TOKEN", "t")
+    monkeypatch.setenv("TEST_MEMORY_DB", "pm-db")
+    monkeypatch.setenv("TEST_WORKFLOWS_DB", "wf-db")
+    monkeypatch.setenv("TEST_WORK_ITEMS_DB", "wi-db")
+    monkeypatch.setenv("TEST_REVIEW_ISSUES_DB", "ri-db")
+    monkeypatch.setenv("TEST_WORKFLOW_GATES_DB", "wg-db")
+
+    # cfg を拡張: 追加 env を解決可能に
+    cfg.notion_dashboard.work_items_db_id_env = "TEST_WORK_ITEMS_DB"
+    cfg.notion_dashboard.review_issues_db_id_env = "TEST_REVIEW_ISSUES_DB"
+    cfg.notion_dashboard.workflow_gates_db_id_env = "TEST_WORKFLOW_GATES_DB"
+
+    fake_api, fake_wf_client, fake_mem_client = _make_baseline_workgraph_fakes()
+
+    class _FakeWIClient:
+        def __init__(self, *, api, database_id):
+            # no-op fake constructor: テスト fixture は state を持たない
+            return
+
+        def list_ready_work_items_for_workflow(self, page_id, **kwargs):
+            return [{"id": "wi-1", "properties": {"Title": {"title": [{"text": {"content": "Login"}}]}, "Status": {"select": {"name": "ready"}}}}]
+
+    class _FakeRIClient:
+        def __init__(self, *, api, database_id):
+            # no-op fake constructor: テスト fixture は state を持たない
+            return
+
+        def list_open_review_issues_for_workflow(self, page_id, **kwargs):
+            return [{"id": "ri-1", "properties": {"Title": {"title": [{"text": {"content": "Bug"}}]}, "Severity": {"select": {"name": "high"}}}}]
+
+    class _FakeWGClient:
+        def __init__(self, *, api, database_id):
+            # no-op fake constructor: テスト fixture は state を持たない
+            return
+
+        def list_pending_gates_for_workflow(self, page_id, **kwargs):
+            return [{"id": "g-1", "properties": {"Name": {"title": [{"text": {"content": "Sec"}}]}, "Status": {"select": {"name": "pending"}}}}]
+
+    _apply_baseline_workgraph_patches(monkeypatch, fake_api, fake_wf_client, fake_mem_client)
+    monkeypatch.setattr(
+        "hokusai.integrations.notion_dashboard.work_items_db.WorkItemsDBClient", _FakeWIClient,
+    )
+    monkeypatch.setattr(
+        "hokusai.integrations.notion_dashboard.review_issues_db.ReviewIssuesDBClient", _FakeRIClient,
+    )
+    monkeypatch.setattr(
+        "hokusai.integrations.notion_dashboard.workflow_gates_db.WorkflowGatesDBClient", _FakeWGClient,
+    )
+
+    args = _Args(workflow_id="wf-1", phase=None, memory_types=None, output="json")
+    with redirect_stdout(out), redirect_stderr(err):
+        rc = _handle_prime(args, cfg)
+    assert rc == 0
+    payload = json.loads(out.getvalue())
+    assert [w["id"] for w in payload["work_items"]] == ["wi-1"]
+    assert [r["id"] for r in payload["review_issues"]] == ["ri-1"]
+    assert [g["id"] for g in payload["gates"]] == ["g-1"]
+
+
+def test_prime_skips_workgraph_context_when_db_ids_unset(
+    tmp_path, monkeypatch, captured
+):
+    """各 DB ID 未設定なら該当 section は null（未取得 / fetch 試行せず）。
+    取得済み 0 件 (= []) と区別するため null になることを検証。"""
+    out, err = captured
+    cfg = _make_config(tmp_path)
+    _seed_workflow(cfg)
+    monkeypatch.setenv("TEST_API_TOKEN", "t")
+    monkeypatch.setenv("TEST_MEMORY_DB", "pm-db")
+    monkeypatch.setenv("TEST_WORKFLOWS_DB", "wf-db")
+    monkeypatch.delenv("TEST_WORK_ITEMS_DB", raising=False)
+    monkeypatch.delenv("TEST_REVIEW_ISSUES_DB", raising=False)
+    monkeypatch.delenv("TEST_WORKFLOW_GATES_DB", raising=False)
+    cfg.notion_dashboard.work_items_db_id_env = "TEST_WORK_ITEMS_DB"
+    cfg.notion_dashboard.review_issues_db_id_env = "TEST_REVIEW_ISSUES_DB"
+    cfg.notion_dashboard.workflow_gates_db_id_env = "TEST_WORKFLOW_GATES_DB"
+
+    fake_api, fake_wf_client, fake_mem_client = _make_baseline_workgraph_fakes()
+    # 各 sub client は monkeypatch しない（呼ばれたらテスト fail）
+    _apply_baseline_workgraph_patches(monkeypatch, fake_api, fake_wf_client, fake_mem_client)
+
+    args = _Args(workflow_id="wf-1", phase=None, memory_types=None, output="json")
+    with redirect_stdout(out), redirect_stderr(err):
+        rc = _handle_prime(args, cfg)
+    assert rc == 0
+    payload = json.loads(out.getvalue())
+    # DB ID 未設定の場合は「未取得」を意味する null（Copilot 指摘で取得 0 件と区別）
+    assert payload["work_items"] is None
+    assert payload["review_issues"] is None
+    assert payload["gates"] is None

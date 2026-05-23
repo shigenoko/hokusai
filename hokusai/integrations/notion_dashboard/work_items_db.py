@@ -274,6 +274,51 @@ class WorkItemsDBClient:
         }
         return self._submit_with_property_pruning(page_id, properties)
 
+    def list_ready_work_items_for_workflow(
+        self,
+        workflow_page_id: str | None,
+        *,
+        max_pages: int = 5,
+    ) -> list[dict]:
+        """指定 workflow に紐づく ready / in_progress な Work Item を取得する
+        （Workgraph 完成 / Issue #54 / 要件 §8.4 `hokusai prime` 統合表示）。
+
+        サーバ側 filter: AND(Status in {ready, in_progress}, Workflow contains
+        workflow_page_id)。Phase 5 implement で Agent に渡す候補 + 現在進行中
+        の Work Item をまとめて出力する用途。ページネーション / 部分結果保持 /
+        truncation warning は共通 `_pagination.paginate_query` に集約。
+        """
+        if not workflow_page_id:
+            return []
+        from ._pagination import paginate_query
+        return paginate_query(
+            api=self._api,
+            database_id=self._database_id,
+            filter_={
+                "and": [
+                    {
+                        "or": [
+                            {
+                                "property": "Status",
+                                "select": {"equals": STATUS_READY},
+                            },
+                            {
+                                "property": "Status",
+                                "select": {"equals": STATUS_IN_PROGRESS},
+                            },
+                        ]
+                    },
+                    {
+                        "property": "Workflow",
+                        "relation": {"contains": workflow_page_id},
+                    },
+                ]
+            },
+            label="list_ready_work_items_for_workflow",
+            max_pages=max_pages,
+            logger=logger,
+        )
+
     def find_by_dedupe_key(self, dedupe_key: str) -> str | None:
         """dedupe_key で既存レコードを検索する。"""
         if not dedupe_key:

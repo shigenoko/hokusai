@@ -9,7 +9,6 @@ review_issues_db.py の以下を検証する:
 
 from __future__ import annotations
 
-import copy
 import sys
 from pathlib import Path
 
@@ -22,55 +21,7 @@ from hokusai.integrations.notion_dashboard.review_issues_db import (
     ReviewIssuesDBClient,
     build_dedupe_key,
 )
-
-
-class _FakeAPI:
-    """NotionAPIClient のテスト用 fake。query / create / update を記録する。"""
-
-    def __init__(
-        self,
-        *,
-        existing_id: str | None = None,
-        missing_property: str | None = None,
-        missing_property_quote: str = '"',
-    ):
-        self._existing_id = existing_id
-        self._missing_property = missing_property
-        self._missing_property_quote = missing_property_quote
-        self.query_calls: list[tuple[str, dict | None]] = []
-        self.create_calls: list[dict] = []
-        self.update_calls: list[tuple[str, dict]] = []
-        self._first_create_call = True
-
-    def query_database(self, database_id: str, *, filter_: dict | None = None) -> dict:
-        self.query_calls.append((database_id, filter_))
-        if self._existing_id:
-            return {"results": [{"id": self._existing_id}]}
-        return {"results": []}
-
-    def create_page(self, payload: dict) -> dict:
-        # _submit_with_property_pruning は同じ properties dict を mutate して
-        # 再呼び出しするため、リトライ毎の状態を捉えるには deep copy が必要。
-        self.create_calls.append(copy.deepcopy(payload))
-        # property_not_found を一度だけ返すモード
-        if (
-            self._missing_property
-            and self._first_create_call
-            and self._missing_property in payload["properties"]
-        ):
-            self._first_create_call = False
-            q = self._missing_property_quote
-            raise NotionAPIError(
-                400,
-                f"{q}{self._missing_property}{q} is not a property that exists.",
-                code="validation_error",
-            )
-        return {"id": "new-page-id", "properties": payload["properties"]}
-
-    def update_page(self, page_id: str, payload: dict) -> dict:
-        self.update_calls.append((page_id, copy.deepcopy(payload)))
-        return {"id": page_id, "properties": payload["properties"]}
-
+from tests._notion_test_helpers import FakeNotionAPIWithPruning as _FakeAPI
 
 # ---------------------------------------------------------------------------
 # build_dedupe_key
@@ -370,3 +321,51 @@ def test_upsert_record_raises_when_non_property_validation_error():
     client = ReviewIssuesDBClient(api=api, database_id="db-id")
     with pytest.raises(NotionAPIError):
         client.upsert_record(source="final_review", message="x")
+
+
+# ---------------------------------------------------------------------------
+# list_open_review_issues_for_workflow（Issue #54 / Workgraph 完成）
+# ---------------------------------------------------------------------------
+
+
+def test_list_open_review_issues_for_workflow_returns_pages():
+    class _PaginatedAPI:
+        def __init__(self, pages):
+            self._pages = pages
+            self.query_calls = []
+
+        def query_database(self, db, *, filter_=None, start_cursor=None, page_size=None):
+            self.query_calls.append({"filter": filter_, "start_cursor": start_cursor})
+            idx = 0 if start_cursor is None else int(start_cursor.replace("c", ""))
+            results = self._pages[idx] if idx < len(self._pages) else []
+            has_more = idx < len(self._pages) - 1
+            return {"results": results, "has_more": has_more, "next_cursor": f"c{idx + 1}" if has_more else None}
+
+    api = _PaginatedAPI([[
+        {"id": "ri-1", "properties": {"Title": {"title": [{"text": {"content": "Bug"}}]}}},
+    ]])
+    client = ReviewIssuesDBClient(api=api, database_id="ri-db")
+    result = client.list_open_review_issues_for_workflow("wf-page")
+    assert [r["id"] for r in result] == ["ri-1"]
+    call_filter = api.query_calls[0]["filter"]
+    assert "and" in call_filter
+    status_clause = [c for c in call_filter["and"] if c.get("property") == "Status"]
+    assert status_clause[0]["select"]["equals"] == "open"
+    wf_clause = [c for c in call_filter["and"] if c.get("property") == "Workflow"]
+    assert wf_clause[0]["relation"]["contains"] == "wf-page"
+
+
+def test_list_open_review_issues_returns_empty_for_blank_page_id():
+    api = _FakeAPI()
+    client = ReviewIssuesDBClient(api=api, database_id="ri-db")
+    assert client.list_open_review_issues_for_workflow("") == []
+    assert client.list_open_review_issues_for_workflow(None) == []
+
+
+def test_list_open_review_issues_returns_partial_on_api_failure():
+    class _RaisingAPI:
+        def query_database(self, *args, **kwargs):
+            raise NotionAPIError(503, "service unavailable")
+
+    client = ReviewIssuesDBClient(api=_RaisingAPI(), database_id="ri-db")
+    assert client.list_open_review_issues_for_workflow("wf-page") == []

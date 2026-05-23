@@ -35,29 +35,7 @@ from hokusai.integrations.notion_dashboard.workflow_gates_db import (
     WorkflowGatesDBClient,
     build_dedupe_key,
 )
-
-
-class _FakeAPI:
-    def __init__(self, *, existing_id: str | None = None):
-        self._existing_id = existing_id
-        self.query_calls: list[tuple[str, dict | None]] = []
-        self.create_calls: list[dict] = []
-        self.update_calls: list[tuple[str, dict]] = []
-
-    def query_database(self, database_id: str, *, filter_: dict | None = None) -> dict:
-        self.query_calls.append((database_id, filter_))
-        if self._existing_id:
-            return {"results": [{"id": self._existing_id}]}
-        return {"results": []}
-
-    def create_page(self, payload: dict) -> dict:
-        self.create_calls.append(copy.deepcopy(payload))
-        return {"id": "new-gate-id", "properties": payload["properties"]}
-
-    def update_page(self, page_id: str, payload: dict) -> dict:
-        self.update_calls.append((page_id, copy.deepcopy(payload)))
-        return {"id": page_id, "properties": payload["properties"]}
-
+from tests._notion_test_helpers import FakeNotionAPIWithPruning as _FakeAPI
 
 # ---------------------------------------------------------------------------
 # build_dedupe_key
@@ -308,7 +286,14 @@ class _FakeAPIWithMissingProperty:
         self.query_calls: list[tuple[str, dict | None]] = []
         self._first_create_call = True
 
-    def query_database(self, database_id: str, *, filter_: dict | None = None) -> dict:
+    def query_database(
+        self,
+        database_id: str,
+        *,
+        filter_: dict | None = None,
+        start_cursor: str | None = None,
+        page_size: int | None = None,
+    ) -> dict:
         self.query_calls.append((database_id, filter_))
         return {"results": []}
 
@@ -353,3 +338,52 @@ def test_property_not_found_retry_drops_missing_property():
     assert "Name" in api.create_calls[1]["properties"]
     assert "Gate Type" in api.create_calls[1]["properties"]
     assert result["id"] == "new-gate-id"
+
+
+# ---------------------------------------------------------------------------
+# list_pending_gates_for_workflow（Issue #54 / Workgraph 完成）
+# ---------------------------------------------------------------------------
+
+
+def test_list_pending_gates_for_workflow_returns_pages():
+    class _PaginatedAPI:
+        def __init__(self, pages):
+            self._pages = pages
+            self.query_calls = []
+
+        def query_database(self, db, *, filter_=None, start_cursor=None, page_size=None):
+            self.query_calls.append({"filter": filter_, "start_cursor": start_cursor})
+            idx = 0 if start_cursor is None else int(start_cursor.replace("c", ""))
+            results = self._pages[idx] if idx < len(self._pages) else []
+            has_more = idx < len(self._pages) - 1
+            return {"results": results, "has_more": has_more, "next_cursor": f"c{idx + 1}" if has_more else None}
+
+    api = _PaginatedAPI([[
+        {"id": "g-1", "properties": {"Status": {"select": {"name": "pending"}}}},
+    ]])
+    client = WorkflowGatesDBClient(api=api, database_id="wg-db")
+    result = client.list_pending_gates_for_workflow("wf-page")
+    assert [r["id"] for r in result] == ["g-1"]
+    call_filter = api.query_calls[0]["filter"]
+    assert "and" in call_filter
+    or_clause = next(c for c in call_filter["and"] if "or" in c)
+    statuses = sorted([c["select"]["equals"] for c in or_clause["or"]])
+    assert statuses == ["blocked", "open", "pending"]
+    wf_clause = next(c for c in call_filter["and"] if c.get("property") == "Workflow")
+    assert wf_clause["relation"]["contains"] == "wf-page"
+
+
+def test_list_pending_gates_returns_empty_for_blank_page_id():
+    api = _FakeAPI()
+    client = WorkflowGatesDBClient(api=api, database_id="wg-db")
+    assert client.list_pending_gates_for_workflow("") == []
+    assert client.list_pending_gates_for_workflow(None) == []
+
+
+def test_list_pending_gates_returns_partial_on_api_failure():
+    class _RaisingAPI:
+        def query_database(self, *args, **kwargs):
+            raise NotionAPIError(503, "service unavailable")
+
+    client = WorkflowGatesDBClient(api=_RaisingAPI(), database_id="wg-db")
+    assert client.list_pending_gates_for_workflow("wf-page") == []

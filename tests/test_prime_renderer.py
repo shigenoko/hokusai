@@ -60,7 +60,7 @@ def test_markdown_emits_header_meta_and_workflow_id():
     assert "# HOKUSAI Prime Context — workflow `wf-1`" in out
     assert "profile: `acme`" in out
     assert "current_phase: `phase5`" in out
-    assert "_active Project Memory はありません_" in out
+    assert "_active な workgraph context はありません_" in out
 
 
 def test_markdown_omits_meta_line_when_profile_and_phase_missing():
@@ -155,6 +155,135 @@ def test_markdown_falls_back_to_content_when_summary_is_whitespace_only():
         memories=memories,
     )
     assert "> real content body" in out
+
+
+def test_markdown_includes_work_items_section():
+    """Work Items 渡されたら専用 section に出力（Issue #54 / Workgraph 完成）"""
+    work_items = [
+        {
+            "id": "wi-1",
+            "properties": {
+                "Title": {"title": [{"text": {"content": "Implement login"}}]},
+                "Status": {"select": {"name": "ready"}},
+                "Phase": {"select": {"name": "phase5"}},
+                "Description": {"rich_text": [{"text": {"content": "Use OAuth2"}}]},
+            },
+        }
+    ]
+    out = render_prime_markdown(
+        workflow_id="wf-1",
+        profile=None,
+        current_phase=None,
+        memories=[],
+        work_items=work_items,
+    )
+    assert "## Work Items" in out
+    assert "### Implement login" in out
+    assert "**Status:** `ready`" in out
+    assert "**Phase:** `phase5`" in out
+    assert "> Use OAuth2" in out
+
+
+def test_markdown_includes_review_issues_section():
+    review_issues = [
+        {
+            "id": "ri-1",
+            "properties": {
+                "Title": {"title": [{"text": {"content": "Missing null check"}}]},
+                "Severity": {"select": {"name": "high"}},
+                "Source": {"select": {"name": "copilot_review"}},
+                "Rule ID": {"rich_text": [{"text": {"content": "PYL-W0612"}}]},
+                "File Path": {"rich_text": [{"text": {"content": "src/auth.py"}}]},
+                "Message": {"rich_text": [{"text": {"content": "Add null guard"}}]},
+            },
+        }
+    ]
+    out = render_prime_markdown(
+        workflow_id="wf-1",
+        profile=None,
+        current_phase=None,
+        memories=[],
+        review_issues=review_issues,
+    )
+    assert "## Open Review Issues" in out
+    assert "### Missing null check" in out
+    assert "**Severity:** `high`" in out
+    assert "**Rule:** `PYL-W0612`" in out
+    assert "**File:** `src/auth.py`" in out
+    assert "> Add null guard" in out
+
+
+def test_markdown_includes_gates_section():
+    gates = [
+        {
+            "id": "g-1",
+            "properties": {
+                "Name": {"title": [{"text": {"content": "Security review"}}]},
+                "Status": {"select": {"name": "pending"}},
+                "Gate Type": {"select": {"name": "human_approval"}},
+                # Workflow Gates DB schema は number プロパティ（Copilot 指摘）
+                "Required By Phase": {"number": 8},
+                "Description": {"rich_text": [{"text": {"content": "Sign off needed"}}]},
+            },
+        }
+    ]
+    out = render_prime_markdown(
+        workflow_id="wf-1",
+        profile=None,
+        current_phase=None,
+        memories=[],
+        gates=gates,
+    )
+    assert "## Workflow Gates" in out
+    assert "### Security review" in out
+    assert "**Status:** `pending`" in out
+    assert "**Type:** `human_approval`" in out
+    assert "**Required by:** `phase8`" in out
+
+
+def test_markdown_section_order_handover_memory_workitems_issues_gates():
+    """セクション順序: Handover → Memory → Work Items → Issues → Gates"""
+    out = render_prime_markdown(
+        workflow_id="wf-1",
+        profile=None,
+        current_phase=None,
+        memories=[
+            _page(page_id="m1", name="A", memory_type=MEMORY_TYPE_HANDOVER_NOTE),
+            _page(page_id="m2", name="B", memory_type=MEMORY_TYPE_PROJECT_RULE),
+        ],
+        work_items=[{"id": "wi1", "properties": {"Title": {"title": [{"text": {"content": "T"}}]}, "Status": {"select": {"name": "ready"}}}}],
+        review_issues=[{"id": "ri1", "properties": {"Title": {"title": [{"text": {"content": "I"}}]}, "Severity": {"select": {"name": "low"}}}}],
+        gates=[{"id": "g1", "properties": {"Name": {"title": [{"text": {"content": "G"}}]}, "Status": {"select": {"name": "pending"}}}}],
+    )
+    pos_h = out.find("Handover Notes")
+    pos_rule = out.find("Project Rules")
+    pos_wi = out.find("Work Items")
+    pos_ri = out.find("Open Review Issues")
+    pos_g = out.find("Workflow Gates")
+    assert -1 < pos_h < pos_rule < pos_wi < pos_ri < pos_g
+
+
+def test_json_includes_workgraph_context_arrays():
+    """JSON 出力に work_items / review_issues / gates キーが必ず含まれる"""
+    out = render_prime_json(
+        workflow_id="wf-1",
+        profile=None,
+        current_phase=None,
+        memories=[],
+        work_items=[{"id": "wi1", "properties": {"Title": {"title": [{"text": {"content": "T"}}]}, "Status": {"select": {"name": "ready"}}, "Phase": {"select": {"name": "phase5"}}}}],
+        review_issues=[],
+        gates=[],
+    )
+    payload = json.loads(out)
+    assert payload["work_items"] == [{
+        "id": "wi1",
+        "title": "T",
+        "status": "ready",
+        "phase": "phase5",
+        "description": "",
+    }]
+    assert payload["review_issues"] == []
+    assert payload["gates"] == []
 
 
 def test_markdown_concatenates_multi_element_rich_text():
