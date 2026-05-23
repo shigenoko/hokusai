@@ -363,10 +363,13 @@ class WorkflowsDBClient:
                 ]
             }
 
-        # Cancel Reason: workflow_canceled / phase_changed (status=canceled)
-        # 時のみ書き込む。Status と独立して上書きすると古い理由が新しい運用
-        # に紛れ込むため、event 種別をガードしない代わりに「payload に明示
-        # 指定がある場合のみ」書く。空文字は no-op（既存値温存）。
+        # Cancel Reason: payload に `cancel_reason` キーが明示指定された
+        # event でのみ書き込む（event_type ガードは敢えてしない）。Supersedes
+        # / Operator と違い「再開後の event でも理由を後付け修正したい」
+        # 運用に対応するため。空文字 / None は no-op で既存値温存する。
+        # 呼び出し側責任で「Status=Canceled 遷移時にのみ cancel_reason を
+        # payload に含める」運用にすることで、誤書きを防ぐ（_handle_cleanup
+        # の `_sync_workflow_cancel_reason` がこの責務を持つ）。
         if "cancel_reason" in payload and payload["cancel_reason"]:
             props["Cancel Reason"] = _rich_text(str(payload["cancel_reason"]))
 

@@ -841,6 +841,45 @@ class TestNotionMigrateSchemaParser:
         assert getattr(args, "dry_run", False) is False
 
 
+class TestHandoverCliFlagsParser:
+    """Issue #56: start --supersedes / cleanup --cancel-reason の parser-level
+    テスト（Copilot 指摘で argparse 配線の回帰防止）。"""
+
+    def test_start_supersedes_parses_and_stores_value(self):
+        from hokusai.cli_main import _build_parser
+
+        parser, _, _ = _build_parser()
+        args = parser.parse_args([
+            "start", "https://notion.so/task", "--supersedes", "wf-prior",
+        ])
+        assert args.command == "start"
+        assert getattr(args, "supersedes", None) == "wf-prior"
+
+    def test_start_supersedes_defaults_to_none_when_omitted(self):
+        from hokusai.cli_main import _build_parser
+
+        parser, _, _ = _build_parser()
+        args = parser.parse_args(["start", "https://notion.so/task"])
+        assert getattr(args, "supersedes", "missing") is None
+
+    def test_cleanup_cancel_reason_parses_and_stores_value(self):
+        from hokusai.cli_main import _build_parser
+
+        parser, _, _ = _build_parser()
+        args = parser.parse_args([
+            "cleanup", "wf-1", "--cancel-reason", "引き継ぎのため停止",
+        ])
+        assert args.command == "cleanup"
+        assert getattr(args, "cancel_reason", None) == "引き継ぎのため停止"
+
+    def test_cleanup_cancel_reason_defaults_to_none_when_omitted(self):
+        from hokusai.cli_main import _build_parser
+
+        parser, _, _ = _build_parser()
+        args = parser.parse_args(["cleanup", "wf-1"])
+        assert getattr(args, "cancel_reason", "missing") is None
+
+
 def test_migrate_handler_rejects_whitespace_workflows_db_id(capsys, monkeypatch):
     """env / CLI 由来の workflows_db_id が空白のみなら未設定として扱う。
 
