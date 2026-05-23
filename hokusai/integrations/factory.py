@@ -38,7 +38,10 @@ def get_task_client() -> TaskBackendClient:
     elif backend_type == "github_issue":
         from .task_backend.github_issue import GitHubIssueClient
 
-        _task_client = GitHubIssueClient(repo=config.task_backend.repo)
+        _task_client = GitHubIssueClient(
+            repo=config.task_backend.repo,
+            status_mapping=config.status_mapping,
+        )
     elif backend_type in ("jira", "linear"):
         raise NotImplementedError(
             f"タスクバックエンド '{backend_type}' は未実装です。"
