@@ -199,10 +199,21 @@ def _verify_notion_state(state: WorkflowState) -> None:
     失敗時は RuntimeError を送出。
 
     Note:
+        `HOKUSAI_SKIP_NOTION=1` のときは検証スキップ（早期 return）。
+        SKIP_NOTION 経路では save_to_subpage_or_create も noop で
+        state["phase_subpages"] が空のままになるため、検証すると常に
+        RuntimeError になり phase 2 が完走しない（Issue #77、PR #76 連鎖）。
+        `_verify_subpage_content` も同様に SKIP_NOTION で早期 return する。
         現在は state ベースの検証のみ。実ページの存在確認や
         親タスクページへの本文混入チェック（notion-fetch による再取得）は
         追加 LLM 呼び出しコストが高いため後続対応とする。
     """
+    import os
+
+    if os.environ.get("HOKUSAI_SKIP_NOTION") == "1":
+        logger.info("HOKUSAI_SKIP_NOTION=1: Phase 2 Notion 状態検証をスキップ")
+        return
+
     subpage_url = state.get("phase_subpages", {}).get(2)
     if not subpage_url:
         raise RuntimeError(
