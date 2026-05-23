@@ -61,7 +61,7 @@ class TaskBackendClient(ABC):
             返し得る。呼び出し側は `hasattr(result, 'result')` で audit log を
             生成する想定（phase1_prepare.py 参照）。Notion は
             `NotionOperationResult`、GitHub Issue は `GitHubIssueOperationResult`
-            を返す（PR #74 で追加）。`None` を返す実装も互換性のため許容。
+            を返す（Issue #73 で追加）。`None` を返す実装も互換性のため許容。
         """
         ...
 

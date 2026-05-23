@@ -21,8 +21,7 @@ from hokusai.utils.shell import ShellError, ShellResult
 
 
 def _make_shell_error(stderr: str, returncode: int = 1) -> ShellError:
-    """ShellError を本物の `ShellResult` から組み立てる（PR #74 Copilot Round 2
-    指摘）。
+    """ShellError を本物の `ShellResult` から組み立てる（Issue #73）。
 
     `ShellError.__init__` は `result.command` (list[str]) を `' '.join()` する
     ため、MagicMock で `cmd: str` を持たせるだけでは `TypeError` で例外生成
@@ -114,12 +113,12 @@ class TestUpdateStatusGracefulDegrade:
         assert "Issue 番号" in result.reason or "Invalid" in result.reason
         captured = capsys.readouterr()
         assert "⚠️" in captured.out
-        # メッセージ表現は「失敗（継続）」に統一（PR #74 Copilot Round 1）
+        # メッセージ表現は「失敗（継続）」に統一（Issue #73）
         assert "失敗" in captured.out or "継続" in captured.out
 
     def test_returns_failed_when_gh_cli_missing(self, capsys):
         """gh CLI が未インストール → FileNotFoundError でも graceful degrade
-        （PR #74 Copilot Round 1 指摘: ShellError 以外も catch する）"""
+        （Issue #73: ShellError 以外も catch する）"""
         client = GitHubIssueClient(repo="owner/repo")
 
         with patch(

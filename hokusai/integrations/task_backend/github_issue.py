@@ -174,7 +174,7 @@ class GitHubIssueClient(TaskBackendClient):
             reason = f"Issue 番号を解決できません: {e}"
             logger.warning(reason)
             # 表示メッセージは「失敗（継続）」に統一し、結果（FAILED）と
-            # 整合させる（PR #74 Copilot Round 1 指摘）。
+            # 整合させる（Issue #73）。
             print(f"⚠️ GitHub Issueラベル更新失敗（継続）: {reason}")
             return GitHubIssueOperationResult(
                 result=GitHubIssueResult.FAILED,
@@ -204,7 +204,7 @@ class GitHubIssueClient(TaskBackendClient):
         # FAILED 結果を返して呼び出し側で audit に記録する。
         # ShellError（ラベル不在等）だけでなく FileNotFoundError（gh CLI
         # 未インストール）/ TimeoutExpired / その他予期せぬ例外も graceful
-        # degrade する（PR #74 Copilot Round 1 指摘 / Notion パターン準拠）。
+        # degrade する（Issue #73 / Notion パターン準拠）。
         try:
             shell.run_gh(
                 "issue",
