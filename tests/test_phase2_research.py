@@ -10,12 +10,11 @@ Phase 2 事前調査ノード / 抽出ロジックのテスト
 """
 
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from hokusai.nodes.phase2_research import _extract_research_report
-
 
 # ---------------------------------------------------------------------------
 # _extract_research_report テスト
@@ -390,6 +389,25 @@ class TestPhase2FailFast:
         state["phase_subpages"] = {2: "https://notion.so/subpage-2"}
         # 例外が発生しないこと
         _verify_notion_state(state)
+
+    def test_verify_notion_state_skips_when_skip_notion_env(
+        self, monkeypatch, caplog
+    ):
+        """HOKUSAI_SKIP_NOTION=1 のとき phase_subpages[2] 未設定でも検証スキップ
+        （Issue #77 / PR #76 連鎖の dogfooding round 3 で発覚）"""
+        from hokusai.nodes.phase2_research import _verify_notion_state
+
+        monkeypatch.setenv("HOKUSAI_SKIP_NOTION", "1")
+        state = self._build_state()
+        # phase_subpages を意図的に未設定にする
+
+        # 例外を投げず、ログにスキップメッセージ
+        with caplog.at_level("INFO", logger="hokusai"):
+            _verify_notion_state(state)
+
+        log_text = " ".join(r.getMessage() for r in caplog.records)
+        assert "HOKUSAI_SKIP_NOTION" in log_text
+        assert "Phase 2" in log_text
 
     @patch("hokusai.nodes.phase2_research._validate_research_output")
     @patch("hokusai.nodes.phase2_research.execute_cross_review", side_effect=lambda s, *a, **kw: s)
