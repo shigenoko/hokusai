@@ -295,6 +295,27 @@ def test_loader_treats_bool_as_invalid_int_in_spend_cap():
     assert cfg.spend_cap.monthly_jpy is None
 
 
+def test_loader_rejects_negative_spend_cap_values():
+    """負値の spend_cap.*_jpy は上限金額として意味を成さず、後続 enforcement で
+    「常に超過」扱いになり全リクエストが block/approval になる誤設定を招くため、
+    既定値（None）にフォールバックする。"""
+    raw = {
+        "llm_gateway": {
+            "spend_cap": {
+                "monthly_jpy": -1,
+                "daily_jpy": -100,
+                "per_workflow_jpy": 0,  # 0 は許可（明示的にゼロ円上限）
+                "per_phase_jpy": 5000,  # 正値は通常通り採用
+            }
+        }
+    }
+    cfg = _parse_llm_gateway_config(raw)
+    assert cfg.spend_cap.monthly_jpy is None
+    assert cfg.spend_cap.daily_jpy is None
+    assert cfg.spend_cap.per_workflow_jpy == 0
+    assert cfg.spend_cap.per_phase_jpy == 5000
+
+
 def test_loader_preserves_backward_compat_with_minimal_schema():
     """PR #39 の最小 schema のみ指定でも既定値で fill されて動く"""
     raw = {

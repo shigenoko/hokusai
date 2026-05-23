@@ -472,8 +472,12 @@ def _parse_llm_gateway_spend_cap(raw: object):
         return defaults
 
     def _int_or_none(key: str) -> int | None:
+        # 負値は上限金額として無意味（後続 enforcement で「常に超過」扱いに
+        # なってしまう）ため、bool 除外に加え value >= 0 も検証する。
         value = raw.get(key)
-        return value if isinstance(value, int) and not isinstance(value, bool) else None
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            return value
+        return None
 
     fail_mode_raw = raw.get("fail_mode", defaults.fail_mode)
     fail_mode = (
