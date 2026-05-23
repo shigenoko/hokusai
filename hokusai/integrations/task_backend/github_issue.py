@@ -173,7 +173,9 @@ class GitHubIssueClient(TaskBackendClient):
         except Exception as e:
             reason = f"Issue 番号を解決できません: {e}"
             logger.warning(reason)
-            print(f"⚠️ GitHub Issueラベル更新スキップ: {reason}")
+            # 表示メッセージは「失敗（継続）」に統一し、結果（FAILED）と
+            # 整合させる（PR #74 Copilot Round 1 指摘）。
+            print(f"⚠️ GitHub Issueラベル更新失敗（継続）: {reason}")
             return GitHubIssueOperationResult(
                 result=GitHubIssueResult.FAILED,
                 operation="update_status",
@@ -200,6 +202,9 @@ class GitHubIssueClient(TaskBackendClient):
 
         # 新しいステータスラベルを追加。失敗しても workflow は止めず、
         # FAILED 結果を返して呼び出し側で audit に記録する。
+        # ShellError（ラベル不在等）だけでなく FileNotFoundError（gh CLI
+        # 未インストール）/ TimeoutExpired / その他予期せぬ例外も graceful
+        # degrade する（PR #74 Copilot Round 1 指摘 / Notion パターン準拠）。
         try:
             shell.run_gh(
                 "issue",
@@ -214,6 +219,20 @@ class GitHubIssueClient(TaskBackendClient):
             reason = (
                 f"ラベル '{status}' を追加できません（リポジトリに当該ラベルが"
                 f"存在しない可能性）: {e.result.stderr.strip() or e.result.stdout.strip()}"
+            )
+            logger.warning(reason)
+            print(f"⚠️ GitHub Issueラベル更新失敗（継続）: {reason}")
+            return GitHubIssueOperationResult(
+                result=GitHubIssueResult.FAILED,
+                operation="update_status",
+                reason=reason,
+            )
+        except Exception as e:
+            # gh CLI 未インストール (FileNotFoundError) / timeout
+            # (subprocess.TimeoutExpired) / その他想定外の例外でも継続。
+            # 型名は記録するがメッセージ全文は伝播させず、reason に短く要約。
+            reason = (
+                f"ラベル '{status}' 追加で想定外の例外 ({type(e).__name__}): {e}"
             )
             logger.warning(reason)
             print(f"⚠️ GitHub Issueラベル更新失敗（継続）: {reason}")

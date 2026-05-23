@@ -98,11 +98,49 @@ class TestUpdateStatusGracefulDegrade:
 
         result = client.update_status("not-a-valid-url", "進行中")
 
+        # update_status は常に GitHubIssueOperationResult を返す（SonarCloud
+        # pythonbugs:S2259 対策で型を明示的に検証）
+        assert isinstance(result, GitHubIssueOperationResult)
         assert result.result == GitHubIssueResult.FAILED
         assert result.reason is not None
         assert "Issue 番号" in result.reason or "Invalid" in result.reason
         captured = capsys.readouterr()
         assert "⚠️" in captured.out
+        # メッセージ表現は「失敗（継続）」に統一（PR #74 Copilot Round 1）
+        assert "失敗" in captured.out or "継続" in captured.out
+
+    def test_returns_failed_when_gh_cli_missing(self, capsys):
+        """gh CLI が未インストール → FileNotFoundError でも graceful degrade
+        （PR #74 Copilot Round 1 指摘: ShellError 以外も catch する）"""
+        client = GitHubIssueClient(repo="owner/repo")
+
+        with patch(
+            "hokusai.integrations.task_backend.github_issue.ShellRunner"
+        ) as mock_runner_cls:
+            mock_runner = MagicMock()
+            mock_runner_cls.return_value = mock_runner
+
+            def _side_effect(*args, **kwargs):
+                # remove-label は check=False で握り潰される想定。
+                # add-label のみ FileNotFoundError を発生させる。
+                if "--add-label" in args:
+                    raise FileNotFoundError("gh: command not found")
+                return MagicMock(returncode=0, stdout="", stderr="")
+
+            mock_runner.run_gh.side_effect = _side_effect
+
+            # 例外を投げないこと
+            result = client.update_status(
+                "https://github.com/owner/repo/issues/42", "進行中"
+            )
+
+        assert isinstance(result, GitHubIssueOperationResult)
+        assert result.result == GitHubIssueResult.FAILED
+        assert result.reason is not None
+        assert "FileNotFoundError" in result.reason
+        captured = capsys.readouterr()
+        assert "⚠️" in captured.out
+        assert "継続" in captured.out
 
     def test_remove_label_failures_are_silent(self):
         """既存ラベル削除での失敗は継続（HOKUSAI を初めて入れた環境で
