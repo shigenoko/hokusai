@@ -1708,6 +1708,30 @@ def test_persist_env_vars_rejects_invalid_env_name(tmp_path, sample_ids):
         )
 
 
+def test_persist_env_vars_rejects_rc_path_with_parent_traversal(tmp_path, sample_ids):
+    """`..` を含む rc_path は path traversal リスクとして拒否（SonarCloud S2083）"""
+    from hokusai.integrations.notion_dashboard.setup import persist_env_vars
+
+    bad_path = tmp_path / ".." / "outside.zshrc"
+    with pytest.raises(ValueError, match="must not contain '..'"):
+        persist_env_vars(bad_path, sample_ids)
+
+
+def test_persist_env_vars_resolves_symlinks_in_rc_path(tmp_path, sample_ids):
+    """symlink 経由で渡された rc_path は実体側に書き込まれる（resolve 後の絶対パス）"""
+    from hokusai.integrations.notion_dashboard.setup import persist_env_vars
+
+    real_rc = tmp_path / "real.zshrc"
+    real_rc.write_text("# real\n")
+    link_rc = tmp_path / "link.zshrc"
+    link_rc.symlink_to(real_rc)
+
+    result = persist_env_vars(link_rc, sample_ids)
+
+    assert Path(result["rc_path"]) == real_rc.resolve()
+    assert "wf-id-12345" in real_rc.read_text()
+
+
 def test_is_valid_env_var_name():
     """is_valid_env_var_name の真偽パターン"""
     from hokusai.integrations.notion_dashboard import is_valid_env_var_name
