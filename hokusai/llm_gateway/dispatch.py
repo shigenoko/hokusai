@@ -6,8 +6,10 @@ boilerplate が重複していたため共通化する。
 - `get_config()` から llm_gateway 設定を取得
 - gateway が未設定（古い config）なら no-op
 - `LLMGatewayContext` を組み立てて `LLMGatewayInterceptor.intercept()` を呼ぶ
-- **例外は完全に握り潰し**、debug ログにのみ stack trace を残す。secret /
-  PII を log にこぼさないようメッセージ本文は出さない（要件 §14 受け入れ基準）
+- **例外は完全に握り潰し**、debug ログには **例外型名 + frame 一覧**
+  （filename:lineno in function）のみを残す。`str(exc)` / traceback 全文は
+  記録しない（secret / PII が prompt 経由で例外メッセージに混入したケース
+  での log 漏洩を防ぐため。要件 §14 受け入れ基準）
 
 後続の Phase 2 拡張（block / warn / spend tracking / PII detector）はこの
 helper に集約することで、3 client に同じ修正を 3 回入れる必要をなくす。
