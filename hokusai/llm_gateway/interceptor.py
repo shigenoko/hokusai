@@ -29,17 +29,29 @@ DECISION_LOG = "log"
 DECISION_SKIPPED = "skipped"  # Gateway 無効化時
 
 
+# Phase 1 §8a で発行する policy_hits 値（Phase 2 で decision="block" 切替の基礎）
+POLICY_HIT_UNKNOWN_PROVIDER = "unknown_provider"
+POLICY_HIT_UNKNOWN_MODEL = "unknown_model"
+POLICY_HIT_HIGH_COST_MODEL = "high_cost_model"
+
+
 @dataclass(frozen=True)
 class InterceptorDecision:
     """interceptor の判定結果
 
     Phase 1 では `decision` は "log" または "skipped" のみ。Phase 5+ で
     "block" / "warn" / "redact" を追加する。
+
+    `policy_hits` は Phase 1 §8a で追加された log-only 評価結果。Phase 2
+    enforcement PR で「policy_hits が非空なら decision="block"」のように
+    切替する前段として、現時点では audit log に積むだけで動作には影響
+    させない。
     """
 
     decision: str
     reason: str
     audit_emitted: bool = False
+    policy_hits: tuple[str, ...] = ()
 
 
 class LLMGatewayInterceptor:
@@ -80,14 +92,57 @@ class LLMGatewayInterceptor:
         else:
             reason = "phase1_log_only"
 
+        policy_hits = self._evaluate_policy_hits(context)
+
         audit_emitted = False
         if self._config.audit_log_enabled:
-            self._emit_audit(context, prompt, DECISION_LOG, reason)
+            self._emit_audit(context, prompt, DECISION_LOG, reason, policy_hits)
             audit_emitted = True
 
         return InterceptorDecision(
-            decision=DECISION_LOG, reason=reason, audit_emitted=audit_emitted
+            decision=DECISION_LOG,
+            reason=reason,
+            audit_emitted=audit_emitted,
+            policy_hits=policy_hits,
         )
+
+    def _evaluate_policy_hits(
+        self, context: LLMGatewayContext
+    ) -> tuple[str, ...]:
+        """LLMGatewayConfig の policy schema を log-only 評価する（要件 §8a）
+
+        Phase 1 では block しないため、hit を audit log に積むだけ。Phase 2
+        enforcement PR で hit 内容に応じて decision を block 等に切り替える。
+
+        - `allowed_providers`: None なら未指定として skip（要件 §4.2）。
+          list なら context.provider が含まれない場合 "unknown_provider" を hit。
+        - `allowed_models.default`: None なら skip。list なら context.model が
+          含まれない場合 "unknown_model" を hit。
+        - `allowed_models.high_cost_requires_gate`: 空 list なら skip。非空で
+          context.model が含まれる場合 "high_cost_model" を hit（後続 PR で
+          approval gate と接続される予定）。
+        """
+        hits: list[str] = []
+
+        allowed_providers = self._config.allowed_providers
+        if (
+            allowed_providers is not None
+            and context.provider not in allowed_providers
+        ):
+            hits.append(POLICY_HIT_UNKNOWN_PROVIDER)
+
+        allowed_default = self._config.allowed_models.default
+        if (
+            allowed_default is not None
+            and context.model not in allowed_default
+        ):
+            hits.append(POLICY_HIT_UNKNOWN_MODEL)
+
+        high_cost = self._config.allowed_models.high_cost_requires_gate
+        if high_cost and context.model in high_cost:
+            hits.append(POLICY_HIT_HIGH_COST_MODEL)
+
+        return tuple(hits)
 
     def _emit_audit(
         self,
@@ -95,6 +150,7 @@ class LLMGatewayInterceptor:
         prompt: str,
         decision: str,
         reason: str,
+        policy_hits: tuple[str, ...] = (),
     ) -> None:
         """構造化 log entry を出力する。
 
@@ -122,6 +178,10 @@ class LLMGatewayInterceptor:
             "context": context_dict,
             "prompt_length": len(prompt),
             "prompt_hash": prompt_hash,
+            # Phase 1 §8a: log-only 評価で hit した policy 名のリスト。
+            # 空 list なら policy 違反候補なし。Phase 2 enforcement PR で
+            # この内容に応じて decision を block 等に切り替える前段。
+            "policy_hits": list(policy_hits),
             # 監査上「どの設定で動いていたか」を再現できるよう、interceptor
             # に渡された LLMGatewayConfig の実値をそのまま記録する。
             # Phase 1 では log_only / dry_run は decision に影響しないが、
