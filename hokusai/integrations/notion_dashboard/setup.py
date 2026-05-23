@@ -1271,6 +1271,30 @@ def _validate_env_var_name(name: str, *, role: str) -> None:
         )
 
 
+def _sanitize_rc_path(rc_path: Path | str) -> Path:
+    """rc ファイルパスを正規化し、path traversal を含まない絶対パスに変換する。
+
+    Why: `persist_env_vars` の `rc_path` は CLI 経由でユーザーが任意指定できるため、
+    `..` を介した親ディレクトリ書き換えなど path traversal の経路になりうる。
+    write_text の前に正規化することでこれを断ち切る（SonarCloud python:S2083）。
+
+    Args:
+        rc_path: 検証対象のパス（`Path` または `str`）
+
+    Returns:
+        `expanduser` / `resolve` 済みの絶対パス
+
+    Raises:
+        ValueError: 入力パス文字列に `..` セグメントが含まれる場合
+    """
+    candidate = Path(rc_path).expanduser()
+    if ".." in candidate.parts:
+        raise ValueError(
+            f"rc_path must not contain '..' segments: {rc_path!r}"
+        )
+    return candidate.resolve()
+
+
 def detect_shell_rc() -> Path:
     """SHELL 環境変数から rc ファイルパスを推測する。
 
@@ -1333,7 +1357,7 @@ def persist_env_vars(
             "block_text": str,
         }
     """
-    rc_path = Path(rc_path).expanduser()
+    rc_path = _sanitize_rc_path(rc_path)
 
     # シェル変数名の最終ガード（コマンド注入 / rc 破損の防止）
     _validate_env_var_name(workflows_env_name, role="workflows_env_name")
