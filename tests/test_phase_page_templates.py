@@ -74,6 +74,51 @@ class TestBuildPhasePageContent:
         assert "cross_review_completed" in content
 
 
+class TestFormatLatestReviewResults:
+    """`_format_latest_review_results` の collection 安全性テスト（SonarCloud S6466）"""
+
+    def _make_state_with_review(self, findings):
+        state = create_initial_state(
+            task_url="https://notion.so/workspace/task-aabbccdd11223344aabbccdd11223344",
+            task_title="テスト",
+            branch_name="feature/test",
+        )
+        state["phases"][3]["status"] = "failed"
+        state["current_phase"] = 3
+        state["waiting_for_human"] = True
+        state["cross_review_results"][3] = {
+            "overall_assessment": "request_changes",
+            "summary": "指摘あり",
+            "findings": findings,
+        }
+        return state
+
+    def test_findings_as_non_list_does_not_raise(self):
+        """findings が dict 等の non-list でも例外を出さず、findings は空として扱う"""
+        state = self._make_state_with_review(findings={"unexpected": "shape"})
+        content = build_phase_page_content(
+            state=state, phase=3,
+            latest_document="## 設計\n\n本文",
+            source_phase="phase3_design",
+        )
+        assert "- Reviewer: `codex`" in content
+        # dict は list として扱われないため、severity 行は出力されない
+        assert "[major]" not in content
+        assert "[minor]" not in content
+
+    def test_findings_with_non_dict_items_are_skipped(self):
+        """findings 内に dict 以外（文字列など）が混じっても skip されて落ちない"""
+        state = self._make_state_with_review(
+            findings=["raw string", {"severity": "major", "title": "OK 項目"}]
+        )
+        content = build_phase_page_content(
+            state=state, phase=3,
+            latest_document="## 設計\n\n本文",
+            source_phase="phase3_design",
+        )
+        assert "[major] OK 項目" in content
+
+
 class TestDeriveDisplayStatus:
     """_derive_display_status のフェーズ単位判定テスト"""
 
