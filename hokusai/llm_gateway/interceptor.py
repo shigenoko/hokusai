@@ -16,10 +16,16 @@ import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from ..config.models import LLMGatewayConfig
 from ..logging_config import get_logger
 from .context import LLMGatewayContext
+
+if TYPE_CHECKING:
+    # 循環 import を避けるため TYPE_CHECKING 下で forward reference
+    # （_audit_store_cache の型注釈を明確化するため、Issue #80 Copilot Round 2 指摘）
+    from ..persistence.sqlite_store import SQLiteStore
 
 logger = get_logger("llm_gateway")
 
@@ -64,7 +70,7 @@ class LLMGatewayInterceptor:
         # 監査ログ 1 件ごとに生成するとレイテンシ / ロック競合の原因になる。
         # database_path 単位でキャッシュ（profile 切替 / テストで path が変わる
         # ケースに対応するため key を database_path にする）。
-        self._audit_store_cache: dict[str, object] = {}
+        self._audit_store_cache: dict[str, "SQLiteStore"] = {}
 
     def intercept(
         self, context: LLMGatewayContext, prompt: str

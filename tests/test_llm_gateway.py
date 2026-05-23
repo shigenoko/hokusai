@@ -359,7 +359,9 @@ def test_interceptor_persists_audit_to_sqlite_when_workflow_id_present(
 def test_interceptor_skips_sqlite_persist_when_workflow_id_absent(
     tmp_path, monkeypatch, caplog
 ):
-    """workflow_id が None / 空文字なら SQLite 書き込みを skip（FK 制約違反回避）"""
+    """workflow_id が None / 空文字なら SQLite 書き込みを skip（orphan レコード
+    回避 + NOT NULL 違反回避。PRAGMA foreign_keys は SQLite デフォルト OFF
+    のため FK 自体は検証されない、Issue #80 Copilot Round 2 で説明整合化）"""
     from hokusai.config import set_config
     from hokusai.config.models import WorkflowConfig
 
