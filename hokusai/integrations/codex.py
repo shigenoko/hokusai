@@ -148,7 +148,7 @@ class CodexClient:
         **既存フローへの影響をゼロに保つため**、import を含めて try/except
         で握り潰す。`hokusai.llm_gateway.dispatch` から直接 import することで
         `__init__.py` の policy/decisions 等まで巻き込まれる依存を軽量化する
-        （PR #67 Copilot Round 2 指摘）。
+        （Issue #66 Copilot Round 2 指摘）。
         """
         try:
             from ..llm_gateway.dispatch import dispatch_via_gateway
@@ -160,11 +160,28 @@ class CodexClient:
                 prompt=prompt,
                 metadata={"has_schema": has_schema},
             )
-        except Exception:
-            # log_suppressed_exception 自体が import できない可能性があるため
-            # 標準 logger.debug を fallback として直接使う（メッセージ本文も
-            # 含めない: secret/PII が呼び出し側経由で混入するリスク排除）
-            logger.debug("LLM Gateway interceptor 呼び出しに失敗（import 含む）")
+        except Exception as exc:
+            # log_suppressed_exception 自体が import できない可能性があるため、
+            # 標準 logger.debug を fallback として直接使う。`str(exc)` は出さず
+            # 例外型名 + frame 一覧だけ記録する（secret/PII の漏洩防止）。
+            import traceback
+
+            try:
+                frames = (
+                    traceback.extract_tb(exc.__traceback__)
+                    if exc.__traceback__ is not None
+                    else []
+                )
+                frame_summary = [
+                    f"{f.filename}:{f.lineno} in {f.name}" for f in frames
+                ]
+            except Exception:
+                frame_summary = []
+            logger.debug(
+                "LLM Gateway interceptor 呼び出しに失敗 (type=%s, frames=%s)",
+                type(exc).__name__,
+                frame_summary,
+            )
 
     def _parse_output(self, output: str) -> dict[str, Any]:
         """Codex出力をパース"""

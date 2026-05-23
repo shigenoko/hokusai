@@ -617,7 +617,7 @@ def test_claude_code_client_swallows_append_system_prompt_encode_error(
     monkeypatch, tmp_path
 ):
     """append_system_prompt の hash 計算が UnicodeEncodeError 等で失敗しても
-    workflow を落とさず metadata を省略して継続する（PR #67 Copilot Round 1
+    workflow を落とさず metadata を省略して継続する（Issue #66 Copilot Round 1
     指摘）。encode は helper の try/except 範囲外で実行されるため、metadata
     構築自体を try/except でラップしている必要がある。"""
     from hokusai.config import set_config
@@ -1198,7 +1198,7 @@ def test_dispatch_helper_sanitizes_exception_message_from_log(
     monkeypatch, caplog
 ):
     """例外メッセージに含まれる secret/PII が debug log にこぼれないことを検証
-    （PR #67 Copilot Round 1 指摘）。`exc_info=True` を使うと exc.args の
+    （Issue #66 Copilot Round 1 指摘）。`exc_info=True` を使うと exc.args の
     文字列が traceback に含まれてしまうため、`log_suppressed_exception` で
     type + frame だけ記録する設計にしている。"""
     from hokusai.llm_gateway import dispatch_via_gateway
@@ -1241,7 +1241,7 @@ def test_log_suppressed_exception_does_not_leak_args(caplog):
 
 def test_log_suppressed_exception_handles_null_traceback(caplog):
     """exc.__traceback__ が None の例外（未 raise 等）を渡しても本関数自体は
-    例外を投げず空 frame として log を出す（PR #67 Copilot Round 2 指摘）"""
+    例外を投げず空 frame として log を出す（Issue #66 Copilot Round 2 指摘）"""
     from hokusai.llm_gateway.dispatch import log_suppressed_exception
 
     # 未 raise の例外は __traceback__ が None
@@ -1261,7 +1261,7 @@ def test_log_suppressed_exception_handles_null_traceback(caplog):
 
 def test_dispatch_helper_swallows_import_error_at_callsite(monkeypatch, tmp_path):
     """3 client は dispatch module の import が失敗してもワークフローを
-    落とさない（PR #67 Copilot Round 2 指摘）。CodexClient を例として検証。"""
+    落とさない（Issue #66 Copilot Round 2 指摘）。CodexClient を例として検証。"""
     import sys
 
     from hokusai.integrations.codex import CodexClient

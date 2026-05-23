@@ -29,7 +29,7 @@ def log_suppressed_exception(message: str, exc: BaseException) -> None:
     `logger.debug(..., exc_info=True)` だと `exc.args` の文字列が traceback
     と共に log stream に流れてしまい、prompt や secret が呼び出し側から
     例外メッセージに混入したケースで PII が log にこぼれるリスクがある
-    （PR #67 Copilot Round 1 指摘 / 要件 §14 受け入れ基準）。
+    （Issue #66 Copilot Round 1 指摘 / 要件 §14 受け入れ基準）。
 
     本関数は例外型名 + frame 一覧（ファイル / 行番号 / 関数名）のみを
     debug ログに出し、`str(exc)` 由来の文字列は一切 log に含めない。
@@ -42,7 +42,7 @@ def log_suppressed_exception(message: str, exc: BaseException) -> None:
     Notes:
         本関数自体は **絶対に例外を投げない**。`exc.__traceback__ is None`
         （未 raise の例外や traceback が失われたケース）でも空 frame として
-        log を出すだけにする（PR #67 Copilot Round 2 指摘）。
+        log を出すだけにする（Issue #66 Copilot Round 2 指摘）。
     """
     if exc.__traceback__ is None:
         frame_summary: list[str] = []
@@ -105,5 +105,5 @@ def dispatch_via_gateway(
         # exc_info=True は exc.args 経由で例外メッセージ本文を log に流すため、
         # 代わりに log_suppressed_exception で type + frame のみを記録する
         # （secret/PII が prompt 由来で例外メッセージに混入するリスクを排除、
-        # PR #67 Copilot Round 1 指摘 / 要件 §14）。
+        # Issue #66 Copilot Round 1 指摘 / 要件 §14）。
         log_suppressed_exception("LLM Gateway interceptor 内例外を抑制", exc)

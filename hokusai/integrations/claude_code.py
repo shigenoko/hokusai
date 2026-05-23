@@ -250,7 +250,7 @@ class ClaudeCodeClient:
             # 軽量パス（dispatch module）から直接 import し、`__init__.py` の
             # policy/decisions 等まで巻き込まれる依存を避ける。import 時例外
             # （循環参照 / 依存欠落）も含めて握り潰すため try/except で囲む
-            # （PR #67 Copilot Round 2 指摘）。
+            # （Issue #66 Copilot Round 2 指摘）。
             from ..llm_gateway.dispatch import (
                 dispatch_via_gateway,
                 log_suppressed_exception,
@@ -286,11 +286,28 @@ class ClaudeCodeClient:
                 prompt=prompt,
                 metadata=metadata,
             )
-        except Exception:
+        except Exception as exc:
             # log_suppressed_exception 自体が import できていない可能性が
-            # あるため fallback として標準 logger を直接使う（メッセージ本文
-            # は含めない: secret/PII が混入するリスク排除）
-            logger.debug("LLM Gateway interceptor 呼び出しに失敗（import 含む）")
+            # あるため fallback として標準 logger を直接使う。`str(exc)` は
+            # 出さず例外型名 + frame 一覧だけ記録（secret/PII の漏洩防止）。
+            import traceback
+
+            try:
+                frames = (
+                    traceback.extract_tb(exc.__traceback__)
+                    if exc.__traceback__ is not None
+                    else []
+                )
+                frame_summary = [
+                    f"{f.filename}:{f.lineno} in {f.name}" for f in frames
+                ]
+            except Exception:
+                frame_summary = []
+            logger.debug(
+                "LLM Gateway interceptor 呼び出しに失敗 (type=%s, frames=%s)",
+                type(exc).__name__,
+                frame_summary,
+            )
 
     def _parse_skill_result(self, skill: str, output: str) -> dict[str, Any]:
         """
