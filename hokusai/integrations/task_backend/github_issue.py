@@ -6,10 +6,42 @@ GitHub CLI (gh) を使用してGitHub Issueをタスク管理として使用す�
 
 import json
 import re
+from dataclasses import dataclass
+from enum import Enum
 from typing import Any
 
+from ...logging_config import get_logger
 from ...utils.shell import ShellError, ShellRunner
 from .base import TaskBackendClient
+
+logger = get_logger("task_backend.github_issue")
+
+
+class GitHubIssueResult(str, Enum):
+    """GitHub Issue 操作の結果ステータス（Notion パターンに準じる）"""
+
+    SUCCESS = "success"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+
+
+@dataclass
+class GitHubIssueOperationResult:
+    """GitHub Issue 操作の構造化結果（Issue #73）。
+
+    `update_status` が ShellError を raise すると HOKUSAI を初めて入れた
+    リポジトリ（「進行中」等のラベルが未作成）で workflow が phase1 で
+    止まるため、Notion / Linear と同じく結果を構造化して返し、呼び出し
+    側で audit log + graceful degrade できるようにする。
+    """
+
+    result: GitHubIssueResult
+    operation: str  # e.g. "update_status"
+    reason: str | None = None  # error/skip reason
+
+    @property
+    def is_success(self) -> bool:
+        return self.result == GitHubIssueResult.SUCCESS
 
 
 class GitHubIssueClient(TaskBackendClient):
@@ -115,35 +147,60 @@ class GitHubIssueClient(TaskBackendClient):
 
         return "open"
 
-    def update_status(self, task_url: str, status: str) -> None:
+    def update_status(
+        self, task_url: str, status: str
+    ) -> GitHubIssueOperationResult:
         """
         GitHub Issueのステータスを更新（ラベルで管理）
+
+        ラベル不在等で `gh issue edit --add-label` が失敗しても **例外を投げず**、
+        `GitHubIssueOperationResult(result=FAILED, reason=...)` を返して
+        workflow を継続させる（Issue #73）。HOKUSAI を初めて入れたリポジトリ
+        は「進行中」等のラベルを持たないことが多く、status 同期失敗で phase1
+        を止めるのは過剰反応。Notion / Linear と同じ graceful degrade パターン。
 
         Args:
             task_url: GitHub IssueのURL
             status: 新しいステータス（ラベル名として使用）
+
+        Returns:
+            GitHubIssueOperationResult: 成功時 SUCCESS、ラベル不在等の失敗時
+            は FAILED + reason、URL 不正等で issue 番号を解決できないなら
+            FAILED + reason
         """
         try:
             issue_number = self._extract_issue_number(task_url)
-            shell = ShellRunner()
+        except Exception as e:
+            reason = f"Issue 番号を解決できません: {e}"
+            logger.warning(reason)
+            print(f"⚠️ GitHub Issueラベル更新スキップ: {reason}")
+            return GitHubIssueOperationResult(
+                result=GitHubIssueResult.FAILED,
+                operation="update_status",
+                reason=reason,
+            )
 
-            # 既存のステータス関連ラベルを削除
-            status_labels = ["in-progress", "reviewing", "done", "open"]
-            for label in status_labels:
-                try:
-                    shell.run_gh(
-                        "issue",
-                        "edit",
-                        str(issue_number),
-                        "--remove-label",
-                        label,
-                        *self._get_repo_arg(),
-                        check=False,  # ラベルが存在しない場合もあるのでエラーを無視
-                    )
-                except Exception:
-                    pass
+        shell = ShellRunner()
 
-            # 新しいステータスラベルを追加
+        # 既存のステータス関連ラベルを削除（存在しない場合はそのまま継続）
+        status_labels = ["in-progress", "reviewing", "done", "open"]
+        for label in status_labels:
+            try:
+                shell.run_gh(
+                    "issue",
+                    "edit",
+                    str(issue_number),
+                    "--remove-label",
+                    label,
+                    *self._get_repo_arg(),
+                    check=False,  # ラベルが存在しない場合もあるのでエラーを無視
+                )
+            except Exception:
+                pass
+
+        # 新しいステータスラベルを追加。失敗しても workflow は止めず、
+        # FAILED 結果を返して呼び出し側で audit に記録する。
+        try:
             shell.run_gh(
                 "issue",
                 "edit",
@@ -153,15 +210,23 @@ class GitHubIssueClient(TaskBackendClient):
                 *self._get_repo_arg(),
                 check=True,
             )
-
-            print(f"📝 GitHub Issueラベルを更新: {status}")
-
         except ShellError as e:
-            print(f"⚠️ GitHub Issueラベル更新エラー: {e.result.stderr}")
-            raise
-        except Exception as e:
-            print(f"⚠️ GitHub Issueラベル更新エラー: {e}")
-            raise
+            reason = (
+                f"ラベル '{status}' を追加できません（リポジトリに当該ラベルが"
+                f"存在しない可能性）: {e.result.stderr.strip() or e.result.stdout.strip()}"
+            )
+            logger.warning(reason)
+            print(f"⚠️ GitHub Issueラベル更新失敗（継続）: {reason}")
+            return GitHubIssueOperationResult(
+                result=GitHubIssueResult.FAILED,
+                operation="update_status",
+                reason=reason,
+            )
+
+        print(f"📝 GitHub Issueラベルを更新: {status}")
+        return GitHubIssueOperationResult(
+            result=GitHubIssueResult.SUCCESS, operation="update_status"
+        )
 
     def append_progress(self, task_url: str, content: str) -> None:
         """
