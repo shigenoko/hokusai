@@ -3305,6 +3305,46 @@ def test_check_db_share_health_treats_5xx_as_non_share_error(store, monkeypatch)
     assert "500" in msg
 
 
+def test_notion_api_client_does_not_sleep_after_final_attempt(monkeypatch):
+    """max_attempts=1 のとき、5xx / network error / 429 のいずれが発生しても
+    sleep せず即時 raise する（PR #83 Copilot Round 5 指摘: preflight が
+    無駄にブロックする問題の根本修正）"""
+    import time as time_module
+
+    from hokusai.integrations.notion_dashboard.client import (
+        NotionAPIClient,
+        NotionAPIError,
+    )
+
+    sleep_called: list[float] = []
+
+    def _spy_sleep(seconds):
+        sleep_called.append(seconds)
+
+    monkeypatch.setattr(time_module, "sleep", _spy_sleep)
+
+    # 500 エラーを返す mock
+    def _raise_500(self, method, url, data):
+        raise NotionAPIError(500, "internal server error", code="server_error")
+
+    monkeypatch.setattr(NotionAPIClient, "_send", _raise_500)
+
+    client = NotionAPIClient(
+        api_token="test-token",
+        max_attempts=1,
+        backoff_seconds=10.0,  # 大きな値 → もし sleep されたら明白
+    )
+
+    with pytest.raises(NotionAPIError) as exc_info:
+        client.retrieve_database("any-db")
+
+    assert exc_info.value.status == 500
+    # max_attempts=1 のとき、5xx でも sleep されない（preflight の bloating 防止）
+    assert sleep_called == [], (
+        f"max_attempts=1 で sleep が発生した: {sleep_called}"
+    )
+
+
 def test_check_db_share_health_uses_preflight_client_with_max_attempts_one(
     store, monkeypatch
 ):
