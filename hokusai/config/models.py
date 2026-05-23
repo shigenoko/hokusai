@@ -259,8 +259,11 @@ class LLMGatewayAllowedModelsConfig:
 class LLMGatewaySpendCapConfig:
     """LLM Gateway spend cap 設定（Issue #58 / 要件 §4.1）。
 
-    各 cap は省略可（`None` で無制限）。`fail_mode` は cap 超過時の挙動。
-    既定 `block`（超過したら送信不可）。値の妥当性は loader 側で検証する。
+    各 cap は省略可（`None` で無制限）。`fail_mode` は **cap 超過時**および
+    **spend 計測自体が不能（pricing 不明 / usage 取得失敗等）の場合**両方の
+    挙動を制御する（`FailMode` enum の意味付けに整合: block / warn / log）。
+    既定 `block`（超過 or 計測不能なら送信不可）。値の妥当性は loader 側で
+    検証する。
     """
 
     monthly_jpy: int | None = None

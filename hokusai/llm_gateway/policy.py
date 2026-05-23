@@ -43,9 +43,17 @@ def is_valid_detector_rule(value: object) -> bool:
 
 
 class ApprovalReason:
-    """Human Approval gate が必要になる理由（要件 §8.1）。
+    """Human Approval gate が必要になる理由の識別子（要件 §8.1）。
 
-    `LLMGatewayApprovalsConfig` の各キーに対応する識別子としても使う。
+    Phase 1 schema の `LLMGatewayApprovalsConfig` には現在 3 キー
+    （high_cost_model / pii_send_without_redaction / policy_override）のみ
+    存在するが、本 enum は要件 §8.1 の 6 条件すべてを定義する。残り 3 条件
+    （spend_cap_override / unknown_usage_provider / strict_profile_external_llm）
+    は後続 rollout step（spend tracking / provider 制御 / strict profile）
+    実装時に config 側へ追加される予定。
+
+    そのため `LLMGatewayApprovalsConfig` のキーと 1:1 ではなく、enum が
+    superset を持つ形式（後続拡張のための予約）。
     """
 
     HIGH_COST_MODEL = "high_cost_model"
@@ -73,8 +81,17 @@ def is_valid_approval_reason(value: object) -> bool:
 class ApprovalGateType:
     """LLM Gateway が作成する Workflow Gate の type（要件 §8.2）。
 
-    既存 `WorkflowGatesDBClient` の gate_type と整合する文字列を返す。
-    後続 PR で実 gate 作成パスと接続する際に使う。
+    後続 rollout step で Workflow Gates DB と接続する予定。**現時点では
+    既存 `WorkflowGatesDBClient` の `ALL_GATE_TYPES` enum に本 `llm_*` 値は
+    含まれていない**ため、接続時に以下のいずれかの方針で実装する必要がある:
+
+    1. Workflow Gates 側の `ALL_GATE_TYPES` に `llm_*` を追加（schema 拡張）
+    2. Gate 作成時は `human_approval` 等の既存 type を使い、reason / 補助
+       プロパティで LLM Gateway 由来であることを識別する
+
+    本 enum は方針 (1) を採用する場合の参照識別子として、または方針 (2)
+    の reason 識別子として使える形に定義してある。接続 PR で方針を決定して
+    schema or 呼び出しコードを揃えること。
     """
 
     LLM_HIGH_COST_MODEL_APPROVAL = "llm_high_cost_model_approval"
