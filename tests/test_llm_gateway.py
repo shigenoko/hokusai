@@ -1129,8 +1129,8 @@ def test_dispatch_helper_emits_audit_when_enabled(caplog):
     assert payload["context"]["metadata"]["flag"] is True
 
 
-def test_dispatch_helper_skips_when_llm_gateway_missing(caplog):
-    """config に llm_gateway 属性がない（古い config）→ silent skip"""
+def test_dispatch_helper_skips_when_llm_gateway_is_none(caplog):
+    """config の llm_gateway 属性が None の場合 → silent skip"""
     from hokusai.config import set_config
     from hokusai.config.models import WorkflowConfig
     from hokusai.llm_gateway import dispatch_via_gateway
@@ -1145,6 +1145,31 @@ def test_dispatch_helper_skips_when_llm_gateway_missing(caplog):
             model="",
             purpose="any",
             prompt="p",
+        )
+
+    audit_records = [
+        r for r in caplog.records if "llm_gateway_audit" in r.message
+    ]
+    assert audit_records == []
+
+
+def test_dispatch_helper_skips_when_llm_gateway_attribute_missing(caplog):
+    """config object に llm_gateway 属性そのものが存在しない場合
+    （getattr(config, 'llm_gateway', None) が None を返すケース） → silent skip。
+    `cfg.llm_gateway = None` とは別経路を実際に検証する（Issue #66 Copilot
+    Round 5 指摘）。"""
+    from hokusai.config import set_config
+    from hokusai.llm_gateway import dispatch_via_gateway
+
+    # llm_gateway 属性を一切持たないダミー config object
+    class _ConfigWithoutLLMGateway:
+        pass
+
+    set_config(_ConfigWithoutLLMGateway())  # type: ignore[arg-type]
+
+    with caplog.at_level(logging.INFO, logger="hokusai.llm_gateway"):
+        dispatch_via_gateway(
+            provider="gemini", model="m", purpose="p", prompt="x"
         )
 
     audit_records = [

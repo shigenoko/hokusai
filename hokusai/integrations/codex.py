@@ -161,27 +161,22 @@ class CodexClient:
                 metadata={"has_schema": has_schema},
             )
         except Exception as exc:
-            # log_suppressed_exception 自体が import できない可能性があるため、
-            # 標準 logger.debug を fallback として直接使う。`str(exc)` は出さず
-            # 例外型名 + frame 一覧だけ記録する（secret/PII の漏洩防止）。
-            import traceback
-
+            # 第一選択: dispatch.log_suppressed_exception を使い 3 client で
+            # ログ形式を統一する。import 失敗（dispatch module 自体に到達
+            # できない真の最終ケース）にのみ inline fallback に落とす
+            # （Issue #66 Copilot Round 5 指摘）。`str(exc)` はどちらの経路
+            # でも出さない（secret/PII の漏洩防止）。
             try:
-                frames = (
-                    traceback.extract_tb(exc.__traceback__)
-                    if exc.__traceback__ is not None
-                    else []
+                from ..llm_gateway.dispatch import log_suppressed_exception
+
+                log_suppressed_exception(
+                    "LLM Gateway interceptor 呼び出しに失敗", exc
                 )
-                frame_summary = [
-                    f"{f.filename}:{f.lineno} in {f.name}" for f in frames
-                ]
             except Exception:
-                frame_summary = []
-            logger.debug(
-                "LLM Gateway interceptor 呼び出しに失敗 (type=%s, frames=%s)",
-                type(exc).__name__,
-                frame_summary,
-            )
+                logger.debug(
+                    "LLM Gateway interceptor 呼び出しに失敗 (type=%s)",
+                    type(exc).__name__,
+                )
 
     def _parse_output(self, output: str) -> dict[str, Any]:
         """Codex出力をパース"""

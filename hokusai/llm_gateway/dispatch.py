@@ -46,19 +46,26 @@ def log_suppressed_exception(message: str, exc: BaseException) -> None:
         （未 raise の例外や traceback が失われたケース）でも空 frame として
         log を出すだけにする（Issue #66 Copilot Round 2 指摘）。
     """
-    if exc.__traceback__ is None:
-        frame_summary: list[str] = []
-    else:
-        frames = traceback.extract_tb(exc.__traceback__)
-        frame_summary = [
-            f"{f.filename}:{f.lineno} in {f.name}" for f in frames
-        ]
-    logger.debug(
-        "%s (type=%s, frames=%s)",
-        message,
-        type(exc).__name__,
-        frame_summary,
-    )
+    # 関数全体を try/except で包み「絶対に例外を投げない」保証を強化する
+    # （Issue #66 Copilot Round 5 指摘: traceback.extract_tb や logger.debug が
+    # 失敗するエッジケースでも呼び出し側に伝播させない）。
+    try:
+        if exc.__traceback__ is None:
+            frame_summary: list[str] = []
+        else:
+            frames = traceback.extract_tb(exc.__traceback__)
+            frame_summary = [
+                f"{f.filename}:{f.lineno} in {f.name}" for f in frames
+            ]
+        logger.debug(
+            "%s (type=%s, frames=%s)",
+            message,
+            type(exc).__name__,
+            frame_summary,
+        )
+    except Exception:
+        # 最終防衛線: traceback 抽出も logger も失敗するなら静かに諦める
+        pass
 
 
 def dispatch_via_gateway(
