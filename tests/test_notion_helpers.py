@@ -5,13 +5,17 @@ save_content_to_notion の戻り値ハンドリングテスト
 - insert_after_existing が True を返した場合 → 成功ログ/表示
 - insert_after_existing が False を返した場合 → 警告ログ/表示（成功メッセージなし）
 - 例外時 → 警告ログ/表示
+- save_to_subpage_or_create の SKIP_NOTION 尊重（Issue #75）
 """
 
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from hokusai.utils.notion_helpers import save_content_to_notion
+from hokusai.utils.notion_helpers import (
+    save_content_to_notion,
+    save_to_subpage_or_create,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -94,3 +98,51 @@ class TestSaveContentToNotionReturnHandling:
             "# content",
             after_marker="::: callout...:::",
         )
+
+
+class TestSaveToSubpageOrCreateSkipNotion:
+    """save_to_subpage_or_create の HOKUSAI_SKIP_NOTION=1 尊重（Issue #75）"""
+
+    def test_skips_when_env_set(self, monkeypatch, caplog):
+        """HOKUSAI_SKIP_NOTION=1 のとき state を変更せず即返す"""
+        monkeypatch.setenv("HOKUSAI_SKIP_NOTION", "1")
+        state = {"task_url": "https://example/issue/1", "phase_subpages": {}}
+
+        # update_subpage_content / create_phase_subpage が呼ばれないことを
+        # mock で検証
+        with patch(
+            "hokusai.utils.notion_helpers.update_subpage_content"
+        ) as mock_update, patch(
+            "hokusai.utils.notion_helpers.create_phase_subpage"
+        ) as mock_create:
+            with caplog.at_level("INFO", logger="hokusai"):
+                returned = save_to_subpage_or_create(
+                    state, "https://example/issue/1", phase=2, content="hello"
+                )
+
+        # state は変更されず同じ dict が返る
+        assert returned is state
+        assert state["phase_subpages"] == {}
+        # 副作用なし
+        mock_update.assert_not_called()
+        mock_create.assert_not_called()
+        # ログに skip メッセージ
+        log_text = " ".join(r.getMessage() for r in caplog.records)
+        assert "HOKUSAI_SKIP_NOTION" in log_text
+        assert "Phase 2" in log_text
+
+    def test_normal_path_when_env_unset(self, monkeypatch):
+        """HOKUSAI_SKIP_NOTION 未設定時は通常通り create_phase_subpage を呼ぶ"""
+        monkeypatch.delenv("HOKUSAI_SKIP_NOTION", raising=False)
+        state = {"task_url": "https://example/issue/1", "phase_subpages": {}}
+
+        with patch(
+            "hokusai.utils.notion_helpers.create_phase_subpage"
+        ) as mock_create:
+            mock_create.return_value = "https://notion.so/subpage-xxx"
+            result = save_to_subpage_or_create(
+                state, "https://example/issue/1", phase=2, content="hello"
+            )
+
+        mock_create.assert_called_once()
+        assert result["phase_subpages"][2] == "https://notion.so/subpage-xxx"
