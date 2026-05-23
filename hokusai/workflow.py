@@ -687,6 +687,59 @@ class WorkflowRunner:
         )
         return enriched, idempotency_key
 
+    def _resolve_workflow_page_id(self, workflow_id: str) -> str | None:
+        """workflow_id → Notion Workflows DB の page_id を解決する
+        （Issue #56 / 要件 §9.3.2: start --supersedes で旧 workflow の page_id
+        が必要なため）。Notion 同期が未設定 / page miss / API 失敗は None を
+        返して呼び出し側で graceful skip させる。`HOKUSAI_SKIP_NOTION=1` も
+        明示的に尊重する（`_sync_workflow_cancel_reason` と同じ責務統一、
+        Copilot 指摘）。
+        """
+        if not workflow_id or not self.notion_dispatcher.is_configured():
+            return None
+        try:
+            import os
+
+            # ユーザが「Notion なしで続行」を選択している場合は早期 return
+            # （is_configured() は env が揃っていれば True になり得るが、
+            # SKIP_NOTION=1 はそれより上位のオプトアウトシグナル）。
+            if os.environ.get("HOKUSAI_SKIP_NOTION") == "1":
+                return None
+
+            from .integrations.notion_dashboard.client import NotionAPIClient
+            from .integrations.notion_dashboard.workflows_db import (
+                WorkflowsDBClient,
+            )
+
+            notion_cfg = self.config.notion_dashboard
+            db_id = os.environ.get(
+                notion_cfg.workflows_db_id_env, ""
+            ).strip()
+            if not db_id:
+                return None
+            # NotionAPIClient を dispatcher 内部から流用するため、独立した
+            # client インスタンスを生成（dispatcher の lazy init を尊重して
+            # API token は env 経由で取得）。
+            api_token = os.environ.get(notion_cfg.api_token_env, "").strip()
+            if not api_token:
+                return None
+            # dispatcher 側の NotionAPIClient 初期化と同じ retry / rate_limit
+            # 設定を使う（Copilot 指摘: 設定値を反映しないと dispatcher と
+            # 不整合なリトライ挙動になる）。
+            api = NotionAPIClient(
+                api_token=api_token,
+                max_attempts=notion_cfg.retry.max_attempts,
+                backoff_seconds=notion_cfg.retry.backoff_seconds,
+                requests_per_second=notion_cfg.rate_limit.requests_per_second,
+            )
+            wf_client = WorkflowsDBClient(api=api, database_id=db_id)
+            return wf_client.find_workflow_page_id(workflow_id)
+        except Exception as e:
+            logger.debug(
+                f"_resolve_workflow_page_id 失敗: workflow_id={workflow_id}, error={e}"
+            )
+            return None
+
     def _enrich_state_with_notion_url(self, state: dict) -> dict:
         """Slack 通知向けに Notion ダッシュボードページ URL を state に補う。
 
@@ -813,6 +866,7 @@ class WorkflowRunner:
         task_url: str,
         from_phase: int | None = None,
         branch_name: str | None = None,
+        supersedes_workflow_id: str | None = None,
     ) -> str:
         """
         新しいワークフローを開始
@@ -821,6 +875,11 @@ class WorkflowRunner:
             task_url: NotionタスクのURL
             from_phase: 開始フェーズ（省略時はPhase 1から）
             branch_name: 使用するブランチ名（from_phase使用時に既存ブランチを指定）
+            supersedes_workflow_id: 引き継ぎ元 workflow ID（要件 §9.3.2 /
+                Issue #56）。指定すると Workflows DB の Supersedes リレーション
+                に旧 workflow を紐付け、後段の `hokusai prime` 世代遡及で
+                handover_note を辿れるようにする。Notion 接続が無い環境では
+                state にだけ保存して同期は skip（後で migrate / sync 可能）。
 
         Returns:
             作成されたワークフローID
@@ -864,6 +923,12 @@ class WorkflowRunner:
         # None の場合は state に入れず、save_workflow 側の COALESCE で既存値を保持
         if self.profile_name is not None:
             state["profile_name"] = self.profile_name
+        # Issue #56 / 要件 §9.3.2: 引き継ぎ元 workflow を state に保存。
+        # Notion 同期は workflow_started イベント時に supersedes_workflow_page_id
+        # を解決して payload に乗せる（後段の dispatch で WorkflowsDBClient が
+        # Supersedes リレーションを書く）。
+        if supersedes_workflow_id:
+            state["supersedes_workflow_id"] = supersedes_workflow_id
         workflow_id = state["workflow_id"]
 
         if self.verbose:
@@ -909,6 +974,17 @@ class WorkflowRunner:
             state["operator"] = started_operator
             # operator 反映済み state を再永続化（drain 時に store から読まれる）
             self.store.save_workflow(workflow_id, state)
+            # Issue #56 / 要件 §9.3.2: supersedes_workflow_id → page_id を解決
+            # して workflow_started payload に乗せる。WorkflowsDBClient 側で
+            # Supersedes リレーションを書く。Notion API 失敗 / page miss は
+            # silent skip（page_id 未解決でも本体は止めない）。
+            prior_wf_id = state.get("supersedes_workflow_id")
+            if prior_wf_id:
+                prior_page_id = self._resolve_workflow_page_id(prior_wf_id)
+                if prior_page_id:
+                    started_overrides["supersedes_workflow_page_id"] = (
+                        prior_page_id
+                    )
         self._safe_notion_dispatch(
             "workflow_started",
             _build_notion_payload(state, **started_overrides),

@@ -556,3 +556,85 @@ class TestStartOperatorWiring:
         assert len(started_calls) == 1
         assert "operator" not in started_calls[0]
         assert op_calls["n"] == 0
+
+    def test_start_supersedes_resolves_page_id_and_includes_in_payload(
+        self, monkeypatch
+    ):
+        """`--supersedes` 指定時、旧 workflow_id → page_id 解決して
+        workflow_started payload に supersedes_workflow_page_id を含める
+        （Issue #56 / 要件 §9.3.2）"""
+        runner, dispatch_calls, _ = self._setup_runner_for_start(
+            monkeypatch, is_configured=True
+        )
+        runner._resolve_workflow_page_id = MagicMock(return_value="wf-prior-page")
+
+        runner.start(
+            "https://notion.so/task-3",
+            supersedes_workflow_id="wf-prior",
+        )
+        started_calls = [
+            payload for (event, payload) in dispatch_calls
+            if event == "workflow_started"
+        ]
+        assert len(started_calls) == 1
+        assert (
+            started_calls[0].get("supersedes_workflow_page_id")
+            == "wf-prior-page"
+        )
+        runner._resolve_workflow_page_id.assert_called_once_with("wf-prior")
+
+    def test_start_supersedes_omits_payload_when_page_id_unresolved(
+        self, monkeypatch
+    ):
+        """`--supersedes` 指定でも `_resolve_workflow_page_id` が None を返したら
+        payload に supersedes_workflow_page_id を含めない（graceful skip）"""
+        runner, dispatch_calls, _ = self._setup_runner_for_start(
+            monkeypatch, is_configured=True
+        )
+        runner._resolve_workflow_page_id = MagicMock(return_value=None)
+
+        runner.start(
+            "https://notion.so/task-4",
+            supersedes_workflow_id="wf-missing",
+        )
+        started_calls = [
+            payload for (event, payload) in dispatch_calls
+            if event == "workflow_started"
+        ]
+        assert len(started_calls) == 1
+        assert "supersedes_workflow_page_id" not in started_calls[0]
+
+    def test_start_no_supersedes_skips_page_id_resolution(self, monkeypatch):
+        """`--supersedes` 未指定なら page_id 解決自体を呼ばない（API 節約）"""
+        runner, dispatch_calls, _ = self._setup_runner_for_start(
+            monkeypatch, is_configured=True
+        )
+        runner._resolve_workflow_page_id = MagicMock()
+
+        runner.start("https://notion.so/task-5")
+        runner._resolve_workflow_page_id.assert_not_called()
+
+    def test_resolve_workflow_page_id_skips_when_hokusai_skip_notion_set(
+        self, monkeypatch
+    ):
+        """HOKUSAI_SKIP_NOTION=1 が設定されている場合は API 呼び出しせず None
+        を返す（Copilot 指摘: `_sync_workflow_cancel_reason` と同じ責務統一）"""
+        runner = _make_runner()
+        runner.notion_dispatcher = MagicMock()
+        runner.notion_dispatcher.is_configured.return_value = True
+        # 仮に env が揃って is_configured()=True でも SKIP=1 で早期 return
+        monkeypatch.setenv("HOKUSAI_SKIP_NOTION", "1")
+
+        # NotionAPIClient が呼ばれたら fail させる sentinel
+        called: list = []
+
+        class _Sentinel:
+            def __init__(self, *a, **kw):
+                called.append("called")
+
+        monkeypatch.setattr(
+            "hokusai.integrations.notion_dashboard.client.NotionAPIClient",
+            _Sentinel,
+        )
+        assert runner._resolve_workflow_page_id("wf-prior") is None
+        assert called == []

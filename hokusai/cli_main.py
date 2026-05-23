@@ -130,6 +130,17 @@ def _build_parser():
         "--branch",
         help="使用するブランチ名（--from-phase使用時に既存ブランチを指定）",
     )
+    start_parser.add_argument(
+        "--supersedes",
+        default=None,
+        metavar="WORKFLOW_ID",
+        help=(
+            "引き継ぎ元 workflow ID（要件 §9.3.2）。指定すると新 workflow の "
+            "Workflows DB レコードの Supersedes リレーションに旧 workflow を "
+            "紐付け、`hokusai prime` の handover_note 世代遡及で参照できる "
+            "ようになる。"
+        ),
+    )
 
     # continue コマンド
     continue_parser = subparsers.add_parser(
@@ -181,6 +192,16 @@ def _build_parser():
         "--stale",
         action="store_true",
         help="完了済みまたは古い worktree を一括削除",
+    )
+    cleanup_parser.add_argument(
+        "--cancel-reason",
+        default=None,
+        metavar="TEXT",
+        help=(
+            "cleanup で workflow を Canceled 化する際の理由を Workflows DB の "
+            "Cancel Reason プロパティに記入する（要件 §9.3.2、引き継ぎ運用時に "
+            "推奨）。Workflows DB ID が未設定の環境では no-op。"
+        ),
     )
 
     # pr-status コマンド
@@ -703,6 +724,7 @@ def main():
                 args.task_url,
                 from_phase=from_phase,
                 branch_name=branch,
+                supersedes_workflow_id=getattr(args, "supersedes", None),
             )
             print_workflow_id_result(workflow_id)
 
@@ -1683,12 +1705,98 @@ def _handle_profile_doctor(name: str, registry, *, deep: bool = False) -> int:
     return 0
 
 
+def _sync_workflow_cancel_reason(
+    *, config, workflow_id: str, state: dict, cancel_reason: str
+) -> None:
+    """`cleanup --cancel-reason` の Notion 同期パス（Issue #56 / 要件 §9.3.2）。
+
+    対象 workflow を Workflows DB 上で Status=Canceled に遷移させ、Cancel Reason
+    プロパティに `cancel_reason` テキストを記入する。Notion 接続が無い環境
+    （HOKUSAI_SKIP_NOTION=1 / 各種 env 未設定）では warning を出して skip
+    （worktree 削除は既に完了済みなので CLI 全体は止めない）。
+
+    既存の `WorkflowsDBClient.apply_event` を `phase_changed` event で呼び出し、
+    payload に `status=canceled` + `cancel_reason=<text>` を含める。
+    `_build_properties` 側で Cancel Reason rich_text + Status=Canceled select
+    が書かれる。
+    """
+    import os
+
+    from .integrations.notion_dashboard.client import NotionAPIClient
+    from .integrations.notion_dashboard.workflows_db import WorkflowsDBClient
+
+    # HOKUSAI_SKIP_NOTION=1 はユーザの「Notion なしで続行」選択。docstring と
+    # 実装を整合させるため明示的に skip する（Copilot 指摘）。
+    if os.environ.get("HOKUSAI_SKIP_NOTION") == "1":
+        print(
+            "⚠ HOKUSAI_SKIP_NOTION=1 のため Cancel Reason は記録しません "
+            "（worktree 削除は完了）",
+            file=sys.stderr,
+        )
+        return
+
+    notion_cfg = getattr(config, "notion_dashboard", None)
+    if notion_cfg is None or not getattr(notion_cfg, "enabled", False):
+        print(
+            "⚠ Notion 同期が無効のため Cancel Reason は記録しません "
+            "（worktree 削除は完了）",
+            file=sys.stderr,
+        )
+        return
+    api_token = os.environ.get(notion_cfg.api_token_env, "").strip()
+    db_id = os.environ.get(notion_cfg.workflows_db_id_env, "").strip()
+    if not api_token or not db_id:
+        print(
+            "⚠ Workflows DB ID / API token 未設定のため Cancel Reason は "
+            "記録しません（worktree 削除は完了）",
+            file=sys.stderr,
+        )
+        return
+
+    try:
+        # dispatcher 側と同じ retry / rate_limit 設定でクライアントを初期化
+        # （Copilot 指摘: 既定値のままだとリトライ挙動が他経路と不整合）
+        api = NotionAPIClient(
+            api_token=api_token,
+            max_attempts=notion_cfg.retry.max_attempts,
+            backoff_seconds=notion_cfg.retry.backoff_seconds,
+            requests_per_second=notion_cfg.rate_limit.requests_per_second,
+        )
+        client = WorkflowsDBClient(api=api, database_id=db_id)
+        client.apply_event(
+            "phase_changed",
+            {
+                "workflow_id": workflow_id,
+                "task_title": state.get("task_title"),
+                "status": "canceled",
+                "cancel_reason": cancel_reason,
+            },
+        )
+        print(
+            f"✓ Workflows DB を Canceled 化しました（理由: {cancel_reason}）"
+        )
+    except Exception as e:
+        print(
+            f"⚠ Cancel Reason 記録失敗: {type(e).__name__}: {e}",
+            file=sys.stderr,
+        )
+
+
 def _handle_cleanup(args, config):
     """cleanup コマンドのハンドラ"""
     from .integrations.git import GitClient
     from .persistence import SQLiteStore
 
     store = SQLiteStore(config.database_path)
+
+    # --cancel-reason を strip して空白のみは None 扱い（Copilot 指摘:
+    # 空白だけの値で Notion 側 Cancel Reason を見た目空で上書きしないため）
+    raw_cancel_reason = getattr(args, "cancel_reason", None)
+    cancel_reason = (
+        raw_cancel_reason.strip()
+        if isinstance(raw_cancel_reason, str)
+        else None
+    ) or None
 
     if args.workflow_id:
         # 指定 workflow の worktree を削除
@@ -1714,6 +1822,17 @@ def _handle_cleanup(args, config):
                 print(f"⚠️ 削除失敗: {wt_path}: {e}")
 
         print(f"✓ {cleaned} 件の worktree を削除しました")
+
+        # --cancel-reason 指定時は Workflows DB の Status=Canceled +
+        # Cancel Reason を更新（Issue #56 / 要件 §9.3.2 引き継ぎ運用）。
+        # Notion 同期未設定 / API 失敗時は warning + skip（worktree 削除は完了済）。
+        if cancel_reason:
+            _sync_workflow_cancel_reason(
+                config=config,
+                workflow_id=args.workflow_id,
+                state=state,
+                cancel_reason=cancel_reason,
+            )
 
     elif args.stale:
         # 完了済み workflow の worktree を一括削除
