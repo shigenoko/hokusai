@@ -156,11 +156,14 @@ def _format_latest_review_results(state: "WorkflowState", phase: int) -> str:
     if not review:
         return "_No reviews yet._"
 
-    findings = review.get("findings") or []
+    findings_raw = review.get("findings")
+    findings: list = findings_raw if isinstance(findings_raw, list) else []
     summary_lines: list[str] = []
     if review.get("summary"):
         summary_lines.append(review["summary"])
     for finding in findings[:3]:
+        if not isinstance(finding, dict):
+            continue
         title = finding.get("title") or finding.get("description") or "finding"
         severity = finding.get("severity")
         summary_lines.append(f"[{severity}] {title}" if severity else title)
