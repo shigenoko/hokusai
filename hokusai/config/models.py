@@ -315,6 +315,12 @@ class LLMGatewayAuditConfig:
     - store_prompt_hash: prompt の sha256 hash を保存するか
     - store_redacted_preview: redaction 後の preview 文字列を保存するか
     - store_full_prompt: prompt 本文をそのまま保存するか（debug 用、既定 False）
+
+    **Phase 1 では未適用**: 本設定は要件 §4.1 の config schema 拡張として
+    追加されたが、Phase 1 interceptor（#39 で実装した最小 audit log 出力）は
+    本設定を参照していない。後続 rollout step（audit writer / interceptor
+    拡張、要件 §9）で本設定を尊重する実装を追加する。それまでは Phase 1
+    interceptor は固定の最小情報のみを記録し、本設定の値変更は no-op。
     """
 
     store_prompt_hash: bool = True
