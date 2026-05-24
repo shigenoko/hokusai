@@ -819,6 +819,105 @@ def test_interceptor_policy_hits_omitted_when_gateway_disabled():
 
 
 # ---------------------------------------------------------------------------
+# M1.1 (#86): decision 切り替えロジック
+# log_only=False + policy_hits 非空のとき decision="block" を返す。
+# log_only=True (default) は既存挙動（常に "log"）を維持。
+# ---------------------------------------------------------------------------
+
+
+def test_interceptor_log_only_true_does_not_block_even_with_policy_hits(caplog):
+    """既存挙動の回帰防止: log_only=True なら policy_hits が hit していても "log"."""
+    from hokusai.config.models import LLMGatewayAllowedModelsConfig
+
+    config = _make_config(
+        log_only=True,
+        allowed_providers=["openai"],
+        allowed_models=LLMGatewayAllowedModelsConfig(
+            high_cost_requires_gate=["claude-3-opus"],
+        ),
+    )
+    interceptor = LLMGatewayInterceptor(config)
+    with caplog.at_level(logging.INFO, logger="hokusai.llm_gateway"):
+        decision = interceptor.intercept(
+            LLMGatewayContext(provider="anthropic", model="claude-3-opus"),
+            "p",
+        )
+    assert decision.decision == "log"
+    assert decision.reason == "phase1_log_only"
+    assert "unknown_provider" in decision.policy_hits
+    assert "high_cost_model" in decision.policy_hits
+    assert _audit_payload(caplog)["decision"] == "log"
+
+
+def test_interceptor_log_only_false_no_hits_returns_log(caplog):
+    """log_only=False でも hit なしなら block 対象なしで "log" 維持."""
+    config = _make_config(log_only=False)
+    interceptor = LLMGatewayInterceptor(config)
+    with caplog.at_level(logging.INFO, logger="hokusai.llm_gateway"):
+        decision = interceptor.intercept(
+            LLMGatewayContext(provider="claude_code", model="claude-sonnet"),
+            "p",
+        )
+    assert decision.decision == "log"
+    assert decision.reason == "phase1_log_only"
+    assert decision.policy_hits == ()
+    assert _audit_payload(caplog)["decision"] == "log"
+
+
+def test_interceptor_log_only_false_with_hits_returns_block(caplog):
+    """log_only=False かつ policy_hits 非空のとき decision="block" / reason="phase2_policy_block"."""
+    config = _make_config(log_only=False, allowed_providers=["openai"])
+    interceptor = LLMGatewayInterceptor(config)
+    with caplog.at_level(logging.INFO, logger="hokusai.llm_gateway"):
+        decision = interceptor.intercept(
+            LLMGatewayContext(provider="anthropic"), "p"
+        )
+    assert decision.decision == "block"
+    assert decision.reason == "phase2_policy_block"
+    assert "unknown_provider" in decision.policy_hits
+
+
+def test_interceptor_block_decision_persists_in_audit_entry(caplog):
+    """block 判定時、audit log entry にも decision="block" が記録される."""
+    from hokusai.config.models import LLMGatewayAllowedModelsConfig
+
+    config = _make_config(
+        log_only=False,
+        allowed_models=LLMGatewayAllowedModelsConfig(
+            high_cost_requires_gate=["claude-3-opus"],
+        ),
+    )
+    interceptor = LLMGatewayInterceptor(config)
+    with caplog.at_level(logging.INFO, logger="hokusai.llm_gateway"):
+        interceptor.intercept(
+            LLMGatewayContext(provider="claude_code", model="claude-3-opus"),
+            "p",
+        )
+    payload = _audit_payload(caplog)
+    assert payload["decision"] == "block"
+    assert payload["reason"] == "phase2_policy_block"
+    assert "high_cost_model" in payload["policy_hits"]
+    # config_snapshot にも log_only=False が残ること（監査再現性）
+    assert payload["config_snapshot"]["log_only"] is False
+
+
+def test_interceptor_log_only_false_in_dry_run_still_blocks(caplog):
+    """dry_run でも log_only=False + hit なら block を返す（dry_run は audit に残るだけで block 抑止ではない）."""
+    config = _make_config(
+        log_only=False,
+        dry_run=True,
+        allowed_providers=["openai"],
+    )
+    interceptor = LLMGatewayInterceptor(config)
+    with caplog.at_level(logging.INFO, logger="hokusai.llm_gateway"):
+        decision = interceptor.intercept(
+            LLMGatewayContext(provider="anthropic"), "p"
+        )
+    assert decision.decision == "block"
+    assert decision.reason == "phase2_policy_block"
+
+
+# ---------------------------------------------------------------------------
 # ClaudeCodeClient → interceptor 配線
 # ---------------------------------------------------------------------------
 
