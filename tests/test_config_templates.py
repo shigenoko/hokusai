@@ -22,6 +22,7 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PROFILE_REGISTRY_TEMPLATE = REPO_ROOT / "configs" / "profile-template.yaml"
 PROFILE_CONFIG_TEMPLATE = REPO_ROOT / "configs" / "profile-config-template.yaml"
+EXAMPLE_PROFILE_COMPANY = REPO_ROOT / "configs" / "example-profile-company.yaml"
 
 # シークレット実値らしき文字列の正規表現。env 変数名や placeholder は除外する。
 # 検出対象例: "sk-abc123..." / "secret_..." / Slack webhook URL / "ghp_..."
@@ -190,6 +191,7 @@ def test_profile_config_template_parses_via_hokusai_loaders():
     """
     from hokusai.config.loaders import (
         _parse_cross_review_config,
+        _parse_llm_gateway_config,
         _parse_notion_dashboard_config,
     )
 
@@ -241,7 +243,52 @@ def test_profile_config_template_parses_via_hokusai_loaders():
     assert cr.enabled is False
     assert cr.on_failure == "warn"
 
+    # M1.2 (#88): llm_gateway セクションが parser に通り、ロールアウト戦略
+    # の主スイッチである log_only が template の既定値で取れること
+    gw = _parse_llm_gateway_config(data)
+    assert gw.enabled is True
+    assert gw.log_only is True  # 全 profile の既定: 透過動作（block しない）
+    assert gw.audit_log_enabled is True
+
     # トップレベル値の確認
     assert data["project_root"] == "/repo/demo"
     assert data["task_backend"]["type"] == "notion"
     assert data["git_hosting"]["type"] == "github"
+
+
+def test_example_profile_company_has_llm_gateway_log_only_true():
+    """example-profile-company.yaml が `llm_gateway.log_only=true` を明示している
+    こと（M1.2 / #88: 案件 profile の既定は log_only 維持というロールアウト戦略
+    に合致した実値例になっている）."""
+    from hokusai.config.loaders import _parse_llm_gateway_config
+
+    data = _load_yaml(EXAMPLE_PROFILE_COMPANY)
+    assert "llm_gateway" in data, (
+        "example-profile-company.yaml には llm_gateway セクションが必要"
+    )
+    gw = _parse_llm_gateway_config(data)
+    assert gw.enabled is True
+    assert gw.log_only is True, (
+        "案件 profile の既定は log_only=true（自社 hokusai profile のみ "
+        "M1.x で先行 enforce する運用方針との整合）"
+    )
+    assert gw.audit_log_enabled is True
+
+
+def test_profile_log_only_override_round_trips_through_loader():
+    """M1.2 ロールアウト戦略の核: profile YAML で `log_only: false` を明示すれば
+    `LLMGatewayConfig.log_only` が False で取れる（hokusai profile 先行 enforce
+    の経路が config 配管として通っていることの回帰防止）."""
+    from hokusai.config.loaders import _parse_llm_gateway_config
+
+    override_data = {
+        "llm_gateway": {
+            "enabled": True,
+            "log_only": False,
+            "audit_log_enabled": True,
+        }
+    }
+    gw = _parse_llm_gateway_config(override_data)
+    assert gw.enabled is True
+    assert gw.log_only is False
+    assert gw.audit_log_enabled is True
