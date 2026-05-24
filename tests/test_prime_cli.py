@@ -16,7 +16,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from hokusai.cli_main import _handle_prime
+from hokusai.cli_main import _build_prime_diagnostics, _handle_prime
 from hokusai.config.models import (
     NotionDashboardConfig,
     NotionSyncRateLimitConfig,
@@ -864,3 +864,141 @@ def test_prime_skips_workgraph_context_when_db_ids_unset(
     assert payload["work_items"] is None
     assert payload["review_issues"] is None
     assert payload["gates"] is None
+
+
+# ---------------------------------------------------------------------------
+# M2.4 (#92): _build_prime_diagnostics 単体テスト
+# 構成要素ごとの「設定有無 / 取得結果」を診断行に組み立てる純粋関数。
+# ---------------------------------------------------------------------------
+
+
+class _NotionCfgStub:
+    """notion_dashboard config の最小スタブ。`getattr(cfg, "...", default)`
+    経由で参照されるフィールドのみ保持する。"""
+
+    def __init__(
+        self,
+        *,
+        enabled: bool = True,
+        api_token_env: str = "X_API_TOKEN",
+        project_memory_db_id_env: str = "X_PM_DB",
+        workflows_db_id_env: str = "X_WF_DB",
+        work_items_db_id_env: str = "X_WI_DB",
+        review_issues_db_id_env: str = "X_RI_DB",
+        workflow_gates_db_id_env: str = "X_WG_DB",
+    ):
+        self.enabled = enabled
+        self.api_token_env = api_token_env
+        self.project_memory_db_id_env = project_memory_db_id_env
+        self.workflows_db_id_env = workflows_db_id_env
+        self.work_items_db_id_env = work_items_db_id_env
+        self.review_issues_db_id_env = review_issues_db_id_env
+        self.workflow_gates_db_id_env = workflow_gates_db_id_env
+
+
+def _empty_kwargs(notion_cfg):
+    """すべて「未設定 / 未取得」相当の baseline kwargs を返す helper."""
+    return dict(
+        notion_cfg=notion_cfg,
+        api_token="",
+        memories_db_id="",
+        memories=[],
+        workflows_db_id="",
+        work_items_db_id="",
+        work_items=None,
+        review_issues_db_id="",
+        review_issues=None,
+        workflow_gates_db_id="",
+        gates=None,
+    )
+
+
+def test_diagnostics_when_notion_dashboard_disabled():
+    diag = _build_prime_diagnostics(
+        **_empty_kwargs(_NotionCfgStub(enabled=False))
+    )
+    # 連携無効なら 1 行のみで早期 return
+    assert diag == ["Notion 連携: 無効 (notion_dashboard.enabled=false)"]
+
+
+def test_diagnostics_when_notion_cfg_none():
+    diag = _build_prime_diagnostics(**_empty_kwargs(None))
+    assert diag == ["Notion 連携: 無効 (notion_dashboard.enabled=false)"]
+
+
+def test_diagnostics_all_unset_lists_each_source():
+    cfg = _NotionCfgStub()
+    diag = _build_prime_diagnostics(**_empty_kwargs(cfg))
+    # API Token 未設定
+    assert any("Notion API Token: 未設定 (env X_API_TOKEN)" in d for d in diag)
+    # Project Memory DB 未設定
+    assert any(
+        "Project Memory DB: 未設定 (env X_PM_DB)" in d for d in diag
+    )
+    # Workflows DB 未設定（連鎖して 3 カテゴリも skip される旨）
+    assert any("Workflows DB: 未設定 (env X_WF_DB)" in d for d in diag)
+    # 各カテゴリ DB も「未設定」
+    assert any("Work Items DB: 未設定 (env X_WI_DB)" in d for d in diag)
+    assert any(
+        "Review Issues DB: 未設定 (env X_RI_DB)" in d for d in diag
+    )
+    assert any(
+        "Workflow Gates DB: 未設定 (env X_WG_DB)" in d for d in diag
+    )
+
+
+def test_diagnostics_project_memory_fetched_empty_when_token_and_db_set():
+    """API token + DB ID が揃って fetch を試みたが 0 件、というケース."""
+    kwargs = _empty_kwargs(_NotionCfgStub())
+    kwargs["api_token"] = "tok"
+    kwargs["memories_db_id"] = "pmdb"
+    kwargs["memories"] = []
+    diag = _build_prime_diagnostics(**kwargs)
+    assert any("Project Memory DB: 取得済 0 件" in d for d in diag)
+    # token があるので「Notion API Token: 未設定」行は出ない
+    assert not any("Notion API Token: 未設定" in d for d in diag)
+
+
+def test_diagnostics_workgraph_section_distinguishes_unset_vs_unfetched_vs_empty():
+    """list[dict] = 取得済 0 件、None = 未取得（DB ID 未設定 or workflow_page_id
+    解決失敗）、DB ID 自体無い = 未設定、を 3 通り区別する."""
+    cfg = _NotionCfgStub()
+    # work_items_db_id は設定済だが workflow_page_id 解決失敗等で fetch 未試行
+    kwargs = _empty_kwargs(cfg)
+    kwargs["work_items_db_id"] = "wdb"
+    kwargs["work_items"] = None  # 未取得
+    kwargs["review_issues_db_id"] = "rdb"
+    kwargs["review_issues"] = []  # 取得済 0 件
+    # gates 系は db_id 未設定のまま → 未設定
+    diag = _build_prime_diagnostics(**kwargs)
+
+    work_lines = [d for d in diag if d.startswith("Work Items DB:")]
+    assert len(work_lines) == 1
+    assert "未取得" in work_lines[0]
+
+    review_lines = [d for d in diag if d.startswith("Review Issues DB:")]
+    assert len(review_lines) == 1
+    assert review_lines[0] == "Review Issues DB: 取得済 0 件"
+
+    gate_lines = [d for d in diag if d.startswith("Workflow Gates DB:")]
+    assert len(gate_lines) == 1
+    assert "未設定" in gate_lines[0]
+
+
+def test_diagnostics_omits_section_when_data_present():
+    """list 非空のセクションは診断行に含めない（出力ノイズ防止）."""
+    cfg = _NotionCfgStub()
+    kwargs = _empty_kwargs(cfg)
+    kwargs["api_token"] = "tok"
+    kwargs["memories_db_id"] = "pmdb"
+    kwargs["memories"] = [{"id": "p1"}]  # 取得済 1 件
+    kwargs["workflows_db_id"] = "wfdb"
+    kwargs["work_items_db_id"] = "widb"
+    kwargs["work_items"] = [{"id": "w1"}]  # 取得済 1 件
+    diag = _build_prime_diagnostics(**kwargs)
+    # Project Memory / Work Items は出ない
+    assert not any(d.startswith("Project Memory DB:") for d in diag)
+    assert not any(d.startswith("Work Items DB:") for d in diag)
+    # 未設定の Review Issues / Gates は出る
+    assert any(d.startswith("Review Issues DB:") for d in diag)
+    assert any(d.startswith("Workflow Gates DB:") for d in diag)

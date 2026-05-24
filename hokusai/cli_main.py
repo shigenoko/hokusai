@@ -1271,6 +1271,24 @@ def _handle_prime(args, config) -> int:
                 file=sys.stderr,
             )
 
+    # M2.4 (#92): 空状態の prime 出力で「なぜ空か」（DB share 未完了 / env
+    # 未設定 / 取得済 0 件 / Notion 障害）を原因切り分けできるよう、構成
+    # 要素ごとの状態を診断行リストに組み立てる（findings §2.1）。Markdown
+    # 側では has_any=False のときだけ表示、JSON 側は常に key を残す。
+    diagnostics = _build_prime_diagnostics(
+        notion_cfg=notion_cfg,
+        api_token=api_token,
+        memories_db_id=db_id,
+        memories=memories,
+        workflows_db_id=workflows_db_id,
+        work_items_db_id=work_items_db_id,
+        work_items=work_items,
+        review_issues_db_id=review_issues_db_id,
+        review_issues=review_issues,
+        workflow_gates_db_id=workflow_gates_db_id,
+        gates=gates,
+    )
+
     if output_format == "json":
         sys.stdout.write(
             render_prime_json(
@@ -1281,6 +1299,7 @@ def _handle_prime(args, config) -> int:
                 work_items=work_items,
                 review_issues=review_issues,
                 gates=gates,
+                diagnostics=diagnostics,
             )
         )
     else:
@@ -1293,9 +1312,103 @@ def _handle_prime(args, config) -> int:
                 work_items=work_items,
                 review_issues=review_issues,
                 gates=gates,
+                diagnostics=diagnostics,
             )
         )
     return 0
+
+
+def _build_prime_diagnostics(
+    *,
+    notion_cfg,
+    api_token: str,
+    memories_db_id: str,
+    memories: list[dict],
+    workflows_db_id: str,
+    work_items_db_id: str,
+    work_items: list[dict] | None,
+    review_issues_db_id: str,
+    review_issues: list[dict] | None,
+    workflow_gates_db_id: str,
+    gates: list[dict] | None,
+) -> list[str]:
+    """`hokusai prime` 出力用の診断行リストを組み立てる（M2.4 / #92）。
+
+    `_handle_prime` の fetch ロジックと整合する観点で、各構成要素の状態を
+    以下のいずれかの 1 行文字列で表現する:
+
+    - Notion 連携自体が無効: `Notion 連携: 無効 (notion_dashboard.enabled=false)`
+    - API token 未設定: `Notion API Token: 未設定 (env XXX)`
+    - 各 DB ID 未設定: `<DB 名>: 未設定 (env XXX)`
+    - 取得未試行（workflow が Notion 側に未同期 / Workflows DB ID 未設定で
+      workflow_page_id を解決できない場合等、`_handle_prime` で work_items /
+      review_issues / gates が None のまま）: `<DB 名>: 未取得 (理由)`
+    - 取得済 0 件: `<DB 名>: 取得済 0 件`
+
+    出力は呼び出し側（renderer）が italic bullet として整形する想定。"""
+    diagnostics: list[str] = []
+
+    if notion_cfg is None or not getattr(notion_cfg, "enabled", False):
+        diagnostics.append(
+            "Notion 連携: 無効 (notion_dashboard.enabled=false)"
+        )
+        return diagnostics
+
+    # API token 単独で判定（token が無いと _handle_prime はそもそも Notion
+    # 呼び出しを走らせず memories=[] / 他=None になるので、その前に出す）
+    if not api_token:
+        diagnostics.append(
+            f"Notion API Token: 未設定 (env {notion_cfg.api_token_env})"
+        )
+
+    # Project Memory DB
+    if not memories_db_id:
+        diagnostics.append(
+            "Project Memory DB: 未設定 "
+            f"(env {notion_cfg.project_memory_db_id_env})"
+        )
+    elif api_token and not memories:
+        # token + db_id が揃って fetch を試みたが 0 件
+        diagnostics.append("Project Memory DB: 取得済 0 件")
+    elif not api_token:
+        # token 無しなら memories は [] のまま fetch されない
+        diagnostics.append("Project Memory DB: 未取得 (API Token 未設定)")
+
+    # Workflows DB（handover_note / workgraph context 3 カテゴリの workflow
+    # relation 絞りに必須）
+    if not workflows_db_id:
+        diagnostics.append(
+            "Workflows DB: 未設定 "
+            f"(env {getattr(notion_cfg, 'workflows_db_id_env', '')}) "
+            "→ Work Items / Review Issues / Gates / handover_note 遡及が skip"
+        )
+
+    # workgraph context 3 カテゴリ: list=取得済、None=未取得（DB ID 未設定 or
+    # workflow_page_id 解決失敗）
+    def _section_status(label: str, db_id: str, env_key: str, data) -> str | None:
+        if not db_id:
+            return f"{label}: 未設定 (env {getattr(notion_cfg, env_key, '')})"
+        if data is None:
+            # DB ID あるが取得が走らなかった = workflows_db_id 不足 or
+            # workflow_page_id 解決失敗（workflow が Notion 側に未同期）
+            return (
+                f"{label}: 未取得 "
+                "(Workflows DB ID 未設定 または workflow が Notion 側に未同期)"
+            )
+        if not data:
+            return f"{label}: 取得済 0 件"
+        return None  # 取得済かつ非空 → diagnostics に出さない
+
+    for label, db_id, env_key, data in (
+        ("Work Items DB", work_items_db_id, "work_items_db_id_env", work_items),
+        ("Review Issues DB", review_issues_db_id, "review_issues_db_id_env", review_issues),
+        ("Workflow Gates DB", workflow_gates_db_id, "workflow_gates_db_id_env", gates),
+    ):
+        msg = _section_status(label, db_id, env_key, data)
+        if msg:
+            diagnostics.append(msg)
+
+    return diagnostics
 
 
 def _collect_handover_notes(

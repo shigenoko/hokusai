@@ -394,3 +394,88 @@ def test_json_returns_empty_memories_array_when_none():
     )
     payload = json.loads(out)
     assert payload["memories"] == []
+
+
+# ---------------------------------------------------------------------------
+# M2.4 (#92): 空状態の prime 出力に構成要素別 diagnostics を表示
+# ---------------------------------------------------------------------------
+
+
+def test_markdown_renders_diagnostics_as_italic_bullets_when_empty():
+    """has_any=False かつ diagnostics 指定時、existing 空メッセージの後に
+    italic bullet として診断行が出る。"""
+    out = render_prime_markdown(
+        workflow_id="wf-1",
+        profile="hokusai",
+        current_phase="phase4",
+        memories=[],
+        diagnostics=[
+            "Project Memory DB: 未設定 (env HOKUSAI_NOTION_PROJECT_MEMORY_DB_ID)",
+            "Work Items DB: 取得済 0 件",
+        ],
+    )
+    assert "_active な workgraph context はありません_" in out
+    assert "- _Project Memory DB: 未設定 (env HOKUSAI_NOTION_PROJECT_MEMORY_DB_ID)_" in out
+    assert "- _Work Items DB: 取得済 0 件_" in out
+
+
+def test_markdown_omits_diagnostics_when_any_section_present():
+    """has_any=True のときは diagnostics を無視（output ノイズ防止）."""
+    memories = [
+        _page(
+            page_id="p1",
+            name="Rule",
+            memory_type=MEMORY_TYPE_PROJECT_RULE,
+            content="x",
+        ),
+    ]
+    out = render_prime_markdown(
+        workflow_id="wf-1",
+        profile=None,
+        current_phase=None,
+        memories=memories,
+        diagnostics=["Project Memory DB: 取得済 0 件"],
+    )
+    # 空状態ではないので diagnostic は出さない
+    assert "Project Memory DB: 取得済 0 件" not in out
+    # 通常 section は通常通り出る
+    assert "Project Rules" in out
+
+
+def test_markdown_empty_without_diagnostics_keeps_existing_output():
+    """diagnostics=None のときは従来通り「空メッセージ」のみ（後方互換）."""
+    out = render_prime_markdown(
+        workflow_id="wf-1",
+        profile=None,
+        current_phase=None,
+        memories=[],
+    )
+    assert "_active な workgraph context はありません_" in out
+    # bullet 行は無い
+    assert "- _" not in out
+
+
+def test_json_includes_diagnostics_key_always():
+    """JSON 側は has_any に関わらず diagnostics key を保持。
+    自動処理側が必要に応じて参照できるよう、None or list が必ず入る。"""
+    out_none = render_prime_json(
+        workflow_id="wf-1",
+        profile=None,
+        current_phase=None,
+        memories=[],
+    )
+    payload_none = json.loads(out_none)
+    assert "diagnostics" in payload_none
+    assert payload_none["diagnostics"] is None
+
+    out_with = render_prime_json(
+        workflow_id="wf-1",
+        profile=None,
+        current_phase=None,
+        memories=[],
+        diagnostics=["Project Memory DB: 未設定 (env X)"],
+    )
+    payload_with = json.loads(out_with)
+    assert payload_with["diagnostics"] == [
+        "Project Memory DB: 未設定 (env X)"
+    ]
