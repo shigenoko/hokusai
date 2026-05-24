@@ -158,18 +158,28 @@ def print_outbox_summary(
         # （Issue #84 Copilot Round 1 指摘: failed-only ケースで気付かれない問題）
         if pending > 0 or failed > 0:
             print(
-                "   詳細な last_error を表示するには `--verbose` を付けて再実行"
+                "   `--verbose` で retry 中 outbox の last_error 抜粋を表示"
             )
         return
 
     if recent_errors:
-        print("   直近の last_error（次回試行が近い順）:")
+        # retry 中 (notion_sync_outbox) の last_error 抜粋のみ表示する。
+        # permanent error (notion_sync_errors) の error 抜粋は scope 外で、
+        # 後続 PR で別途追加予定（Issue #84 Copilot Round 3 指摘）。
+        print("   retry 中 outbox の last_error（次回試行が近い順）:")
         for entry in recent_errors:
             event = entry.get("event_type", "?")
             wf = entry.get("workflow_id", "?")
             attempts = entry.get("attempts", 0)
             err = (entry.get("last_error") or "")[:160]
             print(f"   - {event} (wf={wf}, attempts={attempts}): {err}")
+    elif failed > 0:
+        # failed-only ケース: outbox は空だが永続 error はある。verbose でも
+        # 詳細を出せないことを明示してユーザーが混乱しないようにする。
+        print(
+            "   permanent error の詳細は後続 PR で表示予定。"
+            "現状は `sqlite3 ~/.hokusai/.../workflow.db` で確認してください。"
+        )
 
 
 def print_workflow_status(state: dict, phase_names: dict[int, str] | None = None) -> None:

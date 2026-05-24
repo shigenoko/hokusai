@@ -3385,6 +3385,26 @@ def test_print_outbox_summary_shows_verbose_hint_for_failed_only(capsys):
     assert "--verbose" in captured.out
 
 
+def test_print_outbox_summary_explains_failed_only_in_verbose(capsys):
+    """verbose=True + failed-only ケース（recent_errors なし）で permanent
+    error の詳細は表示できないことを案内する（Issue #84 Copilot Round 3
+    指摘: failed-only の verbose で「何も出ない」誤解を防ぐ）"""
+    from hokusai.ui.console import print_outbox_summary
+
+    print_outbox_summary(
+        pending=0,
+        failed=3,
+        verbose=True,
+        recent_errors=None,  # outbox には何もないが errors にはある状況
+    )
+    captured = capsys.readouterr()
+    assert "pending=0" in captured.out
+    assert "failed=3" in captured.out
+    # permanent error の案内が出る
+    assert "permanent error" in captured.out
+    assert "sqlite3" in captured.out
+
+
 def test_print_outbox_summary_shows_last_errors_in_verbose(capsys):
     """verbose=True で recent_errors の抜粋を表示"""
     from hokusai.ui.console import print_outbox_summary

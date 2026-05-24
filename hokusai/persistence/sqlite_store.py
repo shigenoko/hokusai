@@ -1033,7 +1033,7 @@ class SQLiteStore:
                 SELECT event_type, workflow_id, attempts, last_error, next_attempt_at
                 FROM notion_sync_outbox
                 WHERE last_error IS NOT NULL AND last_error != ''
-                ORDER BY next_attempt_at ASC
+                ORDER BY next_attempt_at ASC, id ASC
                 LIMIT ?
                 """,
                 (limit,),
