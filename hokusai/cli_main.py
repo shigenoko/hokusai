@@ -203,6 +203,25 @@ def _build_parser():
             "推奨）。Workflows DB ID が未設定の環境では no-op。"
         ),
     )
+    cleanup_parser.add_argument(
+        "--gc-workflows",
+        action="store_true",
+        help=(
+            "完了済み workflow (current_phase >= 10) のうち --retention-days "
+            "より古いものを workflow.db から cascade 削除する（findings §4.1 / "
+            "Issue #100 / M2.5、opt-in なため明示指定が必要）"
+        ),
+    )
+    cleanup_parser.add_argument(
+        "--retention-days",
+        type=int,
+        default=90,
+        metavar="N",
+        help=(
+            "--gc-workflows と組み合わせて使う保持期間（日数）。既定 90 日。"
+            "進行中 workflow (current_phase < 10) は absolutely 削除されない。"
+        ),
+    )
 
     # pr-status コマンド
     pr_status_parser = subparsers.add_parser(
@@ -2226,9 +2245,56 @@ def _handle_cleanup(args, config):
         except Exception as e:
             print(f"⚠️ writeback cleanup でエラー: {type(e).__name__}: {e}")
 
+    elif args.gc_workflows:
+        # gc-workflows のみの実行（workflow_id / --stale なし）。下の
+        # post-action ブロックで処理されるため、ここでは何もしない。
+        pass
     else:
-        print("✗ workflow_id または --stale を指定してください")
+        print(
+            "✗ workflow_id, --stale, または --gc-workflows を指定してください"
+        )
         sys.exit(1)
+
+    # M2.5 (#100): opt-in な workflow 行 GC。workflow_id / --stale / 単独
+    # いずれのモードでも `--gc-workflows` が立っていれば実行する。
+    if args.gc_workflows:
+        try:
+            _gc_old_workflows(store, args.retention_days)
+        except ValueError as e:
+            print(f"⚠️ workflow GC: {e}")
+        except Exception as e:
+            print(f"⚠️ workflow GC でエラー: {type(e).__name__}: {e}")
+
+
+def _gc_old_workflows(store, retention_days: int) -> None:
+    """`hokusai cleanup --gc-workflows` の本体ハンドラ（Issue #100 / M2.5）。
+
+    SQLiteStore.delete_old_completed_workflows を呼び、count summary を
+    stdout に出力する。`retention_days < 1` は store 側で ValueError なので
+    呼び出し側で catch して user-friendly メッセージに変換する想定。
+    """
+    counts = store.delete_old_completed_workflows(
+        retention_days=retention_days
+    )
+    workflows_deleted = counts.get("workflows", 0)
+    if workflows_deleted == 0:
+        print(
+            f"✓ workflow GC: {retention_days} 日以上前の完了 workflow なし "
+            "（削除対象 0 件）"
+        )
+        return
+
+    print(
+        f"🧹 workflow GC: {workflows_deleted} 件の完了 workflow を削除 "
+        f"(retention: {retention_days} 日)"
+    )
+    detail_parts = [
+        f"{name}={n}"
+        for name, n in counts.items()
+        if n > 0 and name != "workflows"
+    ]
+    if detail_parts:
+        print("    cascade: " + ", ".join(detail_parts))
 
 
 def _cleanup_writeback_old_errors(config) -> None:
