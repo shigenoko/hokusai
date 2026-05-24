@@ -226,7 +226,8 @@ LLM Gateway の **内部処理が失敗しても**、HOKUSAI の workflow 進行
 
 * `audit_logs` テーブルへの SQLite 永続化失敗
 * policy 評価中に発生した予期せぬ例外
-* Notion / GitHub / Figma 等 external API の障害（DB share 切れによる 404、rate limit、timeout 等）
+* Notion API の障害（DB / page への共有設定漏れに由来する 404、Integration 権限不足等）
+* GitHub / Figma / Miro / Slack 等のその他 external API 障害（権限不足、404、rate limit、timeout、接続エラー等）
 * spend cost lookup の失敗（pricing table 不整合 / provider usage 取得失敗）
 * `policy_hits` 評価に必要な context フィールド（model 名等）が呼び出し側から取得できないケース
 
@@ -244,7 +245,7 @@ LLM Gateway の **内部処理が失敗しても**、HOKUSAI の workflow 進行
 ログ要件:
 
 * fail-open で抑制した例外は debug log に **例外型名 + frame 一覧**（filename:lineno in function）のみを残す。`exc.args` 由来のメッセージ本文を log stream に流してはならない（prompt 経由で secret / PII が例外メッセージに混入したケースでの log 漏洩を防ぐため。要件 §14 受け入れ基準と `log_suppressed_exception` 既存実装で担保）。
-* fail-open が発生したことは、対象 workflow / phase / call site が後追いできる粒度で記録すること（個別 event の頻度監視が必要になった段階で Operations Console から集計可能にする）。
+* call site の特定は上記 frame 一覧から行う（呼び出し元の filename / lineno / function name が含まれる）。現状の `log_suppressed_exception` には `workflow_id` / `phase` / `provider` 等のドメイン context は含まれていないため、頻度監視・集計・Operations Console での fail-open イベント一覧表示が必要になった段階では、debug log を拡張するのではなく audit_logs テーブル側に専用 status（例: `decision="suppressed_internal_error"`）を追加する経路を別途検討する（M2 系列以降）。
 
 ---
 
@@ -268,7 +269,7 @@ fallback は以下のいずれかとする。
 * Human Approval gate を作成する
 * CLI / Operations Console に明示的な再実行候補を出す
 
-本節の fallback ルートに入るのは、policy が明示的に `block` / `require_human_approval` を返した場合に限る。policy 評価そのものが内部例外で失敗したケース（allowlist データの読み込み失敗 / context 不足等）は §4.4 fail-open 原則 を適用し、workflow 進行を止めず透過動作にフォールバックする。意図的な enforcement と Gateway 内部不具合を運用上区別するため。
+本節の fallback ルートに入るのは、policy が明示的に `block` / `require_human_approval` を返した場合に限る。policy 評価そのものが内部例外で失敗したケース（allowlist データの読み込み失敗 / context 不足等）は §4.4 fail-open 原則を適用し、workflow 進行を止めず透過動作にフォールバックする。意図的な enforcement と Gateway 内部不具合を運用上区別するため。
 
 ---
 
