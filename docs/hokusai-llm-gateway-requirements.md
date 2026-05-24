@@ -233,7 +233,7 @@ LLM Gateway の **内部処理が失敗しても**、HOKUSAI の workflow 進行
 
 理由:
 
-* `hokusai/llm_gateway/dispatch.py::dispatch_via_gateway` は Phase 1 から例外を完全に握り潰す設計で実装されており（`log_suppressed_exception` 経由で type + frame のみ debug log に残す）、Phase 2 enforcement 解禁後も同じ思想を維持する。guardrail の不具合が運用全体を停止させる事故は、guardrail を on にすること自体への抵抗感を生むため。
+* `hokusai/llm_gateway/dispatch.py::dispatch_via_gateway` は Phase 1 から例外を完全に握り潰す設計で実装されており（`log_suppressed_exception` 経由で例外メッセージ本文（`exc.args` / `str(exc)`）を含めずに、呼び出し文脈の固定メッセージ + 例外型名 + frame 一覧を debug log に残す）、Phase 2 enforcement 解禁後も同じ思想を維持する。guardrail の不具合が運用全体を停止させる事故は、guardrail を on にすること自体への抵抗感を生むため。
 * Notion 障害を理由に PR 作成や workflow 進行を止めると、dogfooding session が止まり HOKUSAI 自体の改善イテレーションが破綻する（出典: `docs/dogfooding-findings.md` §3, §6）。
 
 **明示的に fail-open しない** ケース:
