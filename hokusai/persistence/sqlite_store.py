@@ -1008,10 +1008,13 @@ class SQLiteStore:
     def fetch_recent_outbox_with_errors(
         self, limit: int = 5
     ) -> list[dict[str, Any]]:
-        """outbox の中で `last_error` が記録されているもののうち最新 N 件を返す。
+        """outbox の中で `last_error` が記録されているもののうち next_attempt_at が近い順に N 件を返す。
 
         Issue #84 / M0.3 で `hokusai status --verbose` に「直近の Notion 同期失敗」
         を抜粋表示する用途。retry 中（永続 error 化前）の問題を可視化する。
+        `next_attempt_at` の昇順（古いタイムスタンプ = まもなく次の試行が走る
+        もの）で返すことで、ユーザーは「次に何が再試行されるか」を上から順に
+        確認できる。
 
         Args:
             limit: 取得件数（既定 5、CLI でも 5 件 ぐらいで十分）

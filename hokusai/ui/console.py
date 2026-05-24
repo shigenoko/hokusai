@@ -163,7 +163,7 @@ def print_outbox_summary(
         return
 
     if recent_errors:
-        print("   直近の last_error（最新 順）:")
+        print("   直近の last_error（次回試行が近い順）:")
         for entry in recent_errors:
             event = entry.get("event_type", "?")
             wf = entry.get("workflow_id", "?")
