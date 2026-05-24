@@ -15,7 +15,6 @@ import tempfile
 import urllib.error
 from io import BytesIO
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -35,7 +34,6 @@ from hokusai.integrations.notion_dashboard.client import (
 from hokusai.integrations.notion_dashboard.dispatcher import NotionSyncDispatcher
 from hokusai.integrations.notion_dashboard.workflows_db import WorkflowsDBClient
 from hokusai.persistence.sqlite_store import SQLiteStore
-
 
 # ---------------------------------------------------------------------------
 # 設定パース
@@ -1794,6 +1792,7 @@ def test_build_notion_payload_includes_design_when_failed():
 def _make_runner():
     """SQLite を temp に逃がして WorkflowRunner を生成"""
     import tempfile
+
     from hokusai.config import set_config
     from hokusai.config.models import WorkflowConfig
 
@@ -3206,3 +3205,240 @@ def test_set_supersedes_raises_when_property_missing_after_pruning():
     client = WorkflowsDBClient(api=api, database_id="wf-db")
     with pytest.raises(NotionAPIError):
         client.set_supersedes("page-x", "page-prior")
+
+
+# ---------------------------------------------------------------------------
+# Issue #82 / M0.2: NotionSyncDispatcher.check_db_share_health
+# ---------------------------------------------------------------------------
+
+
+def test_check_db_share_health_returns_empty_when_not_configured(store):
+    """is_configured()=False のとき空 dict を返す（M0.2 / Issue #82）"""
+    disp = NotionSyncDispatcher(store=store, config=_make_config(enabled=False))
+    assert disp.check_db_share_health() == {}
+
+
+def test_check_db_share_health_skips_unset_env_vars(store, monkeypatch):
+    """env が設定されていない DB は dict に含めない（skip）"""
+    monkeypatch.setenv("TEST_TOKEN", "secret")
+    monkeypatch.setenv("TEST_DB", "db-workflows")
+    # 他の DB env を明示的に削除（dev 環境で leak している可能性に対処）
+    for env_name in [
+        "HOKUSAI_NOTION_PR_DB_ID",
+        "HOKUSAI_NOTION_REVIEW_ISSUES_DB_ID",
+        "HOKUSAI_NOTION_WORK_ITEMS_DB_ID",
+        "HOKUSAI_NOTION_WORKFLOW_GATES_DB_ID",
+        "HOKUSAI_NOTION_PROJECT_MEMORY_DB_ID",
+    ]:
+        monkeypatch.delenv(env_name, raising=False)
+
+    # NotionAPIClient.retrieve_database が成功するようパッチ
+    monkeypatch.setattr(
+        NotionAPIClient, "retrieve_database", lambda self, db_id: {"id": db_id}
+    )
+
+    disp = NotionSyncDispatcher(store=store, config=_make_config())
+    results = disp.check_db_share_health()
+    # TEST_DB のみ含まれ、他は env 未設定なので skip
+    assert list(results.keys()) == ["TEST_DB"]
+    assert results["TEST_DB"] == (True, None)
+
+
+def test_check_db_share_health_detects_404_as_share_missing(store, monkeypatch):
+    """404 エラーは「integration not shared」として警告する"""
+    monkeypatch.setenv("TEST_TOKEN", "secret")
+    monkeypatch.setenv("TEST_DB", "db-not-shared")
+
+    def _raise_404(self, db_id):
+        raise NotionAPIError(
+            404, "Could not find database with ID: ...", code="object_not_found"
+        )
+
+    monkeypatch.setattr(NotionAPIClient, "retrieve_database", _raise_404)
+
+    disp = NotionSyncDispatcher(store=store, config=_make_config())
+    results = disp.check_db_share_health()
+    ok, msg = results["TEST_DB"]
+    assert ok is False
+    assert msg is not None
+    assert "integration not shared" in msg
+    assert "404" in msg
+
+
+def test_check_db_share_health_handles_unexpected_exception(store, monkeypatch):
+    """retrieve_database が想定外の例外を投げても fail-open で結果を返す"""
+    monkeypatch.setenv("TEST_TOKEN", "secret")
+    monkeypatch.setenv("TEST_DB", "db-network-error")
+
+    def _raise_runtime(self, db_id):
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(NotionAPIClient, "retrieve_database", _raise_runtime)
+
+    disp = NotionSyncDispatcher(store=store, config=_make_config())
+    results = disp.check_db_share_health()
+    ok, msg = results["TEST_DB"]
+    assert ok is False
+    assert msg is not None
+    assert "RuntimeError" in msg
+    assert "connection refused" in msg
+
+
+def test_check_db_share_health_treats_5xx_as_non_share_error(store, monkeypatch):
+    """500 系の API エラーは「integration not shared」ではなく一般エラーとして扱う
+    （404 検出と区別。SonarCloud 経路の安定性確認）"""
+    monkeypatch.setenv("TEST_TOKEN", "secret")
+    monkeypatch.setenv("TEST_DB", "db-5xx")
+
+    def _raise_5xx(self, db_id):
+        raise NotionAPIError(500, "Internal server error", code="server_error")
+
+    monkeypatch.setattr(NotionAPIClient, "retrieve_database", _raise_5xx)
+
+    disp = NotionSyncDispatcher(store=store, config=_make_config())
+    results = disp.check_db_share_health()
+    ok, msg = results["TEST_DB"]
+    assert ok is False
+    # 404 検出ではないので「integration not shared」は付かない
+    assert msg is not None
+    assert "integration not shared" not in msg
+    assert "500" in msg
+
+
+def test_notion_api_client_does_not_sleep_after_final_attempt(monkeypatch):
+    """max_attempts=1 のとき、5xx / network error / 429 のいずれが発生しても
+    sleep せず即時 raise する（PR #83 Copilot Round 5 指摘: preflight が
+    無駄にブロックする問題の根本修正）"""
+    import time as time_module
+
+    from hokusai.integrations.notion_dashboard.client import (
+        NotionAPIClient,
+        NotionAPIError,
+    )
+
+    sleep_called: list[float] = []
+
+    def _spy_sleep(seconds):
+        sleep_called.append(seconds)
+
+    monkeypatch.setattr(time_module, "sleep", _spy_sleep)
+
+    # 500 エラーを返す mock
+    def _raise_500(self, method, url, data):
+        raise NotionAPIError(500, "internal server error", code="server_error")
+
+    monkeypatch.setattr(NotionAPIClient, "_send", _raise_500)
+
+    client = NotionAPIClient(
+        api_token="test-token",
+        max_attempts=1,
+        backoff_seconds=10.0,  # 大きな値 → もし sleep されたら明白
+    )
+
+    with pytest.raises(NotionAPIError) as exc_info:
+        client.retrieve_database("any-db")
+
+    assert exc_info.value.status == 500
+    # max_attempts=1 のとき、5xx でも sleep されない（preflight の bloating 防止）
+    assert sleep_called == [], (
+        f"max_attempts=1 で sleep が発生した: {sleep_called}"
+    )
+
+
+def test_check_db_share_health_uses_preflight_client_with_max_attempts_one(
+    store, monkeypatch
+):
+    """preflight 用 client は max_attempts=1 で構築され、Notion outage 時の
+    ブロック時間を抑える（Issue #82 Copilot Round 3 指摘）"""
+    monkeypatch.setenv("TEST_TOKEN", "secret")
+    monkeypatch.setenv("TEST_DB", "db-network")
+
+    constructed_clients: list[dict] = []
+    original_init = NotionAPIClient.__init__
+
+    def _spy_init(self, api_token, **kwargs):
+        constructed_clients.append({"api_token": api_token, **kwargs})
+        original_init(self, api_token, **kwargs)
+
+    monkeypatch.setattr(NotionAPIClient, "__init__", _spy_init)
+    # retrieve_database は何でも成功にする（preflight client が使われた
+    # ことだけ検証）
+    monkeypatch.setattr(
+        NotionAPIClient, "retrieve_database", lambda self, db_id: {"id": db_id}
+    )
+
+    disp = NotionSyncDispatcher(store=store, config=_make_config())
+    disp.check_db_share_health()
+
+    # preflight 用 client は max_attempts=1 で生成されている
+    preflight_init_calls = [
+        c for c in constructed_clients if c.get("max_attempts") == 1
+    ]
+    assert preflight_init_calls, (
+        "preflight 用 NotionAPIClient (max_attempts=1) が生成されなかった"
+    )
+
+
+def test_check_db_share_health_does_not_false_positive_on_404_in_message(
+    store, monkeypatch
+):
+    """エラーメッセージに偶然 "404" の文字列が含まれていても、status が 404 で
+    なければ「integration not shared」誤検出しない（Issue #82 Copilot Round 2
+    指摘: 構造化 status での判定）"""
+    monkeypatch.setenv("TEST_TOKEN", "secret")
+    monkeypatch.setenv("TEST_DB", "db-validation-error")
+
+    def _raise_validation_with_404_in_msg(self, db_id):
+        # status は 400 だが、message に "404" を含む偶発ケース
+        raise NotionAPIError(
+            400,
+            "validation_error: database id 404-abc-def is malformed",
+            code="validation_error",
+        )
+
+    monkeypatch.setattr(
+        NotionAPIClient, "retrieve_database", _raise_validation_with_404_in_msg
+    )
+
+    disp = NotionSyncDispatcher(store=store, config=_make_config())
+    results = disp.check_db_share_health()
+    ok, msg = results["TEST_DB"]
+    assert ok is False
+    # 偽陽性ガード: message に "404" が含まれていても integration not shared
+    # と分類しない
+    assert msg is not None
+    assert "integration not shared" not in msg
+    assert "validation_error" in msg
+
+
+def test_print_notion_db_share_warnings_skips_when_skip_notion_env(
+    monkeypatch, capsys, tmp_path
+):
+    """HOKUSAI_SKIP_NOTION=1 のとき check そのものを実行せず warning も出さない
+    （Issue #82 Copilot Round 1 指摘: 他 Notion ヘルパーの opt-out 規約と一致）"""
+    from hokusai.cli_main import _print_notion_db_share_warnings
+
+    monkeypatch.setenv("HOKUSAI_SKIP_NOTION", "1")
+
+    # NotionAPIClient.retrieve_database が呼ばれたら例外を投げて、
+    # 呼ばれていないことを保証する
+    def _should_not_be_called(self, db_id):
+        raise AssertionError(
+            "retrieve_database should not be called when HOKUSAI_SKIP_NOTION=1"
+        )
+
+    monkeypatch.setattr(NotionAPIClient, "retrieve_database", _should_not_be_called)
+
+    # share されていない DB がある config を模擬（enabled=True、env も揃って
+    # いれば本来 warning が出る状況だが SKIP_NOTION=1 なので何も起きない）。
+    # database_path は tmp_path 配下を使い世界書き込み可能ディレクトリ
+    # （/tmp 直下）を避ける（SonarCloud python:S5443 対応）。
+    class _MockConfig:
+        notion_dashboard = _make_config(enabled=True)
+        database_path = str(tmp_path / "hokusai_test_db.sqlite")
+
+    _print_notion_db_share_warnings(_MockConfig())
+
+    captured = capsys.readouterr()
+    assert "Notion DB share check" not in captured.out
+    assert "⚠️" not in captured.out

@@ -106,6 +106,93 @@ class NotionSyncDispatcher:
             return False
         return True
 
+    def check_db_share_health(self) -> dict[str, tuple[bool, str | None]]:
+        """各 DB ID env に対し retrieve_database を呼んで integration share 状態を確認する。
+
+        Issue #82 / M0.2: `is_configured()` は env が揃っているかだけしか
+        見ないため、Notion 側で integration "HOKUSAI" に DB が share されて
+        いない場合は dispatch 時の 404 が outbox に積み続けられる。事前に
+        各 DB を retrieve して早期検出する。
+
+        Returns:
+            `{env_name: (ok, error_message | None), ...}` の dict。
+            - env が設定されていない DB は dict に含めない（skip）
+            - ok=True / error_message=None で share 成功
+            - ok=False / error_message に詳細（"integration not shared (404)" 等）
+            is_configured()=False のときは空 dict を返す。
+
+        Notes:
+            **fail-open**: 本メソッドは API 接続失敗（network error 等）も
+            (False, "...") として返すだけで、例外は呼び出し側に伝播させない。
+            呼び出し側（hokusai start）はこの結果を warning として表示し
+            workflow 自体は継続する。
+
+            **preflight client**: 通常 dispatch 用の NotionAPIClient ではなく、
+            retry を 1 回に絞った専用 client を使う（Issue #82 Copilot Round 3
+            指摘）。本 helper は `hokusai start` 冒頭で呼ばれるため、Notion
+            outage 時に通常の retry policy （max_attempts=3, backoff_seconds=5
+            等）で各 DB を試すと最大 6 DB × N retry でブロック時間が数分に
+            膨れる。Preflight としては早く失敗してその情報を返す方が、
+            workflow start の起動時間を保てる。
+        """
+        if not self.is_configured():
+            return {}
+
+        api_token = os.environ.get(self._config.api_token_env)
+        if not api_token:
+            # is_configured() で確認済だが念のため
+            return {}
+
+        # Preflight 専用の retry なし client（NotionAPIClient.__init__ は
+        # max_attempts=max(1, ...) なので 1 が下限）。timeout は通常 client
+        # の半分以下（5 秒）で、network 障害時のブロック時間を短くする。
+        preflight_api = NotionAPIClient(
+            api_token=api_token,
+            max_attempts=1,
+            backoff_seconds=0.5,
+            requests_per_second=self._config.rate_limit.requests_per_second,
+            timeout=5.0,
+        )
+
+        # NotionDashboardConfig に存在する全 DB env を列挙
+        db_envs = [
+            self._config.workflows_db_id_env,
+            self._config.pull_requests_db_id_env,
+            self._config.review_issues_db_id_env,
+            self._config.work_items_db_id_env,
+            self._config.workflow_gates_db_id_env,
+            self._config.project_memory_db_id_env,
+        ]
+
+        results: dict[str, tuple[bool, str | None]] = {}
+        for env_name in db_envs:
+            db_id = os.environ.get(env_name)
+            if not db_id:
+                # env 未設定の DB は dogfooding 中も「未設定」が正しい状態なので skip
+                continue
+            try:
+                preflight_api.retrieve_database(db_id)
+                results[env_name] = (True, None)
+            except NotionAPIError as e:
+                # 404 (integration not shared) を構造化された status 属性で判定する
+                # （Issue #82 Copilot Round 2 指摘: 文字列 substring 検索だと
+                # DB ID や validation text に "404" が含まれるケースで誤検出する）。
+                msg = str(e)
+                if e.status == 404:
+                    results[env_name] = (
+                        False,
+                        f"integration not shared with DB (404): {msg[:160]}",
+                    )
+                else:
+                    results[env_name] = (False, msg[:200])
+            except Exception as e:
+                results[env_name] = (
+                    False,
+                    f"{type(e).__name__}: {str(e)[:200]}",
+                )
+
+        return results
+
     def resolve_workflow_page_url(self, workflow_id: str) -> str | None:
         """workflow_id に対応する Notion ページ URL を解決する。
 

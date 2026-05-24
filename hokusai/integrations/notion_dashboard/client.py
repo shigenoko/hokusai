@@ -175,32 +175,39 @@ class NotionAPIClient:
                 return self._send(method, url, data)
             except NotionRateLimitError as e:
                 last_exception = e
-                wait = e.retry_after
-                logger.warning(
-                    f"Notion API rate limit (attempt {attempt}/{self._max_attempts}); "
-                    f"sleeping {wait:.1f}s"
-                )
-                time.sleep(wait)
+                # 最終 attempt の後で sleep しても次の試行はないため、
+                # 残り試行があるときだけ sleep する（PR #83 Copilot Round 5
+                # 指摘: preflight 用 max_attempts=1 でも sleep してしまうと
+                # hokusai start が無駄にブロックする）。
+                if attempt < self._max_attempts:
+                    wait = e.retry_after
+                    logger.warning(
+                        f"Notion API rate limit (attempt {attempt}/{self._max_attempts}); "
+                        f"sleeping {wait:.1f}s"
+                    )
+                    time.sleep(wait)
             except NotionAPIError as e:
                 # 4xx は即時失敗（401/403/404 等は再送しても無駄）
                 if 500 <= e.status < 600:
                     last_exception = e
-                    backoff = self._backoff_seconds * attempt
-                    logger.warning(
-                        f"Notion API 5xx error (attempt {attempt}/{self._max_attempts}); "
-                        f"sleeping {backoff:.1f}s"
-                    )
-                    time.sleep(backoff)
+                    if attempt < self._max_attempts:
+                        backoff = self._backoff_seconds * attempt
+                        logger.warning(
+                            f"Notion API 5xx error (attempt {attempt}/{self._max_attempts}); "
+                            f"sleeping {backoff:.1f}s"
+                        )
+                        time.sleep(backoff)
                 else:
                     raise
             except (urllib.error.URLError, TimeoutError) as e:
                 last_exception = e
-                backoff = self._backoff_seconds * attempt
-                logger.warning(
-                    f"Notion API network error (attempt {attempt}/{self._max_attempts}): "
-                    f"{type(e).__name__}; sleeping {backoff:.1f}s"
-                )
-                time.sleep(backoff)
+                if attempt < self._max_attempts:
+                    backoff = self._backoff_seconds * attempt
+                    logger.warning(
+                        f"Notion API network error (attempt {attempt}/{self._max_attempts}): "
+                        f"{type(e).__name__}; sleeping {backoff:.1f}s"
+                    )
+                    time.sleep(backoff)
 
         if last_exception is not None:
             raise last_exception
