@@ -218,6 +218,35 @@ LLM Gateway は、各 request に対して以下の decision を返す。
 | `block` | 送信不可 |
 | `require_human_approval` | Human Approval gate が開くまで送信不可 |
 
+### 4.4 fail-open 原則
+
+LLM Gateway の **内部処理が失敗しても**、HOKUSAI の workflow 進行・PR 作成・既存フローは停止しない。
+
+対象とする失敗例:
+
+* `audit_logs` テーブルへの SQLite 永続化失敗
+* policy 評価中に発生した予期せぬ例外
+* Notion API の障害（DB / page への共有設定漏れに由来する 404、Integration 権限不足等）
+* GitHub / Figma / Miro / Slack 等のその他 external API 障害（権限不足、404、rate limit、timeout、接続エラー等）
+* spend cost lookup の失敗（pricing table 不整合 / provider usage 取得失敗）
+* `policy_hits` 評価に必要な context フィールド（model 名等）が呼び出し側から取得できないケース
+
+理由:
+
+* `hokusai/llm_gateway/dispatch.py::dispatch_via_gateway` は Phase 1 から例外を完全に握り潰す設計で実装されており（`log_suppressed_exception` 経由で例外メッセージ本文（`exc.args` / `str(exc)`）を含めずに、呼び出し文脈の固定メッセージ + 例外型名 + frame 一覧を debug log に残す）、Phase 2 enforcement 解禁後も同じ思想を維持する。guardrail の不具合が運用全体を停止させる事故は、guardrail を on にすること自体への抵抗感を生むため。
+* Notion 障害を理由に PR 作成や workflow 進行を止めると、dogfooding session が止まり HOKUSAI 自体の改善イテレーションが破綻する（出典: `docs/dogfooding-findings.md` §3, §6）。
+
+**明示的に fail-open しない** ケース:
+
+* policy が `decision="block"` を返した送信は、意図的な enforcement の結果であり、external API 障害や Gateway 内部例外とは別物として扱う。「policy block を Gateway 内部例外で fail-open して送信する」のは guardrail の意味を失うため、必ず送信を抑止する。
+* `decision="require_human_approval"` も同様。Approval gate が開いていない状態で送信してはならない。
+* `decision="redact"` で redaction 適用に失敗した場合は、原文をそのまま送信せず `block` 扱いに昇格させる（fail-closed）。secret/PII の漏出を許容しないため。
+
+ログ要件:
+
+* fail-open で抑制した例外は debug log に **呼び出し文脈の固定メッセージ + 例外型名 + frame 一覧**（filename:lineno in function）を残す。固定メッセージには user-controlled な値（prompt 内容 / context フィールド値等）を含めてはならず、また `exc.args` / `str(exc)` 由来のメッセージ本文を log stream に流してはならない（prompt 経由で secret / PII が例外メッセージに混入したケースでの log 漏洩を防ぐため。要件 §14 受け入れ基準と `log_suppressed_exception` 既存実装で担保）。
+* call site の特定は上記 frame 一覧から行う（呼び出し元の filename / lineno / function name が含まれる）。現状の `log_suppressed_exception` には `workflow_id` / `phase` / `provider` 等のドメイン context は含まれていないため、頻度監視・集計・Operations Console での fail-open イベント一覧表示が必要になった段階では、debug log を拡張するのではなく `audit_logs` テーブル側を活用する経路を別途検討する（M2 系列以降）。具体的には既存の interceptor 経路（`SQLiteStore.add_audit_log(action="llm_gateway_decision", status=decision, ...)`）に対して、fail-open イベント専用の `status` 値（例: `status="suppressed_internal_error"`）を追加し、§4.3 decision 値とは別の vocabulary として `status` カラム側で識別する。`action` カラム名は据え置く（DB schema 互換のため）。
+
 ---
 
 ## 5. Provider / Model 制御
@@ -239,6 +268,8 @@ fallback は以下のいずれかとする。
 * workflow を `waiting_for_human` にする
 * Human Approval gate を作成する
 * CLI / Operations Console に明示的な再実行候補を出す
+
+本節の fallback ルートに入るのは、policy が明示的に `block` / `require_human_approval` を返した場合に限る。policy 評価そのものが内部例外で失敗したケース（allowlist データの読み込み失敗 / context 不足等）は §4.4 fail-open 原則を適用し、workflow 進行を止めず透過動作で継続する（本節の fallback ルートには入らない）。意図的な enforcement と Gateway 内部不具合を運用上区別するため。
 
 ---
 
@@ -553,6 +584,7 @@ hokusai/
 * email / phone / credit card / My Number / secret-like token を検出できる
 * redaction 後の prompt を生成できる
 * secret / PII 実値が audit log / Notion / Operations Console に保存されない
+* fail-open で抑制した内部例外について、debug log に `exc.args` / `str(exc)` 由来のメッセージ本文が出力されない（呼び出し文脈の固定メッセージ + 例外型名 + frame 一覧のみ。§4.4 fail-open 原則）
 * dry-run で送信前 decision を確認できる
 * audit log に request_id / profile / workflow / phase / provider / model / decision が残る
 * Operations Console で spend / redaction / blocked request を確認できる
