@@ -97,6 +97,61 @@ def _seed_dependent_row(
                     "failed", 3, now,
                 ),
             )
+        elif table == "figma_sync_outbox":
+            conn.execute(
+                "INSERT INTO figma_sync_outbox "
+                "(idempotency_key, workflow_id, profile_name, event_type, "
+                "payload_json, attempt_count, last_error, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    f"{workflow_id}:fig-out", workflow_id, "test",
+                    "figma_event", "{}", 0, None, now, now,
+                ),
+            )
+        elif table == "figma_sync_errors":
+            conn.execute(
+                "INSERT INTO figma_sync_errors "
+                "(idempotency_key, workflow_id, profile_name, event_type, "
+                "payload_json, error_message, failed_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    f"{workflow_id}:fig-err", workflow_id, "test",
+                    "figma_event", "{}", "fail", now,
+                ),
+            )
+        elif table == "miro_sync_outbox":
+            conn.execute(
+                "INSERT INTO miro_sync_outbox "
+                "(idempotency_key, workflow_id, profile_name, event_type, "
+                "payload_json, attempt_count, last_error, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    f"{workflow_id}:miro-out", workflow_id, "test",
+                    "miro_event", "{}", 0, None, now, now,
+                ),
+            )
+        elif table == "miro_sync_errors":
+            conn.execute(
+                "INSERT INTO miro_sync_errors "
+                "(idempotency_key, workflow_id, profile_name, event_type, "
+                "payload_json, error_message, failed_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    f"{workflow_id}:miro-err", workflow_id, "test",
+                    "miro_event", "{}", "fail", now,
+                ),
+            )
+        elif table == "design_writeback_idempotency":
+            conn.execute(
+                "INSERT INTO design_writeback_idempotency "
+                "(idempotency_key, workflow_id, profile_name, target, "
+                "resource, response_id, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    f"{workflow_id}:idem", workflow_id, "test", "figma",
+                    "file/abc", None, now,
+                ),
+            )
         conn.commit()
 
 
@@ -162,43 +217,49 @@ def test_delete_old_completed_workflows_rejects_negative_retention(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_delete_old_completed_workflows_cascades_dependent_tables(tmp_path):
-    """依存テーブル (checkpoints / audit_logs / notion_sync_outbox / errors)
-    の workflow_id 一致行も同時に削除される."""
+ALL_DEPENDENT_TABLES = (
+    "checkpoints",
+    "audit_logs",
+    "notion_sync_outbox",
+    "notion_sync_errors",
+    "figma_sync_outbox",
+    "figma_sync_errors",
+    "miro_sync_outbox",
+    "miro_sync_errors",
+    "design_writeback_idempotency",
+)
+
+
+def test_delete_old_completed_workflows_cascades_all_dependent_tables(tmp_path):
+    """依存テーブル 9 件すべての workflow_id 一致行が同時に削除される
+    （PR #101 Copilot Round 1 #3 指摘: 4 件のみ実 row 投入だったのを 9 件
+    すべてに拡張）。各テーブルで wf-target は消え wf-keep は残ることを検証."""
     store = _make_store(tmp_path)
     old_ts = (datetime.now() - timedelta(days=100)).isoformat()
+    recent_ts = (datetime.now() - timedelta(days=5)).isoformat()
 
-    # 削除対象 workflow + 依存 row
+    # 削除対象 workflow + 依存 row 9 テーブル全部に seed
     _seed_workflow(store, workflow_id="wf-target", current_phase=10, updated_at=old_ts)
-    for table in (
-        "checkpoints", "audit_logs",
-        "notion_sync_outbox", "notion_sync_errors",
-    ):
+    for table in ALL_DEPENDENT_TABLES:
         _seed_dependent_row(store, table, "wf-target")
 
-    # 残るべき workflow + 依存 row（recent なので残る）
-    recent_ts = (datetime.now() - timedelta(days=5)).isoformat()
+    # 残るべき workflow + 依存 row（recent なので残る）9 テーブル全部
     _seed_workflow(store, workflow_id="wf-keep", current_phase=10, updated_at=recent_ts)
-    for table in (
-        "checkpoints", "audit_logs",
-        "notion_sync_outbox", "notion_sync_errors",
-    ):
+    for table in ALL_DEPENDENT_TABLES:
         _seed_dependent_row(store, table, "wf-keep")
 
     counts = store.delete_old_completed_workflows(retention_days=90)
 
+    # workflows 1 件 + 各 dependent table 1 件ずつ削除されたカウント
     assert counts["workflows"] == 1
-    assert counts["checkpoints"] == 1
-    assert counts["audit_logs"] == 1
-    assert counts["notion_sync_outbox"] == 1
-    assert counts["notion_sync_errors"] == 1
+    for table in ALL_DEPENDENT_TABLES:
+        assert counts[table] == 1, (
+            f"{table}: expected 1 row deleted, got {counts[table]}"
+        )
 
-    # wf-target 関連が全て消え、wf-keep 関連は残る
+    # wf-target 関連が全テーブルで消え、wf-keep 関連は全テーブルで残る
     with store._connect() as conn:
-        for table in (
-            "checkpoints", "audit_logs",
-            "notion_sync_outbox", "notion_sync_errors",
-        ):
+        for table in ALL_DEPENDENT_TABLES:
             target_rows = conn.execute(
                 f"SELECT COUNT(*) FROM {table} WHERE workflow_id = ?",
                 ("wf-target",),
@@ -244,6 +305,61 @@ def test_delete_old_completed_workflows_skips_missing_legacy_tables(
         "figma_sync_outbox", "figma_sync_errors",
     ):
         assert counts[legacy_table] == 0
+
+
+def test_delete_old_completed_workflows_propagates_real_operational_errors(
+    tmp_path, monkeypatch
+):
+    """テーブル不在 (no such table) 以外の OperationalError は黙殺せず上位に
+    伝播することを確認する（PR #101 Copilot Round 1 #1 指摘: sqlite_master
+    で事前 existence check に切り替えたため、それ以外のエラーは正しく伝播）."""
+    store = _make_store(tmp_path)
+    old_ts = (datetime.now() - timedelta(days=100)).isoformat()
+    _seed_workflow(store, workflow_id="wf-target", current_phase=10, updated_at=old_ts)
+    _seed_dependent_row(store, "checkpoints", "wf-target")
+
+    # _connect を上書きして、DELETE 実行時に locked エラーを返す fake conn を返す
+    real_connect = store._connect
+
+    class _FakeCursor:
+        def __init__(self, real_cursor):
+            self._real = real_cursor
+            self.rowcount = 0
+
+        def fetchall(self):
+            return self._real.fetchall()
+
+        def fetchone(self):
+            return self._real.fetchone()
+
+    class _FakeConn:
+        def __init__(self, real):
+            self._real = real
+
+        def execute(self, sql, *args):
+            # DELETE FROM checkpoints だけ locked 模擬、それ以外は通常実行
+            if "DELETE FROM checkpoints" in sql:
+                raise sqlite3.OperationalError("database is locked")
+            return self._real.execute(sql, *args)
+
+        def commit(self):
+            self._real.commit()
+
+        def __enter__(self):
+            self._real.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self._real.__exit__(*args)
+
+    def _fake_connect():
+        return _FakeConn(real_connect())
+
+    monkeypatch.setattr(store, "_connect", _fake_connect)
+
+    # "database is locked" は黙殺されずに上位伝播する
+    with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+        store.delete_old_completed_workflows(retention_days=90)
 
 
 # ---------------------------------------------------------------------------

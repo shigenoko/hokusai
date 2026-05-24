@@ -43,6 +43,28 @@ from .ui.console import (
 from .workflow import WorkflowRunner
 
 
+def _positive_retention_days(value: str) -> int:
+    """argparse type=... 用の retention_days バリデータ（M2.5 / #100）。
+
+    1 以上の整数のみ許容し、それ以外は argparse.ArgumentTypeError を投げて
+    usage と共に非 0 終了させる（PR #101 Copilot Round 1 #2 指摘: user error
+    を CLI 成功終了で隠さない）。
+    """
+    import argparse
+
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError(
+            f"--retention-days には整数を指定してください: got {value!r}"
+        ) from None
+    if parsed < 1:
+        raise argparse.ArgumentTypeError(
+            f"--retention-days は 1 以上の整数を指定してください: got {parsed}"
+        )
+    return parsed
+
+
 def _build_parser():
     """CLI 用 argparse パーサを構築する。
 
@@ -214,12 +236,13 @@ def _build_parser():
     )
     cleanup_parser.add_argument(
         "--retention-days",
-        type=int,
+        type=_positive_retention_days,
         default=90,
         metavar="N",
         help=(
-            "--gc-workflows と組み合わせて使う保持期間（日数）。既定 90 日。"
-            "進行中 workflow (current_phase < 10) は absolutely 削除されない。"
+            "--gc-workflows と組み合わせて使う保持期間（日数、1 以上の整数）。"
+            "既定 90 日。進行中 workflow (current_phase < 10) は absolutely "
+            "削除されない。"
         ),
     )
 
@@ -2257,13 +2280,18 @@ def _handle_cleanup(args, config):
 
     # M2.5 (#100): opt-in な workflow 行 GC。workflow_id / --stale / 単独
     # いずれのモードでも `--gc-workflows` が立っていれば実行する。
+    # retention_days の不正値は argparse 側 (_positive_retention_days) で
+    # 事前 reject されているため、ここでは予期せぬ実行時例外のみ握り潰す
+    # （PR #101 Copilot Round 1 #2 指摘で ValueError catch を削除）。
     if args.gc_workflows:
         try:
             _gc_old_workflows(store, args.retention_days)
-        except ValueError as e:
-            print(f"⚠️ workflow GC: {e}")
         except Exception as e:
-            print(f"⚠️ workflow GC でエラー: {type(e).__name__}: {e}")
+            print(
+                f"⚠️ workflow GC でエラー: {type(e).__name__}: {e}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
 
 def _gc_old_workflows(store, retention_days: int) -> None:

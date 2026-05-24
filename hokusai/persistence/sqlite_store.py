@@ -1256,25 +1256,38 @@ class SQLiteStore:
             #    （デフォルト SQLITE_MAX_VARIABLE_NUMBER = 999、安全側で 500）
             chunk_size = 500
 
-            # 3. 依存テーブルの cascade 削除
-            for table in self._WORKFLOW_DEPENDENT_TABLES:
-                try:
-                    deleted = 0
-                    for i in range(0, len(target_ids), chunk_size):
-                        chunk = target_ids[i:i + chunk_size]
-                        placeholders = ",".join("?" * len(chunk))
-                        sub_cursor = conn.execute(
-                            f"DELETE FROM {table} "
-                            f"WHERE workflow_id IN ({placeholders})",
-                            chunk,
-                        )
-                        deleted += sub_cursor.rowcount
-                    counts[table] = deleted
-                except sqlite3.OperationalError:
-                    # テーブル不在（v0.3.x 等のレガシー DB）→ skip
-                    counts[table] = 0
+            # 3. PR #101 Copilot Round 1 #1 指摘: dependent table の DELETE で
+            #    sqlite3.OperationalError を無条件に握り潰すと "no such table"
+            #    以外（DB lock / I/O / SQL typo）も黙殺して workflows だけ削除
+            #    された不整合状態になり得る。sqlite_master で実在テーブル一覧
+            #    を事前取得し、存在するものだけ DELETE することで、それ以外の
+            #    エラーは正しく上位に伝播するようにする。
+            existing_tables = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
 
-            # 4. 最後に workflows 自体を削除
+            # 4. 依存テーブルの cascade 削除（実在するもののみ）
+            for table in self._WORKFLOW_DEPENDENT_TABLES:
+                if table not in existing_tables:
+                    # レガシー DB で table 不在 → skip
+                    counts[table] = 0
+                    continue
+                deleted = 0
+                for i in range(0, len(target_ids), chunk_size):
+                    chunk = target_ids[i:i + chunk_size]
+                    placeholders = ",".join("?" * len(chunk))
+                    sub_cursor = conn.execute(
+                        f"DELETE FROM {table} "
+                        f"WHERE workflow_id IN ({placeholders})",
+                        chunk,
+                    )
+                    deleted += sub_cursor.rowcount
+                counts[table] = deleted
+
+            # 5. 最後に workflows 自体を削除
             for i in range(0, len(target_ids), chunk_size):
                 chunk = target_ids[i:i + chunk_size]
                 placeholders = ",".join("?" * len(chunk))
