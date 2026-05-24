@@ -49,9 +49,18 @@ def create_config_from_env_and_file(
     from .profiles import (
         assert_profile_config_exclusive,
         resolve_profile_to_config_path,
+        try_resolve_default_profile_name,
     )
 
     assert_profile_config_exclusive(profile_name, config_file)
+
+    # M2.3 (#94): profile も config も明示されていないとき、registry の
+    # `default_profile` を implicit に適用する（findings §2.3: `hokusai list`
+    # を `--profile` 無しで叩いたとき default_profile が無視される問題への
+    # 対応）。fail-safe: registry 不在 / 破損 / 解決失敗時は None を返し、
+    # 以降の cwd / home `claude-workflow.yaml` 探索フォールバックに繋ぐ。
+    if profile_name is None and config_file is None:
+        profile_name = try_resolve_default_profile_name()
 
     # profile 指定がある場合は registry から config_path を解決
     profile_data_dir_default: Path | None = None

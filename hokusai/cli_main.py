@@ -657,6 +657,13 @@ def main():
     # default=argparse.SUPPRESS の関係で args に属性が無い場合があるため getattr で取得
     config_arg = getattr(args, "config", None)
     profile_arg = getattr(args, "profile", None)
+    # M2.3 (#94): explicit と implicit (default_profile) を CLI 表示で区別する
+    # ため、create_config_from_env_and_file を呼ぶ前に implicit 解決を試みて
+    # 結果を控える（CLI 出力でのみ使用、config 解決は manager 側に任せる）。
+    implicit_default_profile: str | None = None
+    if profile_arg is None and config_arg is None:
+        from .config.profiles import try_resolve_default_profile_name
+        implicit_default_profile = try_resolve_default_profile_name()
     try:
         config = create_config_from_env_and_file(
             config_arg, profile_name=profile_arg
@@ -664,6 +671,10 @@ def main():
         set_config(config)
         if profile_arg:
             print(f"Profile: {profile_arg}")
+        elif implicit_default_profile:
+            # M2.3 (#94): --profile 未指定で default_profile が auto-resolve
+            # された場合、明示指定と区別できる文言で user に通知。
+            print(f"Profile: {implicit_default_profile} (default_profile)")
         if config_arg:
             print_config_file(config_arg)
         if args.verbose:

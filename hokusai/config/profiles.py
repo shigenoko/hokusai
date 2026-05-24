@@ -260,6 +260,30 @@ def load_profile_registry(registry_path: Path | str | None = None) -> ProfileReg
     )
 
 
+def try_resolve_default_profile_name() -> str | None:
+    """profile registry の `default_profile` を best-effort で返す（M2.3 / #94）。
+
+    `hokusai <command>` を `--profile` 未指定で叩いたときに、`~/.hokusai/profiles.yaml`
+    の `default_profile` を implicit に適用する経路で利用する。
+
+    - registry が見つかる + `default_profile` がセット済 → その名前を返す
+    - registry が見つかる + `default_profile` 未指定 → `None`
+    - 上記以外（registry 不在 / 破損 / 解決失敗 / 不正な name 等）→ `None`
+
+    fail-safe を最優先する: registry 周りで例外が出ても CLI 全体を落とさず、
+    呼び出し側は「従来通り cwd / home の `claude-workflow.yaml` を探す」
+    フォールバックを継続できるよう設計。
+    """
+    try:
+        registry = load_profile_registry()
+    except Exception:
+        # ProfileRegistryNotFoundError / ProfileError / YAML パース失敗 / I/O 等
+        # を含む全例外を fail-safe で握り潰す（findings §2.3 観察: profile を
+        # 設定していない環境でも CLI が透過動作する必要がある）
+        return None
+    return registry.default_profile
+
+
 def assert_profile_config_exclusive(
     profile_name: str | None,
     config_file: str | Path | None,

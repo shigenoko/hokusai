@@ -630,3 +630,156 @@ def test_phase_c_worktree_root_directory_created_with_explicit_path(tmp_path, mo
     assert config.worktree_root == explicit_worktree
     assert explicit_worktree.exists()
     assert explicit_worktree.is_dir()
+
+
+# ---------------------------------------------------------------------------
+# M2.3 (#94): default_profile の implicit 解決
+# `--profile` 未指定 + `--config` 未指定でも registry の default_profile が
+# 効くようにする（findings §2.3: hokusai list を --profile 無しで叩いたとき
+# default_profile が無視される問題への対応）。
+# ---------------------------------------------------------------------------
+
+
+def test_try_resolve_default_profile_returns_name_when_set(tmp_path, monkeypatch):
+    """registry に default_profile がセットされていれば helper はその名前を返す."""
+    from hokusai.config.profiles import try_resolve_default_profile_name
+
+    cfg = tmp_path / "a.yaml"
+    cfg.write_text("project_root: /tmp/repo-a\n")
+    registry = tmp_path / "profiles.yaml"
+    registry.write_text(yaml.safe_dump({
+        "default_profile": "a-co",
+        "profiles": {"a-co": {"config": str(cfg)}},
+    }))
+    monkeypatch.setenv("HOKUSAI_PROFILES_FILE", str(registry))
+
+    assert try_resolve_default_profile_name() == "a-co"
+
+
+def test_try_resolve_default_profile_returns_none_when_not_set(tmp_path, monkeypatch):
+    """registry に default_profile が無ければ None を返す（fail-safe）."""
+    from hokusai.config.profiles import try_resolve_default_profile_name
+
+    cfg = tmp_path / "a.yaml"
+    cfg.write_text("project_root: /tmp/repo-a\n")
+    registry = tmp_path / "profiles.yaml"
+    registry.write_text(yaml.safe_dump({
+        "profiles": {"a-co": {"config": str(cfg)}},
+    }))
+    monkeypatch.setenv("HOKUSAI_PROFILES_FILE", str(registry))
+
+    assert try_resolve_default_profile_name() is None
+
+
+def test_try_resolve_default_profile_returns_none_when_registry_missing(
+    tmp_path, monkeypatch
+):
+    """registry ファイル自体が無い環境では None を返す（fail-safe）."""
+    from hokusai.config.profiles import try_resolve_default_profile_name
+
+    # 存在しないパスを env で指す
+    monkeypatch.setenv("HOKUSAI_PROFILES_FILE", str(tmp_path / "nonexistent.yaml"))
+
+    assert try_resolve_default_profile_name() is None
+
+
+def test_try_resolve_default_profile_returns_none_on_broken_yaml(
+    tmp_path, monkeypatch
+):
+    """registry YAML が壊れていても例外を投げず None を返す（fail-safe）."""
+    from hokusai.config.profiles import try_resolve_default_profile_name
+
+    registry = tmp_path / "profiles.yaml"
+    registry.write_text("not valid: yaml:\n  - bad indent\n :: more bad")
+    monkeypatch.setenv("HOKUSAI_PROFILES_FILE", str(registry))
+
+    assert try_resolve_default_profile_name() is None
+
+
+def test_create_config_implicit_default_profile_loads_when_no_args(
+    tmp_path, monkeypatch
+):
+    """profile も config も指定しないとき、registry の default_profile が
+    implicit に適用されて該当 profile の config が読まれる（M2.3 核心動作）."""
+    from hokusai.config import create_config_from_env_and_file
+
+    data_dir = tmp_path / "default-data"
+    cfg = tmp_path / "a.yaml"
+    cfg.write_text("project_root: /tmp/repo-default\n")
+    registry = tmp_path / "profiles.yaml"
+    registry.write_text(yaml.safe_dump({
+        "default_profile": "a-co",
+        "profiles": {
+            "a-co": {
+                "config": str(cfg),
+                "data_dir": str(data_dir),
+            }
+        },
+    }))
+    monkeypatch.setenv("HOKUSAI_PROFILES_FILE", str(registry))
+
+    # profile も config も渡さず呼び出す
+    config = create_config_from_env_and_file()
+
+    assert str(config.project_root) == "/tmp/repo-default"
+    assert config.data_dir == data_dir
+    assert config.database_path == data_dir / "workflow.db"
+
+
+def test_create_config_explicit_profile_overrides_default(tmp_path, monkeypatch):
+    """--profile が明示されていれば default_profile は無視される."""
+    from hokusai.config import create_config_from_env_and_file
+
+    cfg_default = tmp_path / "a.yaml"
+    cfg_default.write_text("project_root: /tmp/repo-default\n")
+    cfg_explicit = tmp_path / "b.yaml"
+    cfg_explicit.write_text("project_root: /tmp/repo-explicit\n")
+    registry = tmp_path / "profiles.yaml"
+    registry.write_text(yaml.safe_dump({
+        "default_profile": "a-co",
+        "profiles": {
+            "a-co": {"config": str(cfg_default)},
+            "b-co": {"config": str(cfg_explicit)},
+        },
+    }))
+    monkeypatch.setenv("HOKUSAI_PROFILES_FILE", str(registry))
+
+    config = create_config_from_env_and_file(profile_name="b-co")
+    assert str(config.project_root) == "/tmp/repo-explicit"
+
+
+def test_create_config_explicit_config_file_skips_default_profile(
+    tmp_path, monkeypatch
+):
+    """--config 明示時は default_profile を読まずに config file 直読み."""
+    from hokusai.config import create_config_from_env_and_file
+
+    cfg_default = tmp_path / "a.yaml"
+    cfg_default.write_text("project_root: /tmp/repo-default\n")
+    cfg_explicit = tmp_path / "explicit.yaml"
+    cfg_explicit.write_text("project_root: /tmp/repo-explicit\n")
+    registry = tmp_path / "profiles.yaml"
+    registry.write_text(yaml.safe_dump({
+        "default_profile": "a-co",
+        "profiles": {"a-co": {"config": str(cfg_default)}},
+    }))
+    monkeypatch.setenv("HOKUSAI_PROFILES_FILE", str(registry))
+
+    config = create_config_from_env_and_file(config_file=str(cfg_explicit))
+    assert str(config.project_root) == "/tmp/repo-explicit"
+
+
+def test_create_config_falls_back_when_registry_missing(tmp_path, monkeypatch):
+    """registry 不在環境でも既存挙動（cwd / home の claude-workflow.yaml 探索）
+    にフォールバックして例外を投げない."""
+    from hokusai.config import create_config_from_env_and_file
+
+    # registry 不在
+    monkeypatch.setenv("HOKUSAI_PROFILES_FILE", str(tmp_path / "no-registry.yaml"))
+    # cwd / home の探索を阻むため HOME を tmp_path に、cwd を tmp_path に固定
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+
+    # 例外を投げず、空 config で WorkflowConfig を返す
+    config = create_config_from_env_and_file()
+    assert config is not None
