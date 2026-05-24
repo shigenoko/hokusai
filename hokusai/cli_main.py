@@ -667,12 +667,13 @@ def main():
     if profile_arg_explicit is None and config_arg is None:
         from .config.profiles import try_resolve_default_profile_name
         implicit_default_profile = try_resolve_default_profile_name()
-    # explicit が `None` のときだけ implicit に流れる。`or` で truthy 評価
-    # すると explicit `--profile ""` が silent に default_profile へ置き換わ
-    # って挙動が変わるため、None かどうかで明示的に分岐する
-    # （PR #95 Copilot Round 2 指摘）。なお空文字 / whitespace-only な値は
-    # 後段の `validate_profile_name` で「profile 名が空です」として明確に
-    # reject されるため、ここで早期 reject はしない。
+    # explicit が None のときだけ implicit に流れる。truthy 評価で or を使うと
+    # explicit "--profile ''" が silent に default_profile へ置き換わって挙動が
+    # 変わるため、None かどうかで明示的に分岐する（PR #95 Copilot Round 2 指摘）。
+    # 空文字 / whitespace-only な値は manager 側の `if profile_name is not None:`
+    # 分岐 (Round 3 指摘で追加) を経て resolve_profile_to_config_path に渡り、
+    # validate_profile_name によって InvalidProfileNameError で明示的に reject
+    # される（silent な claude-workflow.yaml 探索フォールバックには流れない）。
     profile_arg = (
         profile_arg_explicit
         if profile_arg_explicit is not None

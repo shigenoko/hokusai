@@ -837,20 +837,18 @@ def test_try_resolve_default_profile_returns_none_when_config_path_missing(
     assert try_resolve_default_profile_name() is None
 
 
-def test_explicit_empty_profile_does_not_trigger_default_profile(
+def test_explicit_empty_profile_raises_invalid_profile_name(
     tmp_path, monkeypatch
 ):
-    """`--profile ""` のような空文字明示は default_profile に置き換わって
-    はならない（PR #95 Copilot Round 2 指摘: 元実装の truthy 評価で空文字が
-    silent に default に変わるリスク）.
+    """`--profile ""` のような空文字明示は default_profile に置き換わらず、
+    かつ validate_profile_name で InvalidProfileNameError として明示的に
+    reject される（PR #95 Copilot Round 2/3 指摘）.
 
-    cli_main 側は `profile_arg_explicit is not None` で判定し、空文字を
-    explicit として扱う。本テストは下位ロジックの境界として、
-    `create_config_from_env_and_file(profile_name="")` が default_profile を
-    内部で適用しないことを確認する（profile_name=""` は manager 側で
-    `is None` 判定をくぐり抜け、resolve は falsy 判定でスキップして従来の
-    config file 探索に落ちる挙動の回帰防止）."""
+    Round 2 で「空文字を silent に default に変えない」を担保。
+    Round 3 で「空文字 explicit を silent fallback ではなく explicit error
+    にする」を担保。両方を 1 ケースで検証する."""
     from hokusai.config import create_config_from_env_and_file
+    # InvalidProfileNameError は file 上部で import 済み
 
     default_project_root = tmp_path / "should-not-be-loaded"
     default_cfg = tmp_path / "default-profile.yaml"
@@ -864,10 +862,9 @@ def test_explicit_empty_profile_does_not_trigger_default_profile(
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.chdir(tmp_path)
 
-    # 空文字明示 → default_profile の config を読まない（読んでいたら
-    # project_root が default_project_root になるはず）
-    config = create_config_from_env_and_file(profile_name="")
-    assert config.project_root != default_project_root
+    # 空文字明示 → default_profile の config を読まず、空 name で reject
+    with pytest.raises(InvalidProfileNameError):
+        create_config_from_env_and_file(profile_name="")
 
 
 def test_create_config_falls_back_when_default_profile_config_missing(
