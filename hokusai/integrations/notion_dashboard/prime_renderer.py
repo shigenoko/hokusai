@@ -60,6 +60,7 @@ def render_prime_markdown(
     work_items: list[dict] | None = None,
     review_issues: list[dict] | None = None,
     gates: list[dict] | None = None,
+    diagnostics: list[str] | None = None,
 ) -> str:
     """active Memory + workgraph context のリストを Agent prompt 向け
     Markdown へ整形する（Workgraph 完成 / Issue #54）。
@@ -72,6 +73,12 @@ def render_prime_markdown(
     5. Workflow Gates（pending / blocked / open）
 
     空のセクションは省略する。
+
+    `diagnostics` (M2.4 / #92): 出力する section が 1 つも無いとき、構成要素
+    ごとの「設定有無 / 取得結果」を 1 行ずつ italic bullet で表示する用の
+    事前整形済み文字列リスト。「DB share 未完了 / env 未設定 / 取得済 0 件 /
+    Notion 障害」のどれかを呼び出し側 (cli_main) で判定して渡す想定。
+    section が 1 つでもあれば diagnostics は無視（出力ノイズを増やさない）。
 
     Returns:
         UTF-8 Markdown 文字列。
@@ -97,6 +104,21 @@ def render_prime_markdown(
     has_any = bool(memories) or bool(work_items) or bool(review_issues) or bool(gates)
     if not has_any:
         lines.append("_active な workgraph context はありません_")
+        # M2.4 (#92): findings §2.1 の dogfooding 観察に基づく診断行。
+        # 「空状態の prime はそのまま LLM に渡しても情報量ゼロで、なぜ memory
+        # が空か (DB share 未完了 / DB ID env 未設定 / 本当に空 / Notion 障害)
+        # が分からない」問題への対応。各構成要素の状態を italic bullet で 1 行
+        # ずつ列挙して原因切り分けを速くする。
+        if diagnostics:
+            lines.append("")
+            for diag in diagnostics:
+                # 各行は呼び出し側が既に整形済み（"Project Memory DB: 未設定
+                # (env XXX)" 等）。renderer は italic 化と bullet 化のみ担当。
+                # italic は `*...*` を使う: 診断行に含まれる env 変数名（例
+                # `HOKUSAI_NOTION_PROJECT_MEMORY_DB_ID`）の `_` が `_..._`
+                # 構文の終端と解釈されて表示が崩れるのを避けるため
+                # （Issue #92 / M2.4 Copilot Round 1 指摘）。
+                lines.append(f"- *{diag}*")
         lines.append("")
         return "\n".join(lines)
 
@@ -164,6 +186,7 @@ def render_prime_json(
     work_items: list[dict] | None = None,
     review_issues: list[dict] | None = None,
     gates: list[dict] | None = None,
+    diagnostics: list[str] | None = None,
 ) -> str:
     """active Memory + workgraph context を Agent / 自動処理向け JSON へ整形
     する（Workgraph 完成 / Issue #54）。
@@ -176,6 +199,10 @@ def render_prime_json(
     として保持する（Copilot 指摘: 以前は `or []` で両者を潰していた）。
     呼び出し側が「未取得」を「未対応領域」として扱うか「0 件」と同等に扱うか
     を選択できる。
+
+    `diagnostics` (M2.4 / #92): 各構成要素の「設定有無 / 取得結果」を呼び出し
+    側で事前整形した文字列リスト。JSON では Markdown 側と異なり has_any の
+    判定をせず常に key として残す（自動処理側が必要に応じて参照できるよう）。
     """
     payload: dict[str, Any] = {
         "workflow_id": workflow_id,
@@ -197,6 +224,7 @@ def render_prime_json(
             if gates is not None
             else None
         ),
+        "diagnostics": diagnostics,
     }
     return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
 
