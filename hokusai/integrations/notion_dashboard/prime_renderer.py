@@ -117,7 +117,7 @@ def render_prime_markdown(
                 # italic は `*...*` を使う: 診断行に含まれる env 変数名（例
                 # `HOKUSAI_NOTION_PROJECT_MEMORY_DB_ID`）の `_` が `_..._`
                 # 構文の終端と解釈されて表示が崩れるのを避けるため
-                # （PR #93 Copilot 1 回目指摘）。
+                # （Issue #92 / M2.4 Copilot Round 1 指摘）。
                 lines.append(f"- *{diag}*")
         lines.append("")
         return "\n".join(lines)
