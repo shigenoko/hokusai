@@ -1927,13 +1927,22 @@ def _warn_if_skip_notion_pre_set(config, profile_label: str | None) -> None:
     )
 
     if enabled:
-        # mismatch: Notion 設定済み profile に対して global な SKIP が残存
+        # mismatch: Notion 設定済み profile に対して global な SKIP が残存。
+        # PR #97 Copilot Round 1 指摘: dispatcher (_safe_notion_dispatch /
+        # NotionSyncDispatcher.dispatch) は HOKUSAI_SKIP_NOTION を見ておら
+        # ず、env が揃っていれば継続する。一方で Phase 2/3 ノードの Notion
+        # 書き込み (notion_helpers.py) / CLI 系操作 (task_backend, cancel
+        # reason, connection_status) / workflow.py の page_id 解決系は
+        # SKIP_NOTION を見て早期 return する。この食い違いが findings §1.3
+        # で言う「片方だけ動く」状態。
         message = (
             f"⚠ HOKUSAI_SKIP_NOTION=1 が設定されていますが {profile_text} は "
-            "notion_dashboard.enabled=true です。dispatcher 経路の Notion "
-            "同期は skip され、Phase 2/3 ノードの Notion 書き込みも片方だけ "
-            "動く状態になるため整合性に注意してください。別 profile からの "
-            "持ち越しの場合は `unset HOKUSAI_SKIP_NOTION` を推奨。"
+            "notion_dashboard.enabled=true です。Phase 2/3 ノードの Notion "
+            "書き込みや CLI 系の Notion 操作は skip される一方で、dispatcher "
+            "経路 (workflow_started / pr_created 等) は notion_dashboard "
+            "設定が揃っていれば継続するため、片方だけ動く整合性に注意して "
+            "ください。別 profile からの持ち越しの場合は `unset "
+            "HOKUSAI_SKIP_NOTION` を推奨。"
         )
         print(message, file=sys.stderr)
     else:

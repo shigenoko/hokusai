@@ -3619,6 +3619,11 @@ def test_warn_skip_notion_strong_warning_when_profile_enabled(
     assert "⚠ HOKUSAI_SKIP_NOTION=1" in captured.err
     assert "profile 'hokusai'" in captured.err
     assert "notion_dashboard.enabled=true" in captured.err
+    # PR #97 Copilot Round 1 指摘: 「dispatcher は skip」は誤り。Phase 2/3
+    # ノード経路 / CLI 経路は skip され、dispatcher 経路は継続する点を
+    # メッセージで明示する。
+    assert "Phase 2/3" in captured.err
+    assert "dispatcher" in captured.err
     # 「unset HOKUSAI_SKIP_NOTION を推奨」のガイダンスも入る
     assert "unset HOKUSAI_SKIP_NOTION" in captured.err
 
