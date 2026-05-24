@@ -667,8 +667,18 @@ def main():
     if profile_arg_explicit is None and config_arg is None:
         from .config.profiles import try_resolve_default_profile_name
         implicit_default_profile = try_resolve_default_profile_name()
-    profile_arg = profile_arg_explicit or implicit_default_profile
-    if implicit_default_profile and not profile_arg_explicit:
+    # explicit が `None` のときだけ implicit に流れる。`or` で truthy 評価
+    # すると explicit `--profile ""` が silent に default_profile へ置き換わ
+    # って挙動が変わるため、None かどうかで明示的に分岐する
+    # （PR #95 Copilot Round 2 指摘）。なお空文字 / whitespace-only な値は
+    # 後段の `validate_profile_name` で「profile 名が空です」として明確に
+    # reject されるため、ここで早期 reject はしない。
+    profile_arg = (
+        profile_arg_explicit
+        if profile_arg_explicit is not None
+        else implicit_default_profile
+    )
+    if implicit_default_profile and profile_arg_explicit is None:
         # subcommand handler が args.profile を直接読む経路 (dashboard /
         # notion-setup 等) でも implicit 解決後の値が見えるよう namespace
         # に反映する。
