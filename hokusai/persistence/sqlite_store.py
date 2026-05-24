@@ -1005,6 +1005,50 @@ class SQLiteStore:
             ).fetchone()
             return int(row[0]) if row else 0
 
+    def fetch_recent_outbox_with_errors(
+        self, limit: int = 5
+    ) -> list[dict[str, Any]]:
+        """outbox の中で `last_error` が記録されているもののうち next_attempt_at が近い順に N 件を返す。
+
+        Issue #84 / M0.3 で `hokusai status --verbose` に「直近の Notion 同期失敗」
+        を抜粋表示する用途。retry 中（永続 error 化前）の問題を可視化する。
+        `next_attempt_at` の昇順（古いタイムスタンプ = まもなく次の試行が走る
+        もの）で返すことで、ユーザーは「次に何が再試行されるか」を上から順に
+        確認できる。
+
+        Args:
+            limit: 取得件数（既定 5、CLI でも 5 件 ぐらいで十分）
+
+        Returns:
+            `[{"event_type": str, "workflow_id": str, "attempts": int, "last_error": str,
+                 "next_attempt_at": str}, ...]` の dict のリスト。next_attempt_at
+            昇順で並ぶ（リトライが直近に予定されているものを優先表示。古い
+            タイムスタンプ = まもなく次の試行が走るもの、を先頭にする。
+            Issue #84 Copilot Round 1 で docstring と ASC 実装の整合を取った）。
+        """
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute(
+                """
+                SELECT event_type, workflow_id, attempts, last_error, next_attempt_at
+                FROM notion_sync_outbox
+                WHERE last_error IS NOT NULL AND last_error != ''
+                ORDER BY next_attempt_at ASC, id ASC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+            return [
+                {
+                    "event_type": row["event_type"],
+                    "workflow_id": row["workflow_id"],
+                    "attempts": row["attempts"],
+                    "last_error": row["last_error"],
+                    "next_attempt_at": row["next_attempt_at"],
+                }
+                for row in cursor.fetchall()
+            ]
+
     # ============================================================
     # Figma / Miro 取得結果のキャッシュ操作
     #

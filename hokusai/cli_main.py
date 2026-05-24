@@ -741,10 +741,10 @@ def main():
             runner.continue_workflow(args.workflow_id, action=args.action)
 
         elif args.command == "status":
-            runner.status(args.workflow_id)
+            runner.status(args.workflow_id, verbose=args.verbose)
 
         elif args.command == "list":
-            runner.status(None)
+            runner.status(None, verbose=args.verbose)
 
         elif args.command == "cleanup":
             _handle_cleanup(args, config)

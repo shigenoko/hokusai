@@ -127,6 +127,65 @@ def print_max_events_reached(max_events: int) -> None:
     print(f"⚠️ 最大イベント数 ({max_events}) に達しました。ワークフローを一時停止します。")
 
 
+def print_outbox_summary(
+    pending: int,
+    failed: int,
+    *,
+    verbose: bool = False,
+    recent_errors: list[dict] | None = None,
+) -> None:
+    """Notion outbox の保留 / 永続 error 件数を表示する（Issue #84 / M0.3）。
+
+    `hokusai status <workflow_id>` および `hokusai list`（WorkflowRunner.status
+    が workflow_id 有無いずれで呼ばれた場合も）の末尾で呼ばれる。件数 0
+    なら何も出さず、不要な出力を抑制する。`verbose=True` のとき
+    `recent_errors` から直近の last_error を抜粋表示する（dogfooding round
+    1-4 で発覚した「sqlite3 直叩きでないと outbox 失敗に気付けない」問題
+    への対策）。
+
+    Args:
+        pending: notion_sync_outbox の保留件数
+        failed: notion_sync_errors の永続 error 件数
+        verbose: True で直近 last_error を表示
+        recent_errors: verbose 時に表示する outbox 行のリスト
+            （`fetch_recent_outbox_with_errors` の戻り値）
+    """
+    if pending == 0 and failed == 0:
+        return  # 何もない → 出力抑制
+
+    print()
+    print(f"📮 Notion 同期 outbox: pending={pending}, failed={failed}")
+    if not verbose:
+        # pending / failed どちらかでも表示対象があれば verbose ヒントを出す
+        # （Issue #84 Copilot Round 1 指摘: failed-only ケースで気付かれない問題）
+        if pending > 0 or failed > 0:
+            print(
+                "   `--verbose` で retry 中 outbox の last_error 抜粋を表示"
+            )
+        return
+
+    if recent_errors:
+        # retry 中 (notion_sync_outbox) の last_error 抜粋のみ表示する。
+        # permanent error (notion_sync_errors) の error 抜粋は scope 外で、
+        # 後続 PR で別途追加予定（Issue #84 Copilot Round 3 指摘）。
+        print("   retry 中 outbox の last_error（次回試行が近い順）:")
+        for entry in recent_errors:
+            event = entry.get("event_type", "?")
+            wf = entry.get("workflow_id", "?")
+            attempts = entry.get("attempts", 0)
+            err = (entry.get("last_error") or "")[:160]
+            print(f"   - {event} (wf={wf}, attempts={attempts}): {err}")
+    elif failed > 0:
+        # failed-only ケース: outbox は空だが永続 error はある。verbose でも
+        # 詳細を出せないことを明示してユーザーが混乱しないようにする。
+        # DB パスは config/profile/env で変わるため固定 path は出さず、
+        # テーブル名のみ案内する（Issue #84 Copilot Round 4 指摘）。
+        print(
+            "   permanent error の詳細は後続 PR で表示予定。"
+            "現状は workflow.db の notion_sync_errors テーブルを sqlite3 で確認してください。"
+        )
+
+
 def print_workflow_status(state: dict, phase_names: dict[int, str] | None = None) -> None:
     """
     ワークフロー状態を表示
