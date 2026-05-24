@@ -415,8 +415,10 @@ def test_markdown_renders_diagnostics_as_italic_bullets_when_empty():
         ],
     )
     assert "_active な workgraph context はありません_" in out
-    assert "- _Project Memory DB: 未設定 (env HOKUSAI_NOTION_PROJECT_MEMORY_DB_ID)_" in out
-    assert "- _Work Items DB: 取得済 0 件_" in out
+    # M2.4 Copilot 1 回目指摘: env 変数名の `_` で italic が崩れるのを避けるため
+    # diagnostic 行の italic は `*...*` を使う。
+    assert "- *Project Memory DB: 未設定 (env HOKUSAI_NOTION_PROJECT_MEMORY_DB_ID)*" in out
+    assert "- *Work Items DB: 取得済 0 件*" in out
 
 
 def test_markdown_omits_diagnostics_when_any_section_present():
@@ -451,7 +453,8 @@ def test_markdown_empty_without_diagnostics_keeps_existing_output():
         memories=[],
     )
     assert "_active な workgraph context はありません_" in out
-    # bullet 行は無い
+    # bullet 行は無い（diagnostic 用の `- *...*` も `- _..._` も無いこと）
+    assert "- *" not in out
     assert "- _" not in out
 
 

@@ -1180,6 +1180,10 @@ def _handle_prime(args, config) -> int:
     work_items: list[dict] | None = None
     review_issues: list[dict] | None = None
     gates: list[dict] | None = None
+    # M2.4 (#92) Copilot 1 回目指摘: Notion fetch 例外時に memories=[] のまま
+    # 落ちると diagnostics で「取得済 0 件」と誤認するため、except 句でフラグ
+    # を立てて _build_prime_diagnostics に渡し、明示的な「取得失敗」行を出す。
+    notion_fetch_error: str | None = None
     if api_token and db_id:
         try:
             api = NotionAPIClient(
@@ -1266,6 +1270,10 @@ def _handle_prime(args, config) -> int:
             # Notion fetch（Memory / Workflows / Work Items / Review Issues /
             # Gates いずれか）で例外が出た場合、取得済みの部分結果で続行
             # （Copilot 指摘で「Project Memory」固有メッセージ → generic 化）。
+            # M2.4 Copilot 1 回目指摘: stderr の warning は stdout-only 運用
+            # (例: hokusai prime ... > prime.md) では見えないため、フラグ化
+            # して diagnostics 経路で stdout 側にも「取得失敗」を必ず残す。
+            notion_fetch_error = f"{type(e).__name__}: {e}"
             print(
                 f"⚠ prime context（Notion）取得で失敗（部分結果で続行）: {e}",
                 file=sys.stderr,
@@ -1287,6 +1295,7 @@ def _handle_prime(args, config) -> int:
         review_issues=review_issues,
         workflow_gates_db_id=workflow_gates_db_id,
         gates=gates,
+        notion_fetch_error=notion_fetch_error,
     )
 
     if output_format == "json":
@@ -1331,6 +1340,7 @@ def _build_prime_diagnostics(
     review_issues: list[dict] | None,
     workflow_gates_db_id: str,
     gates: list[dict] | None,
+    notion_fetch_error: str | None = None,
 ) -> list[str]:
     """`hokusai prime` 出力用の診断行リストを組み立てる（M2.4 / #92）。
 
@@ -1338,11 +1348,15 @@ def _build_prime_diagnostics(
     以下のいずれかの 1 行文字列で表現する:
 
     - Notion 連携自体が無効: `Notion 連携: 無効 (notion_dashboard.enabled=false)`
+    - Notion fetch 例外発生: `Notion: 取得失敗 (<exception type>: ...)`
+      → 0 件と区別するため、token / DB ID の有無より先に出す（Copilot 1 回目
+      指摘: stderr warning は stdout-only 運用で見えないので diagnostics 経路
+      でも明示）
     - API token 未設定: `Notion API Token: 未設定 (env XXX)`
     - 各 DB ID 未設定: `<DB 名>: 未設定 (env XXX)`
-    - 取得未試行（workflow が Notion 側に未同期 / Workflows DB ID 未設定で
-      workflow_page_id を解決できない場合等、`_handle_prime` で work_items /
-      review_issues / gates が None のまま）: `<DB 名>: 未取得 (理由)`
+    - 取得未試行（None になる理由を api_token / workflows_db_id の状態で分岐:
+      Copilot 1 回目指摘で「Workflows DB ID 未設定」一律表示は誤誘導と判明）:
+      `<DB 名>: 未取得 (<具体的な理由>)`
     - 取得済 0 件: `<DB 名>: 取得済 0 件`
 
     出力は呼び出し側（renderer）が italic bullet として整形する想定。"""
@@ -1353,6 +1367,10 @@ def _build_prime_diagnostics(
             "Notion 連携: 無効 (notion_dashboard.enabled=false)"
         )
         return diagnostics
+
+    # Notion fetch 例外があった場合は最初に明示（0 件と区別、stdout 経路で見える）
+    if notion_fetch_error:
+        diagnostics.append(f"Notion: 取得失敗 ({notion_fetch_error})")
 
     # API token 単独で判定（token が無いと _handle_prime はそもそも Notion
     # 呼び出しを走らせず memories=[] / 他=None になるので、その前に出す）
@@ -1367,6 +1385,10 @@ def _build_prime_diagnostics(
             "Project Memory DB: 未設定 "
             f"(env {notion_cfg.project_memory_db_id_env})"
         )
+    elif notion_fetch_error:
+        # fetch 例外時は 0 件と区別するため Project Memory DB レベルでは
+        # 何も追加しない（先頭の「Notion: 取得失敗」で全体状態を表現済み）
+        pass
     elif api_token and not memories:
         # token + db_id が揃って fetch を試みたが 0 件
         diagnostics.append("Project Memory DB: 取得済 0 件")
@@ -1384,17 +1406,24 @@ def _build_prime_diagnostics(
         )
 
     # workgraph context 3 カテゴリ: list=取得済、None=未取得（DB ID 未設定 or
-    # workflow_page_id 解決失敗）
+    # workflow_page_id 解決失敗 or API token 未設定 or fetch 例外）
     def _section_status(label: str, db_id: str, env_key: str, data) -> str | None:
         if not db_id:
             return f"{label}: 未設定 (env {getattr(notion_cfg, env_key, '')})"
         if data is None:
-            # DB ID あるが取得が走らなかった = workflows_db_id 不足 or
-            # workflow_page_id 解決失敗（workflow が Notion 側に未同期）
-            return (
-                f"{label}: 未取得 "
-                "(Workflows DB ID 未設定 または workflow が Notion 側に未同期)"
-            )
+            # DB ID あるが取得が走らなかった理由を分岐:
+            # 優先順位 1: fetch 例外発生時は「取得失敗」（先頭で全体出力済）
+            # 優先順位 2: API token 未設定 → そもそも fetch ループに入らない
+            # 優先順位 3: workflows_db_id 未設定 → workflow_page_id 解決不能
+            # 優先順位 4: 上記以外 → workflow が Notion 側に未同期
+            # （Copilot 1 回目指摘: 一律「Workflows DB ID 未設定」は誤誘導）
+            if notion_fetch_error:
+                return f"{label}: 未取得 (Notion 取得失敗のため skip)"
+            if not api_token:
+                return f"{label}: 未取得 (API Token 未設定)"
+            if not workflows_db_id:
+                return f"{label}: 未取得 (Workflows DB ID 未設定)"
+            return f"{label}: 未取得 (workflow が Notion 側に未同期)"
         if not data:
             return f"{label}: 取得済 0 件"
         return None  # 取得済かつ非空 → diagnostics に出さない

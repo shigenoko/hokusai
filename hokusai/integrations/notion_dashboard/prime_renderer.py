@@ -114,7 +114,11 @@ def render_prime_markdown(
             for diag in diagnostics:
                 # 各行は呼び出し側が既に整形済み（"Project Memory DB: 未設定
                 # (env XXX)" 等）。renderer は italic 化と bullet 化のみ担当。
-                lines.append(f"- _{diag}_")
+                # italic は `*...*` を使う: 診断行に含まれる env 変数名（例
+                # `HOKUSAI_NOTION_PROJECT_MEMORY_DB_ID`）の `_` が `_..._`
+                # 構文の終端と解釈されて表示が崩れるのを避けるため
+                # （PR #93 Copilot 1 回目指摘）。
+                lines.append(f"- *{diag}*")
         lines.append("")
         return "\n".join(lines)
 

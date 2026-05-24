@@ -965,8 +965,10 @@ def test_diagnostics_workgraph_section_distinguishes_unset_vs_unfetched_vs_empty
     cfg = _NotionCfgStub()
     # work_items_db_id は設定済だが workflow_page_id 解決失敗等で fetch 未試行
     kwargs = _empty_kwargs(cfg)
+    kwargs["api_token"] = "tok"
+    kwargs["workflows_db_id"] = "wfdb"
     kwargs["work_items_db_id"] = "wdb"
-    kwargs["work_items"] = None  # 未取得
+    kwargs["work_items"] = None  # 未取得（workflow 未同期想定）
     kwargs["review_issues_db_id"] = "rdb"
     kwargs["review_issues"] = []  # 取得済 0 件
     # gates 系は db_id 未設定のまま → 未設定
@@ -975,6 +977,7 @@ def test_diagnostics_workgraph_section_distinguishes_unset_vs_unfetched_vs_empty
     work_lines = [d for d in diag if d.startswith("Work Items DB:")]
     assert len(work_lines) == 1
     assert "未取得" in work_lines[0]
+    assert "workflow が Notion 側に未同期" in work_lines[0]
 
     review_lines = [d for d in diag if d.startswith("Review Issues DB:")]
     assert len(review_lines) == 1
@@ -983,6 +986,67 @@ def test_diagnostics_workgraph_section_distinguishes_unset_vs_unfetched_vs_empty
     gate_lines = [d for d in diag if d.startswith("Workflow Gates DB:")]
     assert len(gate_lines) == 1
     assert "未設定" in gate_lines[0]
+
+
+def test_diagnostics_unfetched_reason_branches_by_token_and_workflows_db():
+    """workgraph 3 カテゴリの「未取得」理由を api_token / workflows_db_id の
+    状態で分岐させる（Copilot 1 回目指摘: 一律「Workflows DB ID 未設定」は
+    誤誘導）。優先順位: fetch_error > token 未設定 > workflows_db_id 未設定
+    > workflow 未同期."""
+    cfg = _NotionCfgStub()
+
+    # ケース A: token 未設定 → "未取得 (API Token 未設定)"
+    kwa = _empty_kwargs(cfg)
+    kwa["work_items_db_id"] = "wdb"
+    kwa["work_items"] = None
+    diag_a = _build_prime_diagnostics(**kwa)
+    work_a = [d for d in diag_a if d.startswith("Work Items DB:")][0]
+    assert "API Token 未設定" in work_a
+
+    # ケース B: token あり / workflows_db_id 未設定 → "未取得 (Workflows DB ID 未設定)"
+    kwb = _empty_kwargs(cfg)
+    kwb["api_token"] = "tok"
+    kwb["work_items_db_id"] = "wdb"
+    kwb["work_items"] = None
+    diag_b = _build_prime_diagnostics(**kwb)
+    work_b = [d for d in diag_b if d.startswith("Work Items DB:")][0]
+    assert "Workflows DB ID 未設定" in work_b
+
+    # ケース C: token + workflows_db_id 揃い、None → "workflow が Notion 側に未同期"
+    kwc = _empty_kwargs(cfg)
+    kwc["api_token"] = "tok"
+    kwc["workflows_db_id"] = "wfdb"
+    kwc["work_items_db_id"] = "wdb"
+    kwc["work_items"] = None
+    diag_c = _build_prime_diagnostics(**kwc)
+    work_c = [d for d in diag_c if d.startswith("Work Items DB:")][0]
+    assert "workflow が Notion 側に未同期" in work_c
+
+
+def test_diagnostics_emits_notion_fetch_error_line_when_error_present():
+    """Notion fetch 例外時は先頭に「Notion: 取得失敗」を出し、Project Memory
+    の「取得済 0 件」誤認を避ける（Copilot 1 回目指摘: stderr warning は
+    stdout-only 運用で見えないため stdout 経路にも残す）."""
+    cfg = _NotionCfgStub()
+    kwargs = _empty_kwargs(cfg)
+    kwargs["api_token"] = "tok"
+    kwargs["memories_db_id"] = "pmdb"
+    kwargs["memories"] = []  # 通常なら「取得済 0 件」だが fetch_error 優先
+    kwargs["notion_fetch_error"] = "ConnectionError: timed out"
+    diag = _build_prime_diagnostics(**kwargs)
+
+    # 取得失敗行が先頭付近に出る
+    assert any(
+        d.startswith("Notion: 取得失敗") and "ConnectionError" in d
+        for d in diag
+    )
+    # Project Memory DB の「取得済 0 件」誤認は出さない
+    assert not any(d == "Project Memory DB: 取得済 0 件" for d in diag)
+    # workgraph 3 カテゴリも fetch_error 経路の「取得失敗のため skip」
+    kwargs["work_items_db_id"] = "wdb"
+    diag2 = _build_prime_diagnostics(**kwargs)
+    wi_line = [d for d in diag2 if d.startswith("Work Items DB:")][0]
+    assert "Notion 取得失敗のため skip" in wi_line
 
 
 def test_diagnostics_omits_section_when_data_present():
