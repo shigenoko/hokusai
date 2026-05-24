@@ -269,7 +269,7 @@ fallback は以下のいずれかとする。
 * Human Approval gate を作成する
 * CLI / Operations Console に明示的な再実行候補を出す
 
-本節の fallback ルートに入るのは、policy が明示的に `block` / `require_human_approval` を返した場合に限る。policy 評価そのものが内部例外で失敗したケース（allowlist データの読み込み失敗 / context 不足等）は §4.4 fail-open 原則を適用し、workflow 進行を止めず透過動作にフォールバックする。意図的な enforcement と Gateway 内部不具合を運用上区別するため。
+本節の fallback ルートに入るのは、policy が明示的に `block` / `require_human_approval` を返した場合に限る。policy 評価そのものが内部例外で失敗したケース（allowlist データの読み込み失敗 / context 不足等）は §4.4 fail-open 原則を適用し、workflow 進行を止めず透過動作で継続する（本節の fallback ルートには入らない）。意図的な enforcement と Gateway 内部不具合を運用上区別するため。
 
 ---
 
@@ -584,6 +584,7 @@ hokusai/
 * email / phone / credit card / My Number / secret-like token を検出できる
 * redaction 後の prompt を生成できる
 * secret / PII 実値が audit log / Notion / Operations Console に保存されない
+* fail-open で抑制した内部例外について、debug log に `exc.args` / `str(exc)` 由来のメッセージ本文が出力されない（呼び出し文脈の固定メッセージ + 例外型名 + frame 一覧のみ。§4.4 fail-open 原則）
 * dry-run で送信前 decision を確認できる
 * audit log に request_id / profile / workflow / phase / provider / model / decision が残る
 * Operations Console で spend / redaction / blocked request を確認できる
