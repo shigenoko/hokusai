@@ -301,15 +301,21 @@ def try_resolve_default_profile_name() -> str | None:
     if profile is None:
         return None
     try:
-        # is_file() で確認（PR #95 Copilot Round 4 指摘）。
-        # exists() だけだと「ディレクトリ」や「broken symlink」も True を返し、
-        # 後段 load_config_from_file() の open() が IsADirectoryError /
-        # PermissionError で落ちる。is_file() は regular file かつ readable な
-        # symlink 解決先を要求するため、implicit 経路の fail-safe 契約に整合。
+        # is_file() は regular file かつ symlink 解決可能であることを保証する
+        # が、読み取り権限までは保証しない（PR #95 Copilot Round 5 指摘）。
+        # ディレクトリ / broken symlink を弾く第一段としてまず判定する。
         if not profile.config_path.is_file():
             return None
+        # 実際に open + read できるところまで検証（PR #95 Copilot Round 5 指摘）。
+        # is_file() を通っても chmod 000 等で unreadable だと後段
+        # load_config_from_file() の open() で PermissionError が出る。
+        # 1 バイト読み込みで open + read 権限を実環境で確認し、ダメなら
+        # None を返して implicit 経路の fail-safe 契約を担保する。
+        with profile.config_path.open("rb") as f:
+            f.read(1)
     except Exception:
-        # Path 操作（symlink loop / permission 等）の異常も fail-safe で None
+        # Path 操作 / open / read 中の各種異常（symlink loop / permission /
+        # I/O エラー等）も fail-safe で None
         return None
     return name
 

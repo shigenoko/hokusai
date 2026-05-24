@@ -859,6 +859,42 @@ def test_try_resolve_default_profile_returns_none_when_config_is_directory(
     assert try_resolve_default_profile_name() is None
 
 
+def test_try_resolve_default_profile_returns_none_when_config_unreadable(
+    tmp_path, monkeypatch
+):
+    """default_profile の config が unreadable (chmod 000 等) のケースも
+    None を返し implicit 経路の fail-safe 契約を担保する（PR #95 Copilot
+    Round 5 指摘: is_file() だけだと readable まで保証されず後段 open() が
+    PermissionError で落ちる）.
+
+    Windows では chmod の挙動が異なるため Unix 系のみで意味のあるテスト
+    （CI は Linux/macOS）."""
+    import os
+    import stat
+
+    from hokusai.config.profiles import try_resolve_default_profile_name
+
+    if os.name == "nt":
+        pytest.skip("chmod-based unreadable test is Unix-specific")
+
+    cfg = tmp_path / "unreadable.yaml"
+    cfg.write_text("project_root: /tmp/x\n")
+    # 読み取り不能にする
+    cfg.chmod(0o000)
+    try:
+        registry = tmp_path / "profiles.yaml"
+        registry.write_text(yaml.safe_dump({
+            "default_profile": "a-co",
+            "profiles": {"a-co": {"config": str(cfg)}},
+        }))
+        monkeypatch.setenv("HOKUSAI_PROFILES_FILE", str(registry))
+
+        assert try_resolve_default_profile_name() is None
+    finally:
+        # tmp_path cleanup のために権限を戻す
+        cfg.chmod(stat.S_IRUSR | stat.S_IWUSR)
+
+
 def test_assert_profile_config_exclusive_detects_empty_profile_with_config(
     tmp_path,
 ):
