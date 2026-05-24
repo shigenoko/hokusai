@@ -2222,47 +2222,49 @@ def _handle_cleanup(args, config):
 
     elif args.stale:
         # 完了済み workflow の worktree を一括削除
+        # PR #101 Copilot Round 2 #6 指摘: 旧実装は worktree_root 不在時に
+        # `return` で関数を抜けていたため、`--stale --gc-workflows` 併用時に
+        # 後段の GC post-action に到達できないバグがあった。worktree 走査が
+        # no-op になるだけにして、writeback cleanup と GC は必ず実行する。
         workflows = store.list_active_workflows()
-
-        # アクティブでない workflow（Phase 10 完了済み）の state を取得
-        # list_active_workflows は current_phase < 10 のみなので、
-        # worktree_root を直接スキャンする
         worktree_root = config.worktree_root
-        if not worktree_root.exists():
-            print("✓ worktree ディレクトリが存在しません。削除対象なし。")
-            return
-
-        active_ids = {w["workflow_id"] for w in workflows}
         cleaned = 0
 
-        for wt_dir in worktree_root.iterdir():
-            if not wt_dir.is_dir():
-                continue
-            # ディレクトリ名から workflow_id を抽出（{repo_name}_{wf-xxxx}）
-            parts = wt_dir.name.rsplit("_wf-", 1)
-            if len(parts) == 2:
-                wf_id = f"wf-{parts[1]}"
-                if wf_id not in active_ids:
+        if not worktree_root.exists():
+            print("✓ worktree ディレクトリが存在しません。worktree 削除はスキップ。")
+        else:
+            active_ids = {w["workflow_id"] for w in workflows}
+
+            for wt_dir in worktree_root.iterdir():
+                if not wt_dir.is_dir():
+                    continue
+                # ディレクトリ名から workflow_id を抽出（{repo_name}_{wf-xxxx}）
+                parts = wt_dir.name.rsplit("_wf-", 1)
+                if len(parts) == 2:
+                    wf_id = f"wf-{parts[1]}"
+                    if wf_id not in active_ids:
+                        try:
+                            import shutil
+                            shutil.rmtree(wt_dir)
+                            print(f"🧹 stale 削除: {wt_dir}")
+                            cleaned += 1
+                        except Exception as e:
+                            print(f"⚠️ 削除失敗: {wt_dir}: {e}")
+
+            # git worktree prune で削除済みディレクトリの登録を解除
+            if cleaned > 0:
+                for repo in config.get_all_repositories():
                     try:
-                        import shutil
-                        shutil.rmtree(wt_dir)
-                        print(f"🧹 stale 削除: {wt_dir}")
-                        cleaned += 1
-                    except Exception as e:
-                        print(f"⚠️ 削除失敗: {wt_dir}: {e}")
+                        git = GitClient(str(repo.path))
+                        git._run_git("worktree", "prune")
+                    except Exception:
+                        pass
 
-        # git worktree prune で削除済みディレクトリの登録を解除
-        if cleaned > 0:
-            for repo in config.get_all_repositories():
-                try:
-                    git = GitClient(str(repo.path))
-                    git._run_git("worktree", "prune")
-                except Exception:
-                    pass
-
-        print(f"✓ {cleaned} 件の stale worktree を削除しました")
+            print(f"✓ {cleaned} 件の stale worktree を削除しました")
 
         # Phase E (v0.4.0): writeback errors / idempotency を 30 日経過で削除
+        # worktree_root 不在でも実行する（DB 側のクリーンアップは worktree
+        # の有無と独立）。
         try:
             _cleanup_writeback_old_errors(config)
         except Exception as e:
@@ -2298,8 +2300,11 @@ def _gc_old_workflows(store, retention_days: int) -> None:
     """`hokusai cleanup --gc-workflows` の本体ハンドラ（Issue #100 / M2.5）。
 
     SQLiteStore.delete_old_completed_workflows を呼び、count summary を
-    stdout に出力する。`retention_days < 1` は store 側で ValueError なので
-    呼び出し側で catch して user-friendly メッセージに変換する想定。
+    stdout に出力する。`retention_days < 1` の入力値検証は argparse 側
+    (`_positive_retention_days`) で事前に reject される設計なので、ここでは
+    例外変換は行わない（PR #101 Copilot Round 2 #3 指摘で docstring 整合）。
+    予期せぬ実行時例外（DB lock 等）は呼び出し側 `_handle_cleanup` の
+    try/except で stderr 出力 + sys.exit(1) に変換される。
     """
     counts = store.delete_old_completed_workflows(
         retention_days=retention_days

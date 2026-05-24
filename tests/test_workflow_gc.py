@@ -272,9 +272,7 @@ def test_delete_old_completed_workflows_cascades_all_dependent_tables(tmp_path):
             assert keep_rows == 1, f"wf-keep should remain in {table}"
 
 
-def test_delete_old_completed_workflows_skips_missing_legacy_tables(
-    tmp_path, monkeypatch
-):
+def test_delete_old_completed_workflows_skips_missing_legacy_tables(tmp_path):
     """レガシー DB で dependent table が存在しないケースでも例外を投げず、
     counts は 0 として返る（v0.3.x 後方互換）."""
     store = _make_store(tmp_path)
@@ -320,17 +318,6 @@ def test_delete_old_completed_workflows_propagates_real_operational_errors(
 
     # _connect を上書きして、DELETE 実行時に locked エラーを返す fake conn を返す
     real_connect = store._connect
-
-    class _FakeCursor:
-        def __init__(self, real_cursor):
-            self._real = real_cursor
-            self.rowcount = 0
-
-        def fetchall(self):
-            return self._real.fetchall()
-
-        def fetchone(self):
-            return self._real.fetchone()
 
     class _FakeConn:
         def __init__(self, real):

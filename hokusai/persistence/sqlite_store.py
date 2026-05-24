@@ -1213,8 +1213,11 @@ class SQLiteStore:
         安全性:
         - `current_phase >= 10` のみ対象。進行中 workflow は絶対に削除しない。
         - `retention_days < 1` は ValueError（最小 1 日の保持を強制）。
-        - レガシー DB で dependent table が存在しないケースは skip して継続
-          （`sqlite3.OperationalError` を握り潰し counts に 0 を入れる）。
+        - レガシー DB で dependent table が存在しないケースは
+          `sqlite_master` を事前 query して存在テーブルのみ対象とする方式で
+          skip する（PR #101 Copilot Round 1 #1 指摘で try/except 握り潰しを
+          廃止。これにより DB lock / I/O error / SQL typo 等の真の異常は正しく
+          上位に伝播する）。
         - 単一 transaction 内で実行（依存テーブル削除途中で失敗しても
           workflows は残し、全体 rollback される）。
 
@@ -1223,8 +1226,11 @@ class SQLiteStore:
                 前の completed workflow が削除対象。既定 90 日。
 
         Returns:
-            `{"workflows": N, "checkpoints": N, ...}` 形式の per-table 削除
-            件数辞書。dependent table が不在で skip した場合も 0 で含まれる。
+            `{"workflows": N, "checkpoints": N, ...}` 形式の per-table 実
+            削除件数辞書（chunk ごとの `cursor.rowcount` を加算した実数で、
+            SELECT 後の race condition でズレないようにする。PR #101 Copilot
+            Round 2 #2 指摘）。dependent table が `sqlite_master` で不在なら
+            0 で含まれる。
 
         Raises:
             ValueError: `retention_days < 1`
@@ -1287,16 +1293,20 @@ class SQLiteStore:
                     deleted += sub_cursor.rowcount
                 counts[table] = deleted
 
-            # 5. 最後に workflows 自体を削除
+            # 5. 最後に workflows 自体を削除（PR #101 Copilot Round 2 #2 指摘:
+            #    len(target_ids) ではなく実際の rowcount を加算し、SELECT 後の
+            #    race condition で別プロセスが消した場合の counts ズレを防ぐ）
+            workflows_deleted = 0
             for i in range(0, len(target_ids), chunk_size):
                 chunk = target_ids[i:i + chunk_size]
                 placeholders = ",".join("?" * len(chunk))
-                conn.execute(
+                cursor = conn.execute(
                     f"DELETE FROM workflows "
                     f"WHERE workflow_id IN ({placeholders})",
                     chunk,
                 )
-            counts["workflows"] = len(target_ids)
+                workflows_deleted += cursor.rowcount
+            counts["workflows"] = workflows_deleted
 
             conn.commit()
 
