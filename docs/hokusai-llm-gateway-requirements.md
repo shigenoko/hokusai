@@ -245,7 +245,7 @@ LLM Gateway の **内部処理が失敗しても**、HOKUSAI の workflow 進行
 ログ要件:
 
 * fail-open で抑制した例外は debug log に **例外型名 + frame 一覧**（filename:lineno in function）のみを残す。`exc.args` 由来のメッセージ本文を log stream に流してはならない（prompt 経由で secret / PII が例外メッセージに混入したケースでの log 漏洩を防ぐため。要件 §14 受け入れ基準と `log_suppressed_exception` 既存実装で担保）。
-* call site の特定は上記 frame 一覧から行う（呼び出し元の filename / lineno / function name が含まれる）。現状の `log_suppressed_exception` には `workflow_id` / `phase` / `provider` 等のドメイン context は含まれていないため、頻度監視・集計・Operations Console での fail-open イベント一覧表示が必要になった段階では、debug log を拡張するのではなく audit_logs テーブル側に専用 status（例: `decision="suppressed_internal_error"`）を追加する経路を別途検討する（M2 系列以降）。
+* call site の特定は上記 frame 一覧から行う（呼び出し元の filename / lineno / function name が含まれる）。現状の `log_suppressed_exception` には `workflow_id` / `phase` / `provider` 等のドメイン context は含まれていないため、頻度監視・集計・Operations Console での fail-open イベント一覧表示が必要になった段階では、debug log を拡張するのではなく `audit_logs` テーブル側を活用する経路を別途検討する（M2 系列以降）。具体的には既存の interceptor 経路（`SQLiteStore.add_audit_log(action="llm_gateway_decision", status=decision, ...)`）に対して、fail-open イベント専用の `status` 値（例: `status="suppressed_internal_error"`）を追加し、§4.3 decision 値とは別の vocabulary として `status` カラム側で識別する。`action` カラム名は据え置く（DB schema 互換のため）。
 
 ---
 
