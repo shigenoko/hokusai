@@ -3571,3 +3571,137 @@ def test_print_notion_db_share_warnings_skips_when_skip_notion_env(
     captured = capsys.readouterr()
     assert "Notion DB share check" not in captured.out
     assert "⚠️" not in captured.out
+
+
+# ---------------------------------------------------------------------------
+# M2.1 (#96): _warn_if_skip_notion_pre_set
+# HOKUSAI_SKIP_NOTION=1 が起動時 env で pre-set のとき profile 整合性 warning
+# ---------------------------------------------------------------------------
+
+
+class _SkipNotionConfigStub:
+    """warning helper 用に notion_dashboard.enabled だけ持つ最小 config スタブ.
+
+    `enabled`:
+    - `True` / `False` → `notion_dashboard = _make_config(enabled=...)` を設定
+    - `None` → `notion_dashboard = None` 属性をセット
+    - `"missing"` → `notion_dashboard` 属性自体を設定しない（getattr default 動作確認用）
+    """
+
+    def __init__(self, *, enabled):
+        if enabled == "missing":
+            return  # attribute 自体を設定しない
+        if enabled is None:
+            self.notion_dashboard = None
+        else:
+            self.notion_dashboard = _make_config(enabled=enabled)
+
+
+def test_warn_skip_notion_no_output_when_env_unset(monkeypatch, capsys):
+    """HOKUSAI_SKIP_NOTION 未設定なら何も出さない（既存挙動維持）."""
+    from hokusai.cli_main import _warn_if_skip_notion_pre_set
+
+    monkeypatch.delenv("HOKUSAI_SKIP_NOTION", raising=False)
+    cfg = _SkipNotionConfigStub(enabled=True)
+
+    _warn_if_skip_notion_pre_set(cfg, profile_label="hokusai")
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+
+
+def test_warn_skip_notion_strong_warning_when_profile_enabled(
+    monkeypatch, capsys
+):
+    """SKIP_NOTION=1 + notion_dashboard.enabled=True → 強い warning."""
+    from hokusai.cli_main import _warn_if_skip_notion_pre_set
+
+    monkeypatch.setenv("HOKUSAI_SKIP_NOTION", "1")
+    cfg = _SkipNotionConfigStub(enabled=True)
+
+    _warn_if_skip_notion_pre_set(cfg, profile_label="hokusai")
+
+    captured = capsys.readouterr()
+    # stderr に強い warning が出る
+    assert "⚠ HOKUSAI_SKIP_NOTION=1" in captured.err
+    assert "profile 'hokusai'" in captured.err
+    assert "notion_dashboard.enabled=true" in captured.err
+    # PR #97 Copilot Round 1 指摘: 「dispatcher は skip」は誤り。Phase 2/3
+    # ノード経路 / CLI 経路は skip され、dispatcher 経路は継続する点を
+    # メッセージで明示する。
+    assert "Phase 2/3" in captured.err
+    assert "dispatcher" in captured.err
+    # 「unset HOKUSAI_SKIP_NOTION を推奨」のガイダンスも入る
+    assert "unset HOKUSAI_SKIP_NOTION" in captured.err
+
+
+def test_warn_skip_notion_info_notice_when_profile_disabled(
+    monkeypatch, capsys
+):
+    """SKIP_NOTION=1 + notion_dashboard.enabled=False → info notice のみ."""
+    from hokusai.cli_main import _warn_if_skip_notion_pre_set
+
+    monkeypatch.setenv("HOKUSAI_SKIP_NOTION", "1")
+    cfg = _SkipNotionConfigStub(enabled=False)
+
+    _warn_if_skip_notion_pre_set(cfg, profile_label="oss")
+
+    captured = capsys.readouterr()
+    # info レベルで「skip して実行します」
+    assert "ℹ HOKUSAI_SKIP_NOTION=1" in captured.err
+    assert "profile 'oss'" in captured.err
+    assert "skip して実行" in captured.err
+    # 強い warning の絵文字や unset 推奨は出ない
+    assert "⚠" not in captured.err
+    assert "unset HOKUSAI_SKIP_NOTION" not in captured.err
+
+
+def test_warn_skip_notion_handles_notion_dashboard_attr_none(
+    monkeypatch, capsys
+):
+    """notion_dashboard 属性が None でも info notice で対応（disabled 同等）.
+
+    PR #97 Copilot Round 2 指摘で、attribute None と attribute missing を
+    別ケースとしてテスト名を区別。helper は `getattr(config, "notion_dashboard",
+    None)` で両者を同じ「None」として扱うが、テスト上は意図を明確化する."""
+    from hokusai.cli_main import _warn_if_skip_notion_pre_set
+
+    monkeypatch.setenv("HOKUSAI_SKIP_NOTION", "1")
+    cfg = _SkipNotionConfigStub(enabled=None)
+    # notion_dashboard 属性は存在し値が None
+    assert hasattr(cfg, "notion_dashboard")
+    assert cfg.notion_dashboard is None
+
+    _warn_if_skip_notion_pre_set(cfg, profile_label=None)
+
+    captured = capsys.readouterr()
+    # profile_label が None なら "current profile" 表記
+    assert "ℹ HOKUSAI_SKIP_NOTION=1" in captured.err
+    assert "current profile" in captured.err
+    assert "⚠" not in captured.err
+
+
+def test_warn_skip_notion_handles_notion_dashboard_attr_missing(
+    monkeypatch, capsys
+):
+    """notion_dashboard 属性自体が config に存在しないケースも info notice
+    で対応する（PR #97 Copilot Round 2 指摘で attr missing 経路を分離）.
+
+    helper は `getattr(config, "notion_dashboard", None)` で default None を
+    返すため、attribute None と同じ挙動になる。古い WorkflowConfig や任意
+    の dataclass で notion_dashboard を持たないケースの回帰防止."""
+    from hokusai.cli_main import _warn_if_skip_notion_pre_set
+
+    monkeypatch.setenv("HOKUSAI_SKIP_NOTION", "1")
+    cfg = _SkipNotionConfigStub(enabled="missing")
+    # attribute 自体が存在しないことを明示
+    assert not hasattr(cfg, "notion_dashboard")
+
+    _warn_if_skip_notion_pre_set(cfg, profile_label="legacy")
+
+    captured = capsys.readouterr()
+    # attr 不在 → notion_dashboard=None と同等 → info notice
+    assert "ℹ HOKUSAI_SKIP_NOTION=1" in captured.err
+    assert "profile 'legacy'" in captured.err
+    assert "⚠" not in captured.err

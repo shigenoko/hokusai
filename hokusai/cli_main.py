@@ -714,6 +714,12 @@ def main():
             sys.exit(1)
         raise
 
+    # M2.1 (#96): HOKUSAI_SKIP_NOTION=1 が起動時 env で pre-set されている
+    # ケースの profile 整合性 warning。check_notion_connection が後段で
+    # set する経路と区別するため、subcommand dispatch より前 (config 解決
+    # 直後) で判定する。
+    _warn_if_skip_notion_pre_set(config, profile_arg)
+
     # dashboard コマンド: config 解決後に起動（WorkflowRunner は不要）
     if args.command == "dashboard":
         sys.exit(_handle_dashboard(args, config))
@@ -1885,6 +1891,67 @@ def _handle_profile_doctor(name: str, registry, *, deep: bool = False) -> int:
 
     print("OK: 問題ありません")
     return 0
+
+
+def _warn_if_skip_notion_pre_set(config, profile_label: str | None) -> None:
+    """`HOKUSAI_SKIP_NOTION=1` が起動時 env で既にセットされているケースに
+    対して profile 整合性 warning を出す（Issue #96 / M2.1）。
+
+    findings §1.3: 「HOKUSAI_SKIP_NOTION=1 が profile を跨いで global に
+    残っていると、profile 単位の Notion 設定と矛盾して片方の経路だけ動く
+    状態になる」問題への対応。新しい env naming convention を導入する
+    のは callsite が多いため、最小スコープで「起動時 pre-set 状態で
+    Notion 設定済み profile を実行している」mismatch を警告する。
+
+    判定ルール:
+    - `HOKUSAI_SKIP_NOTION` が "1" でない → 何もしない（既存挙動）
+    - "1" かつ profile の `notion_dashboard.enabled=True` → 強い warning
+      （別 profile 用に設定された SKIP フラグが残っている可能性）
+    - "1" かつ `notion_dashboard.enabled=False` / 不在 → info notice
+      （skip は意図通り、profile が Notion 連携 off）
+
+    `check_notion_connection` が後段で SKIP_NOTION を set する経路は対象外
+    （`main()` 内で本 helper を呼ぶ位置がそれより前なので、起動時 env と
+    runtime 設定を自然に区別できる）。
+    """
+    import os
+    import sys
+
+    if os.environ.get("HOKUSAI_SKIP_NOTION") != "1":
+        return
+
+    notion_cfg = getattr(config, "notion_dashboard", None)
+    enabled = notion_cfg is not None and getattr(notion_cfg, "enabled", False)
+    profile_text = (
+        f"profile '{profile_label}'" if profile_label else "current profile"
+    )
+
+    if enabled:
+        # mismatch: Notion 設定済み profile に対して global な SKIP が残存。
+        # PR #97 Copilot Round 1 指摘: dispatcher (_safe_notion_dispatch /
+        # NotionSyncDispatcher.dispatch) は HOKUSAI_SKIP_NOTION を見ておら
+        # ず、env が揃っていれば継続する。一方で Phase 2/3 ノードの Notion
+        # 書き込み (notion_helpers.py) / CLI 系操作 (task_backend, cancel
+        # reason, connection_status) / workflow.py の page_id 解決系は
+        # SKIP_NOTION を見て早期 return する。この食い違いが findings §1.3
+        # で言う「片方だけ動く」状態。
+        message = (
+            f"⚠ HOKUSAI_SKIP_NOTION=1 が設定されていますが {profile_text} は "
+            "notion_dashboard.enabled=true です。Phase 2/3 ノードの Notion "
+            "書き込みや CLI 系の Notion 操作は skip される一方で、dispatcher "
+            "経路 (workflow_started / pr_created 等) は notion_dashboard "
+            "設定が揃っていれば継続するため、片方だけ動く整合性に注意して "
+            "ください。別 profile からの持ち越しの場合は `unset "
+            "HOKUSAI_SKIP_NOTION` を推奨。"
+        )
+        print(message, file=sys.stderr)
+    else:
+        # 想定どおりの skip（Notion 連携 off な profile）
+        print(
+            f"ℹ HOKUSAI_SKIP_NOTION=1: {profile_text} の Notion 連携を "
+            "skip して実行します。",
+            file=sys.stderr,
+        )
 
 
 def _print_notion_db_share_warnings(config) -> None:
