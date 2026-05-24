@@ -136,10 +136,12 @@ def print_outbox_summary(
 ) -> None:
     """Notion outbox の保留 / 永続 error 件数を表示する（Issue #84 / M0.3）。
 
-    `hokusai status` の末尾で呼ばれる。件数 0 なら何も出さず、不要な
-    出力を抑制する。`verbose=True` のとき `recent_errors` から直近の
-    last_error を抜粋表示する（dogfooding round 1-4 で発覚した「sqlite3
-    直叩きでないと outbox 失敗に気付けない」問題への対策）。
+    `hokusai status <workflow_id>` および `hokusai list`（WorkflowRunner.status
+    が workflow_id 有無いずれで呼ばれた場合も）の末尾で呼ばれる。件数 0
+    なら何も出さず、不要な出力を抑制する。`verbose=True` のとき
+    `recent_errors` から直近の last_error を抜粋表示する（dogfooding round
+    1-4 で発覚した「sqlite3 直叩きでないと outbox 失敗に気付けない」問題
+    への対策）。
 
     Args:
         pending: notion_sync_outbox の保留件数
@@ -176,9 +178,11 @@ def print_outbox_summary(
     elif failed > 0:
         # failed-only ケース: outbox は空だが永続 error はある。verbose でも
         # 詳細を出せないことを明示してユーザーが混乱しないようにする。
+        # DB パスは config/profile/env で変わるため固定 path は出さず、
+        # テーブル名のみ案内する（Issue #84 Copilot Round 4 指摘）。
         print(
             "   permanent error の詳細は後続 PR で表示予定。"
-            "現状は `sqlite3 ~/.hokusai/.../workflow.db` で確認してください。"
+            "現状は workflow.db の notion_sync_errors テーブルを sqlite3 で確認してください。"
         )
 
 

@@ -3402,7 +3402,11 @@ def test_print_outbox_summary_explains_failed_only_in_verbose(capsys):
     assert "failed=3" in captured.out
     # permanent error の案内が出る
     assert "permanent error" in captured.out
+    assert "notion_sync_errors" in captured.out
     assert "sqlite3" in captured.out
+    # 固定パスは含めない（DB path が profile/env で変わるため、Issue #84
+    # Copilot Round 4 指摘）
+    assert "~/.hokusai" not in captured.out
 
 
 def test_print_outbox_summary_shows_last_errors_in_verbose(capsys):
