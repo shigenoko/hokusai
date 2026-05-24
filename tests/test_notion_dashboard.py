@@ -3305,6 +3305,98 @@ def test_check_db_share_health_treats_5xx_as_non_share_error(store, monkeypatch)
     assert "500" in msg
 
 
+def test_fetch_recent_outbox_with_errors_returns_only_failed_entries(store):
+    """outbox の中で last_error が記録されているもののみ返す（Issue #84 / M0.3）"""
+    # 直接 SQL で fixture を準備
+    import sqlite3
+
+    with sqlite3.connect(store.db_path) as conn:
+        # 成功して outbox に積まれていないものは検証範囲外
+        # 失敗で last_error あり 2 件、last_error 空 1 件 を挿入
+        conn.execute(
+            """
+            INSERT INTO notion_sync_outbox (
+                idempotency_key, workflow_id, event_type, payload_json,
+                attempts, last_error, created_at, next_attempt_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("k1", "wf-1", "workflow_started", "{}", 3, "404 error", "2026-01-01", "2026-01-02T01:00:00"),
+        )
+        conn.execute(
+            """
+            INSERT INTO notion_sync_outbox (
+                idempotency_key, workflow_id, event_type, payload_json,
+                attempts, last_error, created_at, next_attempt_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("k2", "wf-2", "phase_changed", "{}", 1, "rate limit", "2026-01-01", "2026-01-02T02:00:00"),
+        )
+        conn.execute(
+            """
+            INSERT INTO notion_sync_outbox (
+                idempotency_key, workflow_id, event_type, payload_json,
+                attempts, last_error, created_at, next_attempt_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("k3", "wf-3", "phase_changed", "{}", 0, None, "2026-01-01", "2026-01-02T03:00:00"),
+        )
+        conn.commit()
+
+    rows = store.fetch_recent_outbox_with_errors(limit=10)
+    # last_error あり 2 件のみ（NULL は除外）
+    assert len(rows) == 2
+    # next_attempt_at 降順なので k2 が先、k1 が後
+    assert rows[0]["workflow_id"] == "wf-2"
+    assert rows[0]["last_error"] == "rate limit"
+    assert rows[1]["workflow_id"] == "wf-1"
+    assert rows[1]["last_error"] == "404 error"
+
+
+def test_print_outbox_summary_skips_when_all_zero(capsys):
+    """件数 0 のときは何も表示しない（Issue #84 / M0.3）"""
+    from hokusai.ui.console import print_outbox_summary
+
+    print_outbox_summary(pending=0, failed=0)
+    captured = capsys.readouterr()
+    assert captured.out == ""
+
+
+def test_print_outbox_summary_shows_counts_without_verbose(capsys):
+    """件数 > 0 のときサマリ行と --verbose ヒントを表示"""
+    from hokusai.ui.console import print_outbox_summary
+
+    print_outbox_summary(pending=3, failed=1, verbose=False)
+    captured = capsys.readouterr()
+    assert "pending=3" in captured.out
+    assert "failed=1" in captured.out
+    assert "--verbose" in captured.out
+
+
+def test_print_outbox_summary_shows_last_errors_in_verbose(capsys):
+    """verbose=True で recent_errors の抜粋を表示"""
+    from hokusai.ui.console import print_outbox_summary
+
+    print_outbox_summary(
+        pending=2,
+        failed=0,
+        verbose=True,
+        recent_errors=[
+            {
+                "event_type": "workflow_started",
+                "workflow_id": "wf-abc",
+                "attempts": 3,
+                "last_error": "Notion API error 404",
+                "next_attempt_at": "2026-01-02T01:00:00",
+            }
+        ],
+    )
+    captured = capsys.readouterr()
+    assert "workflow_started" in captured.out
+    assert "wf-abc" in captured.out
+    assert "attempts=3" in captured.out
+    assert "404" in captured.out
+
+
 def test_notion_api_client_does_not_sleep_after_final_attempt(monkeypatch):
     """max_attempts=1 のとき、5xx / network error / 429 のいずれが発生しても
     sleep せず即時 raise する（PR #83 Copilot Round 5 指摘: preflight が

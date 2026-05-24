@@ -127,6 +127,49 @@ def print_max_events_reached(max_events: int) -> None:
     print(f"⚠️ 最大イベント数 ({max_events}) に達しました。ワークフローを一時停止します。")
 
 
+def print_outbox_summary(
+    pending: int,
+    failed: int,
+    *,
+    verbose: bool = False,
+    recent_errors: list[dict] | None = None,
+) -> None:
+    """Notion outbox の保留 / 永続 error 件数を表示する（Issue #84 / M0.3）。
+
+    `hokusai status` の末尾で呼ばれる。件数 0 なら何も出さず、不要な
+    出力を抑制する。`verbose=True` のとき `recent_errors` から直近の
+    last_error を抜粋表示する（dogfooding round 1-4 で発覚した「sqlite3
+    直叩きでないと outbox 失敗に気付けない」問題への対策）。
+
+    Args:
+        pending: notion_sync_outbox の保留件数
+        failed: notion_sync_errors の永続 error 件数
+        verbose: True で直近 last_error を表示
+        recent_errors: verbose 時に表示する outbox 行のリスト
+            （`fetch_recent_outbox_with_errors` の戻り値）
+    """
+    if pending == 0 and failed == 0:
+        return  # 何もない → 出力抑制
+
+    print()
+    print(f"📮 Notion 同期 outbox: pending={pending}, failed={failed}")
+    if not verbose:
+        if pending > 0:
+            print(
+                "   詳細な last_error を表示するには `--verbose` を付けて再実行"
+            )
+        return
+
+    if recent_errors:
+        print("   直近の last_error（最新 順）:")
+        for entry in recent_errors:
+            event = entry.get("event_type", "?")
+            wf = entry.get("workflow_id", "?")
+            attempts = entry.get("attempts", 0)
+            err = (entry.get("last_error") or "")[:160]
+            print(f"   - {event} (wf={wf}, attempts={attempts}): {err}")
+
+
 def print_workflow_status(state: dict, phase_names: dict[int, str] | None = None) -> None:
     """
     ワークフロー状態を表示

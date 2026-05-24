@@ -1102,12 +1102,16 @@ class WorkflowRunner:
                 self.compiled_workflow.update_state(config, state, as_node=resume_node)
                 self._run_stream_loop(None, config, workflow_id, resume_from_checkpoint=True)
 
-    def status(self, workflow_id: str | None = None) -> None:
+    def status(
+        self, workflow_id: str | None = None, *, verbose: bool = False
+    ) -> None:
         """
         ワークフローの状態を表示
 
         Args:
             workflow_id: ワークフローID（省略時はアクティブな全ワークフロー）
+            verbose: True のとき outbox の last_error 抜粋を表示
+                （Issue #84 / M0.3）
         """
         if workflow_id:
             state = self.store.load_workflow(workflow_id)
@@ -1115,6 +1119,8 @@ class WorkflowRunner:
                 print_workflow_not_found(workflow_id)
                 return
             self._print_workflow_status(state)
+            # M0.3: 個別 status の末尾に Notion outbox サマリを表示
+            self._print_outbox_summary(verbose=verbose)
         else:
             workflows = self.store.list_active_workflows()
             if not workflows:
@@ -1122,6 +1128,36 @@ class WorkflowRunner:
                 return
 
             print_active_workflows(workflows)
+            # list 経路でも outbox サマリを表示（複数 workflow を見渡せるため）
+            self._print_outbox_summary(verbose=verbose)
+
+    def _print_outbox_summary(self, *, verbose: bool) -> None:
+        """Notion outbox の保留 / 永続 error 件数を表示する（Issue #84 / M0.3）。
+
+        SQLiteStore.count_notion_sync_pending / count_notion_sync_errors で
+        集計、verbose=True なら fetch_recent_outbox_with_errors で抜粋。
+        集計自体の失敗は呼び出し側に伝播させず status 表示は完走させる。
+        """
+        from .ui.console import print_outbox_summary
+
+        try:
+            pending = self.store.count_notion_sync_pending()
+            failed = self.store.count_notion_sync_errors()
+            recent_errors = (
+                self.store.fetch_recent_outbox_with_errors(limit=5)
+                if verbose
+                else None
+            )
+            print_outbox_summary(
+                pending,
+                failed,
+                verbose=verbose,
+                recent_errors=recent_errors,
+            )
+        except Exception as exc:
+            logger.debug(
+                "outbox サマリ表示に失敗 (type=%s)", type(exc).__name__
+            )
 
     def update_pr_status(
         self,
