@@ -81,7 +81,7 @@ cross_review:
   model: codex-mini-latest
   phases: [2, 4]
 
-# LLM Gateway（v0.6.0+ Phase 1 log-only / M1.1+ で block 解禁）
+# LLM Gateway（Phase 1 log-only / Phase 2 M1.1+ で block 解禁）
 # 案件 profile は log_only: true を維持（policy 違反は audit に残すだけで
 # decision="log" 据え置き）。自社 hokusai profile のみ M1.x で log_only: false
 # に切り替え、policy_hits 非空時に decision="block" を audit に残す運用。
