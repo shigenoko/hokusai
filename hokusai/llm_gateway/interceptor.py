@@ -1,10 +1,12 @@
-"""LLM Gateway interceptor 本体（Phase 1: log-only）
+"""LLM Gateway interceptor 本体（Phase 1: log-only / M1.1: block decision 解禁）
 
 Phase 1 (#39) では block / redact / spend cap などの decision は実装せず、
-常に `log` decision を返して prompt を透過させる。送信 prompt の hash と
-context を構造化 log として残し、後段（detector / cap / approval gate）の
-着手前に「どの phase / model / provider がどれだけ呼ばれているか」を可視化
-することが目的。
+常に `log` decision を返して prompt を透過させていた。M1.1 (#86) で
+`log_only=False` + `policy_hits` 非空のときに `decision="block"` を返す経路を
+追加した（実際の送信抑止 = dispatch 側で BLOCK を見て止める配線は M1.2 以降）。
+送信 prompt の hash と context を構造化 log として残し、後段（detector / cap
+/ approval gate）の着手前に「どの phase / model / provider がどれだけ呼ばれて
+いるか」を可視化することが目的。
 
 例外は呼び出し側が握り潰す前提（既存フローへの影響をゼロに保つため、
 ClaudeCodeClient 側で try/except する）。本クラスは正常系で例外を投げない。
@@ -51,9 +53,18 @@ def _reset_audit_store_cache() -> None:
 logger = get_logger("llm_gateway")
 
 
-# Phase 1 で発行する decision 値（Phase 5+ で "block" / "warn" / "redact" 追加予定）
+# interceptor が発行する decision 値。`Decision` (decisions.py) と語彙を揃える。
+# Phase 1 では LOG / SKIPPED のみ使用。M1.1 (#86) で BLOCK を追加し、
+# `_config.log_only=False` かつ `policy_hits` が非空のときに返すようにした
+# （実際の送信抑止 = dispatch 側で BLOCK を見て止める配線は M1.2 以降）。
 DECISION_LOG = "log"
 DECISION_SKIPPED = "skipped"  # Gateway 無効化時
+DECISION_BLOCK = "block"  # log_only=False + policy_hits 非空のとき
+
+# M1.1 で block decision を返す際の reason。audit log の `reason` フィールドに
+# 残り、後段 (Operations Console / 監査) からなぜ block されたかを後追いする
+# 入口になる（hit した個別 policy 名は `policy_hits` 配列側に残る）。
+REASON_PHASE2_POLICY_BLOCK = "phase2_policy_block"
 
 
 # Phase 1 §8a で発行する policy_hits 値（Phase 2 で decision="block" 切替の基礎）
@@ -66,13 +77,16 @@ POLICY_HIT_HIGH_COST_MODEL = "high_cost_model"
 class InterceptorDecision:
     """interceptor の判定結果
 
-    Phase 1 では `decision` は "log" または "skipped" のみ。Phase 5+ で
-    "block" / "warn" / "redact" を追加する。
+    `decision` の取りうる値:
+    - "log": 透過動作（Phase 1 既存）
+    - "skipped": Gateway 無効化時
+    - "block": `log_only=False` + `policy_hits` 非空時 (M1.1 / #86)
+    - "warn" / "redact": Phase 5+ で追加予定
 
-    `policy_hits` は Phase 1 §8a で追加された log-only 評価結果。Phase 2
-    enforcement PR で「policy_hits が非空なら decision="block"」のように
-    切替する前段として、現時点では audit log に積むだけで動作には影響
-    させない。
+    `policy_hits` は Phase 1 §8a で追加された policy 評価結果。M1.1 で
+    `log_only=False` のときに decision="block" の判定材料として利用するよう
+    になった（`log_only=True` 時はこれまで通り audit に積むのみで動作には
+    影響させない）。
     """
 
     decision: str
@@ -82,7 +96,7 @@ class InterceptorDecision:
 
 
 class LLMGatewayInterceptor:
-    """LLM 送信前 governance interceptor（Phase 1: log-only）"""
+    """LLM 送信前 governance interceptor（Phase 1 log-only + M1.1 block 解禁）"""
 
     def __init__(self, config: LLMGatewayConfig):
         self._config = config
@@ -95,42 +109,51 @@ class LLMGatewayInterceptor:
     ) -> InterceptorDecision:
         """prompt 送信直前に呼び、decision を返す。
 
-        Phase 1 は block しない。Gateway が無効化されている場合は
-        `decision="skipped"` を返し、有効化されている場合は decision="log"
-        を返しつつ audit_log_enabled なら構造化 log entry を残す。
+        Gateway が無効化されている場合は `decision="skipped"` を返し、有効化
+        されている場合は policy_hits を評価して decision を組み立てる。
 
-        **`LLMGatewayConfig.log_only` フィールドは Phase 1 では未使用**
-        （schema / loader / audit log には残し、Phase 5+ で block decision
-        が解禁された際に「block するか log のみで止めるか」を制御する
-        フラグとして利用予定）。Phase 1 では実質常に log-only 動作なので
-        参照しなくても挙動は変わらない（PR #40 Copilot 2 回目指摘）。
+        **decision 決定ルール** (M1.1 / #86):
+
+        - `log_only=True` (default) → 常に `decision="log"`。Phase 1 同等の
+          透過動作で、policy_hits の有無に関わらず block しない。
+        - `log_only=False` かつ `policy_hits` が非空 → `decision="block"`,
+          `reason="phase2_policy_block"`。送信を止めたい意思表示を audit に
+          残す（実際の送信抑止は dispatch 側で BLOCK を見て止める配線が
+          M1.2 以降で入る予定）。
+        - `log_only=False` かつ `policy_hits` 空 → `decision="log"`。hit が
+          無いなら block 対象なしなので透過動作を維持する。
 
         Args:
             context: 呼び出し context（少なくとも provider は埋める）
             prompt: 送信予定 prompt（hash / length のみ記録、本文は保存しない）
 
         Returns:
-            InterceptorDecision（Phase 1 は常に "log" or "skipped"）
+            InterceptorDecision（`decision` は "log" / "skipped" / "block"）
         """
         if not self._config.enabled:
             return InterceptorDecision(
                 decision=DECISION_SKIPPED, reason="gateway_disabled"
             )
 
-        if self._config.dry_run:
+        policy_hits = self._evaluate_policy_hits(context)
+
+        if not self._config.log_only and policy_hits:
+            decision = DECISION_BLOCK
+            reason = REASON_PHASE2_POLICY_BLOCK
+        elif self._config.dry_run:
+            decision = DECISION_LOG
             reason = "dry_run_log_only"
         else:
+            decision = DECISION_LOG
             reason = "phase1_log_only"
-
-        policy_hits = self._evaluate_policy_hits(context)
 
         audit_emitted = False
         if self._config.audit_log_enabled:
-            self._emit_audit(context, prompt, DECISION_LOG, reason, policy_hits)
+            self._emit_audit(context, prompt, decision, reason, policy_hits)
             audit_emitted = True
 
         return InterceptorDecision(
-            decision=DECISION_LOG,
+            decision=decision,
             reason=reason,
             audit_emitted=audit_emitted,
             policy_hits=policy_hits,
