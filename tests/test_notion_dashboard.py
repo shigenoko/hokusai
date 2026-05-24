@@ -3705,3 +3705,75 @@ def test_warn_skip_notion_handles_notion_dashboard_attr_missing(
     assert "ℹ HOKUSAI_SKIP_NOTION=1" in captured.err
     assert "profile 'legacy'" in captured.err
     assert "⚠" not in captured.err
+
+
+# ---------------------------------------------------------------------------
+# M2.2 (#98): _warn_cleanup_without_cancel_reason
+# hokusai cleanup で --cancel-reason 未指定 + Notion 設定済みのとき stderr
+# にゴースト発生警告を出す（findings §4.2）
+# ---------------------------------------------------------------------------
+
+
+def test_warn_cleanup_no_reason_warns_when_notion_enabled(monkeypatch, capsys):
+    """--cancel-reason 未指定 + notion_dashboard.enabled=True + SKIP_NOTION
+    未設定 → stderr に強い warning が出る（findings §4.2 ゴースト発生防止）."""
+    from hokusai.cli_main import _warn_cleanup_without_cancel_reason
+
+    monkeypatch.delenv("HOKUSAI_SKIP_NOTION", raising=False)
+    cfg = _SkipNotionConfigStub(enabled=True)
+
+    _warn_cleanup_without_cancel_reason(cfg, workflow_id="wf-abc123")
+
+    captured = capsys.readouterr()
+    # stderr に強い warning
+    assert "⚠ --cancel-reason 未指定" in captured.err
+    assert "wf-abc123" in captured.err
+    # ゴーストレコード問題の説明と推奨フォーマットが入る
+    assert "ゴーストレコード" in captured.err
+    assert "--cancel-reason '<理由>'" in captured.err
+
+
+def test_warn_cleanup_no_reason_silent_when_skip_notion_set(monkeypatch, capsys):
+    """HOKUSAI_SKIP_NOTION=1 のときはユーザ意図 skip を尊重して warning しない."""
+    from hokusai.cli_main import _warn_cleanup_without_cancel_reason
+
+    monkeypatch.setenv("HOKUSAI_SKIP_NOTION", "1")
+    cfg = _SkipNotionConfigStub(enabled=True)
+
+    _warn_cleanup_without_cancel_reason(cfg, workflow_id="wf-xyz")
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+
+
+def test_warn_cleanup_no_reason_silent_when_notion_disabled(
+    monkeypatch, capsys
+):
+    """notion_dashboard.enabled=False なら同期対象なしで warning しない."""
+    from hokusai.cli_main import _warn_cleanup_without_cancel_reason
+
+    monkeypatch.delenv("HOKUSAI_SKIP_NOTION", raising=False)
+    cfg = _SkipNotionConfigStub(enabled=False)
+
+    _warn_cleanup_without_cancel_reason(cfg, workflow_id="wf-xyz")
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
+
+
+def test_warn_cleanup_no_reason_silent_when_notion_dashboard_missing(
+    monkeypatch, capsys
+):
+    """notion_dashboard attribute 不在 / None でも warning しない（連携 off と同等）."""
+    from hokusai.cli_main import _warn_cleanup_without_cancel_reason
+
+    monkeypatch.delenv("HOKUSAI_SKIP_NOTION", raising=False)
+    cfg_none = _SkipNotionConfigStub(enabled=None)
+    cfg_missing = _SkipNotionConfigStub(enabled="missing")
+
+    for cfg in (cfg_none, cfg_missing):
+        _warn_cleanup_without_cancel_reason(cfg, workflow_id="wf-xyz")
+
+    captured = capsys.readouterr()
+    assert captured.err == ""

@@ -2006,6 +2006,42 @@ def _print_notion_db_share_warnings(config) -> None:
         )
 
 
+def _warn_cleanup_without_cancel_reason(config, workflow_id: str) -> None:
+    """`hokusai cleanup` で `--cancel-reason` が未指定のときに、Notion ゴースト
+    レコードが残る可能性を stderr で警告する（Issue #98 / M2.2）。
+
+    findings §4.2: reason 未指定だと worktree は削除されるが Notion Workflows
+    DB Status は更新されないため、ダッシュボード上「アクティブだが worktree 無い」
+    レコードが残る運用穴。
+
+    Notion を意図的に触らないケースでは warning しない（ノイズ防止）:
+    - `HOKUSAI_SKIP_NOTION=1`（ユーザの明示 opt-out）
+    - `notion_dashboard.enabled=False` / `notion_dashboard` 不在（連携 off）
+
+    本 helper は警告のみ、cleanup の中断はしない（既存挙動と完全後方互換）。
+    実 sync を未指定時にも走らせる挙動変更（reason 必須化 or デフォルト値注入）は
+    user impact が大きいため future iteration（別 PR）に切り出す。
+    """
+    import os
+    import sys
+
+    if os.environ.get("HOKUSAI_SKIP_NOTION") == "1":
+        return
+    notion_cfg = getattr(config, "notion_dashboard", None)
+    if notion_cfg is None or not getattr(notion_cfg, "enabled", False):
+        return
+
+    message = (
+        f"⚠ --cancel-reason 未指定のため workflow '{workflow_id}' の Notion "
+        "Workflows DB Status は更新されません。Notion ダッシュボード上に "
+        "「worktree 削除済みなのに Status は phaseN のまま」のゴーストレコード "
+        "が残る可能性があります。ゴースト発生を避けるには次のように reason を "
+        f"つけて再実行することを推奨: `hokusai cleanup {workflow_id} "
+        "--cancel-reason '<理由>'`"
+    )
+    print(message, file=sys.stderr)
+
+
 def _sync_workflow_cancel_reason(
     *, config, workflow_id: str, state: dict, cancel_reason: str
 ) -> None:
@@ -2134,6 +2170,13 @@ def _handle_cleanup(args, config):
                 state=state,
                 cancel_reason=cancel_reason,
             )
+        else:
+            # M2.2 (#98) findings §4.2: --cancel-reason 未指定の cleanup は
+            # Notion Workflows DB Status を更新せず、ダッシュボード上に
+            # 「worktree 削除済みなのに Status は phaseN のまま」のゴースト
+            # レコードが残る。ユーザが意図的に Notion を触らないケース
+            # (SKIP_NOTION=1 / Notion 無効化 profile) を除いて警告を出す。
+            _warn_cleanup_without_cancel_reason(config, args.workflow_id)
 
     elif args.stale:
         # 完了済み workflow の worktree を一括削除
