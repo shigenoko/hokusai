@@ -301,7 +301,12 @@ def try_resolve_default_profile_name() -> str | None:
     if profile is None:
         return None
     try:
-        if not profile.config_path.exists():
+        # is_file() で確認（PR #95 Copilot Round 4 指摘）。
+        # exists() だけだと「ディレクトリ」や「broken symlink」も True を返し、
+        # 後段 load_config_from_file() の open() が IsADirectoryError /
+        # PermissionError で落ちる。is_file() は regular file かつ readable な
+        # symlink 解決先を要求するため、implicit 経路の fail-safe 契約に整合。
+        if not profile.config_path.is_file():
             return None
     except Exception:
         # Path 操作（symlink loop / permission 等）の異常も fail-safe で None
@@ -317,8 +322,15 @@ def assert_profile_config_exclusive(
 
     Raises:
         ConflictingProfileAndConfigError: 両方指定された場合
+
+    Notes:
+        判定は `is not None` で行う（PR #95 Copilot Round 4 指摘）。truthy
+        判定だと `profile_name=""` + `config_file=...` の併用が conflict
+        として検出されず、後段で `InvalidProfileNameError` が先に出てしまう。
+        manager 側の判定 `if profile_name is not None:` と契約を一貫させ、
+        排他チェックも explicit な値（空文字含む）は「指定あり」として扱う。
     """
-    if profile_name and config_file:
+    if profile_name is not None and config_file is not None:
         raise ConflictingProfileAndConfigError(
             "--profile と --config / -c は同時に指定できません。"
             "暗黙の上書きは事故要因のため、どちらか一方のみ指定してください。"

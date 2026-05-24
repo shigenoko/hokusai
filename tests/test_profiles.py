@@ -837,6 +837,44 @@ def test_try_resolve_default_profile_returns_none_when_config_path_missing(
     assert try_resolve_default_profile_name() is None
 
 
+def test_try_resolve_default_profile_returns_none_when_config_is_directory(
+    tmp_path, monkeypatch
+):
+    """default_profile の config_path がディレクトリ（misconfiguration）の
+    ケースも None で fail-safe にフォールバックする
+    （PR #95 Copilot Round 4 指摘: exists() だけだと True を返してしまい
+    後段 open() で IsADirectoryError）."""
+    from hokusai.config.profiles import try_resolve_default_profile_name
+
+    # config_path をディレクトリとして作成
+    config_dir_path = tmp_path / "a-config-as-dir"
+    config_dir_path.mkdir()
+    registry = tmp_path / "profiles.yaml"
+    registry.write_text(yaml.safe_dump({
+        "default_profile": "a-co",
+        "profiles": {"a-co": {"config": str(config_dir_path)}},
+    }))
+    monkeypatch.setenv("HOKUSAI_PROFILES_FILE", str(registry))
+
+    assert try_resolve_default_profile_name() is None
+
+
+def test_assert_profile_config_exclusive_detects_empty_profile_with_config(
+    tmp_path,
+):
+    """profile_name='' と config_file 併用も Conflict として検出する
+    （PR #95 Copilot Round 4 指摘: 排他契約を is not None で一貫させる）."""
+    from hokusai.config.profiles import (
+        ConflictingProfileAndConfigError,
+        assert_profile_config_exclusive,
+    )
+
+    cfg = tmp_path / "x.yaml"
+    cfg.write_text("project_root: /tmp/x\n")
+    with pytest.raises(ConflictingProfileAndConfigError):
+        assert_profile_config_exclusive("", str(cfg))
+
+
 def test_explicit_empty_profile_raises_invalid_profile_name(
     tmp_path, monkeypatch
 ):
