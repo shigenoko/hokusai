@@ -218,6 +218,34 @@ LLM Gateway は、各 request に対して以下の decision を返す。
 | `block` | 送信不可 |
 | `require_human_approval` | Human Approval gate が開くまで送信不可 |
 
+### 4.4 fail-open 原則
+
+LLM Gateway の **内部処理が失敗しても**、HOKUSAI の workflow 進行・PR 作成・既存フローは停止しない。
+
+対象とする失敗例:
+
+* `audit_logs` テーブルへの SQLite 永続化失敗
+* policy 評価中に発生した予期せぬ例外
+* Notion / GitHub / Figma 等 external API の障害（DB share 切れによる 404、rate limit、timeout 等）
+* spend cost lookup の失敗（pricing table 不整合 / provider usage 取得失敗）
+* `policy_hits` 評価に必要な context フィールド（model 名等）が呼び出し側から取得できないケース
+
+理由:
+
+* `hokusai/llm_gateway/dispatch.py::dispatch_via_gateway` は Phase 1 から例外を完全に握り潰す設計で実装されており（`log_suppressed_exception` 経由で type + frame のみ debug log に残す）、Phase 2 enforcement 解禁後も同じ思想を維持する。guardrail の不具合が運用全体を停止させる事故は、guardrail を on にすること自体への抵抗感を生むため。
+* Notion 障害を理由に PR 作成や workflow 進行を止めると、dogfooding session が止まり HOKUSAI 自体の改善イテレーションが破綻する（出典: `docs/dogfooding-findings.md` §3, §6）。
+
+**明示的に fail-open しない** ケース:
+
+* policy が `decision="block"` を返した送信は、意図的な enforcement の結果であり、external API 障害や Gateway 内部例外とは別物として扱う。「policy block を Gateway 内部例外で fail-open して送信する」のは guardrail の意味を失うため、必ず送信を抑止する。
+* `decision="require_human_approval"` も同様。Approval gate が開いていない状態で送信してはならない。
+* `decision="redact"` で redaction 適用に失敗した場合は、原文をそのまま送信せず `block` 扱いに昇格させる（fail-closed）。secret/PII の漏出を許容しないため。
+
+ログ要件:
+
+* fail-open で抑制した例外は debug log に **例外型名 + frame 一覧**（filename:lineno in function）のみを残す。`exc.args` 由来のメッセージ本文を log stream に流してはならない（prompt 経由で secret / PII が例外メッセージに混入したケースでの log 漏洩を防ぐため。要件 §14 受け入れ基準と `log_suppressed_exception` 既存実装で担保）。
+* fail-open が発生したことは、対象 workflow / phase / call site が後追いできる粒度で記録すること（個別 event の頻度監視が必要になった段階で Operations Console から集計可能にする）。
+
 ---
 
 ## 5. Provider / Model 制御
@@ -239,6 +267,8 @@ fallback は以下のいずれかとする。
 * workflow を `waiting_for_human` にする
 * Human Approval gate を作成する
 * CLI / Operations Console に明示的な再実行候補を出す
+
+本節の fallback ルートに入るのは、policy が明示的に `block` / `require_human_approval` を返した場合に限る。policy 評価そのものが内部例外で失敗したケース（allowlist データの読み込み失敗 / context 不足等）は §4.4 fail-open 原則 を適用し、workflow 進行を止めず透過動作にフォールバックする。意図的な enforcement と Gateway 内部不具合を運用上区別するため。
 
 ---
 
