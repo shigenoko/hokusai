@@ -704,8 +704,9 @@ def test_create_config_implicit_default_profile_loads_when_no_args(
     from hokusai.config import create_config_from_env_and_file
 
     data_dir = tmp_path / "default-data"
+    project_root_default = tmp_path / "repo-default"
     cfg = tmp_path / "a.yaml"
-    cfg.write_text("project_root: /tmp/repo-default\n")
+    cfg.write_text(f"project_root: {project_root_default}\n")
     registry = tmp_path / "profiles.yaml"
     registry.write_text(yaml.safe_dump({
         "default_profile": "a-co",
@@ -721,7 +722,7 @@ def test_create_config_implicit_default_profile_loads_when_no_args(
     # profile も config も渡さず呼び出す
     config = create_config_from_env_and_file()
 
-    assert str(config.project_root) == "/tmp/repo-default"
+    assert config.project_root == project_root_default
     assert config.data_dir == data_dir
     assert config.database_path == data_dir / "workflow.db"
 
@@ -730,10 +731,12 @@ def test_create_config_explicit_profile_overrides_default(tmp_path, monkeypatch)
     """--profile が明示されていれば default_profile は無視される."""
     from hokusai.config import create_config_from_env_and_file
 
+    project_root_default = tmp_path / "repo-default"
+    project_root_explicit = tmp_path / "repo-explicit"
     cfg_default = tmp_path / "a.yaml"
-    cfg_default.write_text("project_root: /tmp/repo-default\n")
+    cfg_default.write_text(f"project_root: {project_root_default}\n")
     cfg_explicit = tmp_path / "b.yaml"
-    cfg_explicit.write_text("project_root: /tmp/repo-explicit\n")
+    cfg_explicit.write_text(f"project_root: {project_root_explicit}\n")
     registry = tmp_path / "profiles.yaml"
     registry.write_text(yaml.safe_dump({
         "default_profile": "a-co",
@@ -745,7 +748,7 @@ def test_create_config_explicit_profile_overrides_default(tmp_path, monkeypatch)
     monkeypatch.setenv("HOKUSAI_PROFILES_FILE", str(registry))
 
     config = create_config_from_env_and_file(profile_name="b-co")
-    assert str(config.project_root) == "/tmp/repo-explicit"
+    assert config.project_root == project_root_explicit
 
 
 def test_create_config_explicit_config_file_skips_default_profile(
@@ -754,10 +757,12 @@ def test_create_config_explicit_config_file_skips_default_profile(
     """--config 明示時は default_profile を読まずに config file 直読み."""
     from hokusai.config import create_config_from_env_and_file
 
+    project_root_default = tmp_path / "repo-default"
+    project_root_explicit = tmp_path / "repo-explicit"
     cfg_default = tmp_path / "a.yaml"
-    cfg_default.write_text("project_root: /tmp/repo-default\n")
+    cfg_default.write_text(f"project_root: {project_root_default}\n")
     cfg_explicit = tmp_path / "explicit.yaml"
-    cfg_explicit.write_text("project_root: /tmp/repo-explicit\n")
+    cfg_explicit.write_text(f"project_root: {project_root_explicit}\n")
     registry = tmp_path / "profiles.yaml"
     registry.write_text(yaml.safe_dump({
         "default_profile": "a-co",
@@ -766,7 +771,7 @@ def test_create_config_explicit_config_file_skips_default_profile(
     monkeypatch.setenv("HOKUSAI_PROFILES_FILE", str(registry))
 
     config = create_config_from_env_and_file(config_file=str(cfg_explicit))
-    assert str(config.project_root) == "/tmp/repo-explicit"
+    assert config.project_root == project_root_explicit
 
 
 def test_create_config_falls_back_when_registry_missing(tmp_path, monkeypatch):
@@ -781,5 +786,75 @@ def test_create_config_falls_back_when_registry_missing(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
 
     # 例外を投げず、空 config で WorkflowConfig を返す
+    config = create_config_from_env_and_file()
+    assert config is not None
+
+
+def test_try_resolve_default_profile_returns_none_when_profile_not_registered(
+    tmp_path, monkeypatch
+):
+    """default_profile に指定された名前が registry の profiles 配下に
+    無いケース（手動編集ミス等）も None を返して fail-safe にフォールバック
+    する（PR #95 Copilot Round 1 #2 指摘）."""
+    from hokusai.config.profiles import try_resolve_default_profile_name
+
+    cfg = tmp_path / "a.yaml"
+    cfg.write_text(f"project_root: {tmp_path / 'repo'}\n")
+    # load_profile_registry が default_profile の存在を validate するため、
+    # registry 自体に書く段階で「未登録 default_profile」を作るのは
+    # ProfileError になる。load_profile_registry を直接 monkeypatch して
+    # 「整合性検証を skip した状態」を模擬する。
+    from hokusai.config import profiles as profile_mod
+
+    class _FakeRegistry:
+        default_profile = "ghost-profile"
+        profiles: dict = {}
+
+    monkeypatch.setattr(
+        profile_mod, "load_profile_registry", lambda *a, **kw: _FakeRegistry()
+    )
+    assert try_resolve_default_profile_name() is None
+
+
+def test_try_resolve_default_profile_returns_none_when_config_path_missing(
+    tmp_path, monkeypatch
+):
+    """default_profile は registry に登録されているが、その profile の
+    config file が存在しないケース（profile config を消した等）も None を
+    返し、CLI が implicit 経路で `ProfileError` で落ちないようにする
+    （PR #95 Copilot Round 1 #1, #2 指摘）."""
+    from hokusai.config.profiles import try_resolve_default_profile_name
+
+    missing_cfg = tmp_path / "deleted-profile.yaml"
+    # 意図的に書き込まず存在しないままにする
+    registry = tmp_path / "profiles.yaml"
+    registry.write_text(yaml.safe_dump({
+        "default_profile": "a-co",
+        "profiles": {"a-co": {"config": str(missing_cfg)}},
+    }))
+    monkeypatch.setenv("HOKUSAI_PROFILES_FILE", str(registry))
+
+    assert try_resolve_default_profile_name() is None
+
+
+def test_create_config_falls_back_when_default_profile_config_missing(
+    tmp_path, monkeypatch
+):
+    """default_profile の config file が無い状態でも create_config が落ちず、
+    従来の cwd/home claude-workflow.yaml 探索にフォールバックする
+    （PR #95 Copilot Round 1 #1 指摘の核心ケース）."""
+    from hokusai.config import create_config_from_env_and_file
+
+    missing_cfg = tmp_path / "deleted-profile.yaml"
+    registry = tmp_path / "profiles.yaml"
+    registry.write_text(yaml.safe_dump({
+        "default_profile": "a-co",
+        "profiles": {"a-co": {"config": str(missing_cfg)}},
+    }))
+    monkeypatch.setenv("HOKUSAI_PROFILES_FILE", str(registry))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+
+    # 例外を投げず、フォールバックで WorkflowConfig を返す
     config = create_config_from_env_and_file()
     assert config is not None

@@ -656,21 +656,30 @@ def main():
     # 設定ファイルを読み込み（--profile が指定されれば registry から解決）
     # default=argparse.SUPPRESS の関係で args に属性が無い場合があるため getattr で取得
     config_arg = getattr(args, "config", None)
-    profile_arg = getattr(args, "profile", None)
+    profile_arg_explicit = getattr(args, "profile", None)
     # M2.3 (#94): explicit と implicit (default_profile) を CLI 表示で区別する
     # ため、create_config_from_env_and_file を呼ぶ前に implicit 解決を試みて
-    # 結果を控える（CLI 出力でのみ使用、config 解決は manager 側に任せる）。
+    # 結果を控える。PR #95 Copilot Round 1 #3 指摘で、implicit 解決した値を
+    # WorkflowRunner / dashboard 等の subcommand handler にも一貫して渡す
+    # よう、effective_profile を作って args.profile に反映する形に変更
+    # （state["profile_name"] や Notion 同期での profile_name 伝搬を担保）。
     implicit_default_profile: str | None = None
-    if profile_arg is None and config_arg is None:
+    if profile_arg_explicit is None and config_arg is None:
         from .config.profiles import try_resolve_default_profile_name
         implicit_default_profile = try_resolve_default_profile_name()
+    profile_arg = profile_arg_explicit or implicit_default_profile
+    if implicit_default_profile and not profile_arg_explicit:
+        # subcommand handler が args.profile を直接読む経路 (dashboard /
+        # notion-setup 等) でも implicit 解決後の値が見えるよう namespace
+        # に反映する。
+        args.profile = profile_arg
     try:
         config = create_config_from_env_and_file(
             config_arg, profile_name=profile_arg
         )
         set_config(config)
-        if profile_arg:
-            print(f"Profile: {profile_arg}")
+        if profile_arg_explicit:
+            print(f"Profile: {profile_arg_explicit}")
         elif implicit_default_profile:
             # M2.3 (#94): --profile 未指定で default_profile が auto-resolve
             # された場合、明示指定と区別できる文言で user に通知。

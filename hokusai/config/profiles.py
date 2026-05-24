@@ -266,13 +266,21 @@ def try_resolve_default_profile_name() -> str | None:
     `hokusai <command>` を `--profile` 未指定で叩いたときに、`~/.hokusai/profiles.yaml`
     の `default_profile` を implicit に適用する経路で利用する。
 
-    - registry が見つかる + `default_profile` がセット済 → その名前を返す
+    返り値 contract（PR #95 Copilot Round 1 #2 指摘で `config_path.exists()` まで
+    踏み込み、後段の `resolve_profile_to_config_path` で `ProfileError` が出る
+    可能性を排除した）:
+
+    - registry が見つかる + `default_profile` セット済 + その profile が
+      registry に存在 + `config_path` 実在 → その名前を返す
     - registry が見つかる + `default_profile` 未指定 → `None`
+    - registry が見つかる + `default_profile` が registry に未登録 → `None`
+    - registry が見つかる + `default_profile` の config file 不在 → `None`
     - 上記以外（registry 不在 / 破損 / 解決失敗 / 不正な name 等）→ `None`
 
     fail-safe を最優先する: registry 周りで例外が出ても CLI 全体を落とさず、
     呼び出し側は「従来通り cwd / home の `claude-workflow.yaml` を探す」
-    フォールバックを継続できるよう設計。
+    フォールバックを継続できるよう設計。本関数が name を返した直後の
+    `resolve_profile_to_config_path` 呼び出しは安全に成功する想定。
     """
     try:
         registry = load_profile_registry()
@@ -281,7 +289,24 @@ def try_resolve_default_profile_name() -> str | None:
         # を含む全例外を fail-safe で握り潰す（findings §2.3 観察: profile を
         # 設定していない環境でも CLI が透過動作する必要がある）
         return None
-    return registry.default_profile
+    name = registry.default_profile
+    if not name:
+        return None
+    # registry 内に該当 profile が存在するか + config_path が実在するかを確認
+    # （PR #95 Copilot Round 1 #2 指摘）。呼び出し側は本関数が返した name を
+    # そのまま `resolve_profile_to_config_path` に渡せる前提で動くため、ここで
+    # 解決可能性まで担保しないと「implicit 経路で ProfileError → CLI 全体落ち」
+    # の事故が起こる。
+    profile = registry.profiles.get(name)
+    if profile is None:
+        return None
+    try:
+        if not profile.config_path.exists():
+            return None
+    except Exception:
+        # Path 操作（symlink loop / permission 等）の異常も fail-safe で None
+        return None
+    return name
 
 
 def assert_profile_config_exclusive(
