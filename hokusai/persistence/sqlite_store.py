@@ -1018,8 +1018,10 @@ class SQLiteStore:
 
         Returns:
             `[{"event_type": str, "workflow_id": str, "attempts": int, "last_error": str,
-                 "next_attempt_at": str}, ...]` の dict のリスト。最新の next_attempt_at
-            降順で並ぶ（リトライが直近に予定されているものを優先表示）。
+                 "next_attempt_at": str}, ...]` の dict のリスト。next_attempt_at
+            昇順で並ぶ（リトライが直近に予定されているものを優先表示。古い
+            タイムスタンプ = まもなく次の試行が走るもの、を先頭にする。
+            Issue #84 Copilot Round 1 で docstring と ASC 実装の整合を取った）。
         """
         with self._connect() as conn:
             conn.row_factory = sqlite3.Row
@@ -1028,7 +1030,7 @@ class SQLiteStore:
                 SELECT event_type, workflow_id, attempts, last_error, next_attempt_at
                 FROM notion_sync_outbox
                 WHERE last_error IS NOT NULL AND last_error != ''
-                ORDER BY next_attempt_at DESC
+                ORDER BY next_attempt_at ASC
                 LIMIT ?
                 """,
                 (limit,),

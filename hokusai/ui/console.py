@@ -154,7 +154,9 @@ def print_outbox_summary(
     print()
     print(f"📮 Notion 同期 outbox: pending={pending}, failed={failed}")
     if not verbose:
-        if pending > 0:
+        # pending / failed どちらかでも表示対象があれば verbose ヒントを出す
+        # （Issue #84 Copilot Round 1 指摘: failed-only ケースで気付かれない問題）
+        if pending > 0 or failed > 0:
             print(
                 "   詳細な last_error を表示するには `--verbose` を付けて再実行"
             )

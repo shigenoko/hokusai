@@ -1143,11 +1143,12 @@ class WorkflowRunner:
         try:
             pending = self.store.count_notion_sync_pending()
             failed = self.store.count_notion_sync_errors()
-            recent_errors = (
-                self.store.fetch_recent_outbox_with_errors(limit=5)
-                if verbose
-                else None
-            )
+            # 件数 0 のときは fetch を skip して不要な DB クエリを避ける
+            # （Issue #84 Copilot Round 1 指摘）。verbose でも件数 0 なら
+            # 表示対象が無いので fetch する意味がない。
+            recent_errors = None
+            if verbose and (pending > 0 or failed > 0):
+                recent_errors = self.store.fetch_recent_outbox_with_errors(limit=5)
             print_outbox_summary(
                 pending,
                 failed,

@@ -3345,11 +3345,12 @@ def test_fetch_recent_outbox_with_errors_returns_only_failed_entries(store):
     rows = store.fetch_recent_outbox_with_errors(limit=10)
     # last_error あり 2 件のみ（NULL は除外）
     assert len(rows) == 2
-    # next_attempt_at 降順なので k2 が先、k1 が後
-    assert rows[0]["workflow_id"] == "wf-2"
-    assert rows[0]["last_error"] == "rate limit"
-    assert rows[1]["workflow_id"] == "wf-1"
-    assert rows[1]["last_error"] == "404 error"
+    # next_attempt_at 昇順（直近 = 早い時刻 を優先）なので k1 が先、k2 が後
+    # （Issue #84 Copilot Round 1 で docstring と整合）
+    assert rows[0]["workflow_id"] == "wf-1"
+    assert rows[0]["last_error"] == "404 error"
+    assert rows[1]["workflow_id"] == "wf-2"
+    assert rows[1]["last_error"] == "rate limit"
 
 
 def test_print_outbox_summary_skips_when_all_zero(capsys):
@@ -3362,13 +3363,25 @@ def test_print_outbox_summary_skips_when_all_zero(capsys):
 
 
 def test_print_outbox_summary_shows_counts_without_verbose(capsys):
-    """件数 > 0 のときサマリ行と --verbose ヒントを表示"""
+    """pending > 0 のときサマリ行と --verbose ヒントを表示"""
     from hokusai.ui.console import print_outbox_summary
 
     print_outbox_summary(pending=3, failed=1, verbose=False)
     captured = capsys.readouterr()
     assert "pending=3" in captured.out
     assert "failed=1" in captured.out
+    assert "--verbose" in captured.out
+
+
+def test_print_outbox_summary_shows_verbose_hint_for_failed_only(capsys):
+    """failed > 0 / pending == 0 でも --verbose ヒントを出す
+    （Issue #84 Copilot Round 1 指摘: failed-only ケースで気付かれない問題）"""
+    from hokusai.ui.console import print_outbox_summary
+
+    print_outbox_summary(pending=0, failed=2, verbose=False)
+    captured = capsys.readouterr()
+    assert "pending=0" in captured.out
+    assert "failed=2" in captured.out
     assert "--verbose" in captured.out
 
 
