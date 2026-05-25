@@ -95,7 +95,7 @@ def _seed_completed_workflow(store: SQLiteStore, workflow_id: str) -> None:
     )
 
 
-def test_stale_normal_deletes_worktree(tmp_path, monkeypatch):
+def test_stale_normal_deletes_worktree(tmp_path):
     """既存挙動: --stale で stale worktree が実削除される（後方互換）"""
     config = _make_config(tmp_path)
     store = SQLiteStore(config.database_path)
@@ -268,3 +268,45 @@ def test_stale_normal_runs_writeback_cleanup(tmp_path, monkeypatch):
         cli_main._handle_cleanup(args, config)
 
     assert called == [True], "通常 --stale では writeback cleanup が呼ばれる"
+
+
+# --- Parser-level regression tests（Copilot Round 1 #3 指摘） ---
+# トップレベル --dry-run とサブパーサ --dry-run が衝突したとき、サブパーサ側で
+# `default=argparse.SUPPRESS` を指定しないと暗黙 False で上書きされて
+# `hokusai --dry-run cleanup --stale` が dry-run にならないバグが入る。
+# parser-level で両ポジションをカバーする回帰テスト。
+
+
+def test_parser_dry_run_after_subcommand():
+    """`hokusai cleanup --stale --dry-run` で args.dry_run=True"""
+    parser, _, _ = cli_main._build_parser()
+    args = parser.parse_args(["cleanup", "--stale", "--dry-run"])
+    assert getattr(args, "dry_run", False) is True
+
+
+def test_parser_dry_run_before_subcommand():
+    """`hokusai --dry-run cleanup --stale` でもサブパーサが上書きせず True を維持"""
+    parser, _, _ = cli_main._build_parser()
+    args = parser.parse_args(["--dry-run", "cleanup", "--stale"])
+    assert getattr(args, "dry_run", False) is True
+
+
+def test_parser_dry_run_default_false():
+    """`hokusai cleanup --stale` でフラグ未指定なら dry_run は False（トップレベル既定）"""
+    parser, _, _ = cli_main._build_parser()
+    args = parser.parse_args(["cleanup", "--stale"])
+    assert getattr(args, "dry_run", False) is False
+
+
+def test_parser_sync_notion_default_false():
+    """--sync-notion 未指定でデフォルト False（トップレベルに同名フラグなしの確認）"""
+    parser, _, _ = cli_main._build_parser()
+    args = parser.parse_args(["cleanup", "--stale"])
+    assert getattr(args, "sync_notion", False) is False
+
+
+def test_parser_sync_notion_enabled():
+    """`hokusai cleanup --stale --sync-notion` で sync_notion=True"""
+    parser, _, _ = cli_main._build_parser()
+    args = parser.parse_args(["cleanup", "--stale", "--sync-notion"])
+    assert getattr(args, "sync_notion", False) is True

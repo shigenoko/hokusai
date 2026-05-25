@@ -248,6 +248,13 @@ def _build_parser():
     cleanup_parser.add_argument(
         "--dry-run",
         action="store_true",
+        # default=argparse.SUPPRESS: notion-migrate-schema と同じ理由
+        # （Copilot 指摘）。トップレベル --dry-run が store_true で常に
+        # 属性追加されるため、サブパーサ側で `default=False` を持つと
+        # `hokusai --dry-run cleanup --stale` がサブパーサ側未指定 False で
+        # 上書きされる。SUPPRESS なら未指定時に属性を追加せず、トップレベルの
+        # 値を保持できる。参照側は getattr(args, "dry_run", False) で取得。
+        default=argparse.SUPPRESS,
         help=(
             "--stale と組み合わせて、実際の worktree 削除を行わず削除予定を "
             "列挙のみ（誤操作防止、findings §4.3 / Issue #107 / M2.6）。"
@@ -2184,7 +2191,7 @@ def _sync_stale_workflows_notion(
     """`cleanup --stale --sync-notion` の Notion 同期パス（Issue #107 / M2.6）。
 
     stale 削除した worktree に対応する workflow を Workflows DB 上で Canceled 化する。
-    `_sync_workflow_cancel_reason` を reason="stale cleanup" で呼ぶ薄いラッパ。
+    `_sync_workflow_cancel_reason` を `cancel_reason="stale cleanup"` で呼ぶ薄いラッパ。
 
     `store.load_workflow(wf_id) is None`（DB から既に消えている orphan）は state を
     組めないため warning + skip。Notion 接続無し環境は `_sync_workflow_cancel_reason`
