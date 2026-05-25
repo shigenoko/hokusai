@@ -269,6 +269,20 @@ def test_enqueue_failure_workflow_started_itself_is_exempt(tmp_path):
     assert store.count_notion_sync_errors() == 1
 
 
+def test_notion_sync_errors_has_idempotency_key_index(tmp_path):
+    """errors テーブルに idempotency_key と (workflow_id, event_type) の index
+    がセットアップされている（Copilot Round 4 指摘の lookup 性能対応）"""
+    store = SQLiteStore(tmp_path / "wf.db")
+    with store._connect() as conn:
+        rows = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' "
+            "AND tbl_name='notion_sync_errors'"
+        ).fetchall()
+    names = {row[0] for row in rows}
+    assert "idx_sync_errors_idempotency_key" in names
+    assert "idx_sync_errors_workflow_event" in names
+
+
 def test_record_permanent_notion_sync_failure_atomic_no_race(tmp_path):
     """1 ステートメント atomic INSERT で重複挿入が起こらない（Round 3 指摘）.
 

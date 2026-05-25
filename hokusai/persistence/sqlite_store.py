@@ -164,6 +164,21 @@ class SQLiteStore:
                 ON notion_sync_errors(workflow_id)
             """)
 
+            # Issue #109 / PR #110 Copilot Round 4 指摘: fail-fast 経路の
+            # `record_permanent_notion_sync_failure` が WHERE NOT EXISTS で
+            # idempotency_key を毎回 lookup するため、errors 増加でフルスキャン
+            # にならないよう専用 index を追加。`has_failed_workflow_started` 用に
+            # (workflow_id, event_type) 複合 index も追加し O(log n) 維持。
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_sync_errors_idempotency_key
+                ON notion_sync_errors(idempotency_key)
+            """)
+
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_sync_errors_workflow_event
+                ON notion_sync_errors(workflow_id, event_type)
+            """)
+
             # Phase E (v0.4.0): Figma / Miro 書き戻し（コメント / カード投稿）の
             # outbox / errors / idempotency テーブル。
             # 詳細は docs/hokusai-figma-miro-writeback-implementation-plan.md §5 を参照。
