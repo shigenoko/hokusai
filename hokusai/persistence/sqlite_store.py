@@ -1031,11 +1031,14 @@ class SQLiteStore:
         既存の `move_notion_sync_to_error` は outbox 経由のため、新規行を
         直接入れる別 helper として用意する。
 
-        **冪等性** (PR #110 Copilot Round 1 指摘): 同一 idempotency_key の失敗が
-        複数回発生しても errors 側に重複行を作らない。outbox は
-        `idempotency_key TEXT NOT NULL UNIQUE` で冪等担保しているが、errors
-        テーブルは履歴用に UNIQUE 制約を持たないため、INSERT 前に既存行を
-        check して二重挿入を抑止する。
+        **冪等性 / race-free** (PR #110 Copilot Round 1 / Round 3 指摘):
+        同一 idempotency_key の失敗が複数回発生しても errors 側に重複行を作らない。
+        outbox は `idempotency_key TEXT NOT NULL UNIQUE` で冪等担保しているが、
+        errors テーブルは履歴用に UNIQUE 制約を持たない（複数の error event を
+        履歴として残せる余地を維持するため）。
+        SELECT→INSERT の 2 段階だと並行実行時に race で重複挿入が起こりうるので、
+        `INSERT ... SELECT ... WHERE NOT EXISTS ...` の単一ステートメントで
+        atomic に重複抑止する。
 
         **シリアライズ方針** (PR #110 Copilot Round 2 指摘):
         `enqueue_notion_sync` と同じく `default=str` を渡し、datetime 等の
@@ -1046,19 +1049,18 @@ class SQLiteStore:
         now = datetime.now().isoformat()
         payload_json = json.dumps(payload, ensure_ascii=False, default=str)
         with self._connect() as conn:
-            existing = conn.execute(
-                "SELECT 1 FROM notion_sync_errors WHERE idempotency_key = ? LIMIT 1",
-                (idempotency_key,),
-            ).fetchone()
-            if existing is not None:
-                # 既に同じ key で errors に入っているため no-op（冪等性維持）
-                return
+            # atomic な「存在しなければ挿入」: SELECT→INSERT の race を回避
+            # （Copilot Round 3 指摘）。重複時は cursor.rowcount=0 で no-op。
             conn.execute(
                 """
                 INSERT INTO notion_sync_errors (
                     idempotency_key, workflow_id, event_type, payload_json,
                     error, attempts, failed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                )
+                SELECT ?, ?, ?, ?, ?, ?, ?
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM notion_sync_errors WHERE idempotency_key = ?
+                )
                 """,
                 (
                     idempotency_key,
@@ -1068,6 +1070,7 @@ class SQLiteStore:
                     error,
                     0,
                     now,
+                    idempotency_key,
                 ),
             )
             conn.commit()

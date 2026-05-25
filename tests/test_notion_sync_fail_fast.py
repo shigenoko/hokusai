@@ -269,6 +269,62 @@ def test_enqueue_failure_workflow_started_itself_is_exempt(tmp_path):
     assert store.count_notion_sync_errors() == 1
 
 
+def test_record_permanent_notion_sync_failure_atomic_no_race(tmp_path):
+    """1 ステートメント atomic INSERT で重複挿入が起こらない（Round 3 指摘）.
+
+    SELECT→INSERT の 2 段階だと並行実行で race するため、
+    `INSERT ... WHERE NOT EXISTS` パターンを使う。本テストは単一スレッドだが
+    同一 key の連続呼び出しで重複が出ないことを assert（atomic 経路の動作確認）。
+    """
+    store = SQLiteStore(tmp_path / "wf.db")
+    key = "wf-atomic:pr_created:0:0"
+    # 大量に同じ key で呼んでも errors は 1 行のみ
+    for _ in range(50):
+        store.record_permanent_notion_sync_failure(
+            idempotency_key=key,
+            workflow_id="wf-atomic",
+            event_type="pr_created",
+            payload={"workflow_id": "wf-atomic"},
+            error="boom",
+        )
+    with store._connect() as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM notion_sync_errors WHERE idempotency_key = ?",
+            (key,),
+        ).fetchone()[0]
+    assert count == 1
+
+
+# --- YAML config loader テスト（Round 3 指摘） ---
+
+
+def test_parse_sync_outbox_reads_fail_fast_flag():
+    """YAML から fail_fast_on_workflow_started_error を読み取れる"""
+    from hokusai.config.loaders import _parse_sync_outbox
+
+    cfg = _parse_sync_outbox({"fail_fast_on_workflow_started_error": True})
+    assert cfg.fail_fast_on_workflow_started_error is True
+
+
+def test_parse_sync_outbox_default_fail_fast_is_false():
+    """fail_fast キー未指定なら default の False（後方互換）"""
+    from hokusai.config.loaders import _parse_sync_outbox
+
+    cfg = _parse_sync_outbox({})
+    assert cfg.fail_fast_on_workflow_started_error is False
+
+
+def test_parse_sync_outbox_rejects_non_bool_fail_fast():
+    """bool 以外（int / str 等）が来たら default False に倒す"""
+    from hokusai.config.loaders import _parse_sync_outbox
+
+    cfg_int = _parse_sync_outbox({"fail_fast_on_workflow_started_error": 1})
+    assert cfg_int.fail_fast_on_workflow_started_error is False
+
+    cfg_str = _parse_sync_outbox({"fail_fast_on_workflow_started_error": "yes"})
+    assert cfg_str.fail_fast_on_workflow_started_error is False
+
+
 def test_enqueue_failure_missing_workflow_id_falls_back_to_outbox(tmp_path):
     """workflow_id 空文字 / None なら fail-fast 判定スキップして通常 outbox"""
     dispatcher, store = _build_dispatcher_with_config(tmp_path, fail_fast=True)
