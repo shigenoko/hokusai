@@ -20,6 +20,8 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from hokusai import cli_main  # noqa: E402
@@ -310,3 +312,68 @@ def test_parser_sync_notion_enabled():
     parser, _, _ = cli_main._build_parser()
     args = parser.parse_args(["cleanup", "--stale", "--sync-notion"])
     assert getattr(args, "sync_notion", False) is True
+
+
+# --- Round 2 対応: 組み合わせ validation / dedup / stderr 整合性 ---
+
+
+def test_dry_run_without_stale_rejected(tmp_path, capsys):
+    """--dry-run を --stale なしで指定すると即 exit(1) + stderr 警告"""
+    config = _make_config(tmp_path)
+    SQLiteStore(config.database_path)
+    args = _make_args(workflow_id="wf-x", dry_run=True)
+    with pytest.raises(SystemExit) as excinfo:
+        cli_main._handle_cleanup(args, config)
+    assert excinfo.value.code == 1
+    captured = capsys.readouterr()
+    assert "--dry-run" in captured.err
+    assert "--stale と組み合わせて" in captured.err
+
+
+def test_sync_notion_without_stale_rejected(tmp_path, capsys):
+    """--sync-notion を --stale なしで指定すると即 exit(1)"""
+    config = _make_config(tmp_path)
+    SQLiteStore(config.database_path)
+    args = _make_args(workflow_id="wf-x", sync_notion=True)
+    with pytest.raises(SystemExit) as excinfo:
+        cli_main._handle_cleanup(args, config)
+    assert excinfo.value.code == 1
+    captured = capsys.readouterr()
+    assert "--sync-notion" in captured.err
+
+
+def test_sync_notion_dedups_workflow_id_across_repos(tmp_path, monkeypatch):
+    """同一 workflow が複数 repo の worktree を持つとき、Notion 同期は 1 回だけ呼ぶ"""
+    config = _make_config(tmp_path)
+    store = SQLiteStore(config.database_path)
+    _seed_completed_workflow(store, "wf-done")
+    # 同一 workflow_id の worktree を 2 つの repo に対して用意
+    (config.worktree_root / "repoA_wf-done").mkdir()
+    (config.worktree_root / "repoB_wf-done").mkdir()
+
+    called: list[str] = []
+
+    def fake_sync(*, config, workflow_id, state, cancel_reason):
+        called.append(workflow_id)
+
+    monkeypatch.setattr(cli_main, "_sync_workflow_cancel_reason", fake_sync)
+
+    args = _make_args(stale=True, sync_notion=True)
+    with redirect_stdout(io.StringIO()):
+        cli_main._handle_cleanup(args, config)
+
+    assert called == ["wf-done"], "同一 workflow_id は 1 回だけ同期されるべき"
+
+
+def test_sync_notion_dry_run_orphan_writes_to_stderr(tmp_path, capsys):
+    """--dry-run --sync-notion で orphan の警告は stderr（通常経路と整合）"""
+    config = _make_config(tmp_path)
+    SQLiteStore(config.database_path)
+    (config.worktree_root / "repo_wf-orphan").mkdir()
+
+    args = _make_args(stale=True, dry_run=True, sync_notion=True)
+    cli_main._handle_cleanup(args, config)
+
+    captured = capsys.readouterr()
+    assert "(dry-run) ⚠ wf-orphan" in captured.err
+    assert "(dry-run) ⚠ wf-orphan" not in captured.out

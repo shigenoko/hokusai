@@ -2203,9 +2203,14 @@ def _sync_stale_workflows_notion(
         for wf_id in workflow_ids:
             state = store.load_workflow(wf_id)
             if state is None:
-                print(f"(dry-run) ⚠ {wf_id}: workflow.db に state 無し、Notion 同期スキップ")
+                # 警告は通常経路と同じく stderr に統一（Copilot Round 2 指摘）。
+                # stdout を一覧取得用にパイプする運用を阻害しないため。
+                print(
+                    f"(dry-run) ⚠ {wf_id}: workflow.db に state 無し、Notion 同期スキップ",
+                    file=sys.stderr,
+                )
                 continue
-            print(f"(dry-run) Notion 同期予定: {wf_id} → Status=Canceled, reason='stale cleanup'")
+            print(f"(dry-run) Notion 同期予定: {wf_id} → Status=Canceled, cancel_reason='stale cleanup'")
         return
 
     for wf_id in workflow_ids:
@@ -2240,6 +2245,25 @@ def _handle_cleanup(args, config):
         if isinstance(raw_cancel_reason, str)
         else None
     ) or None
+
+    # M2.6 (#107) Copilot Round 2 指摘: --dry-run / --sync-notion は --stale 専用。
+    # `hokusai cleanup wf-xxx --dry-run` のように workflow_id 指定モードで一緒に
+    # 渡されたとき、現状の workflow_id 経路は両フラグを参照しないため「dry-run
+    # なので安全」とユーザが誤解して実削除される事故になり得る。明示的に reject する。
+    dry_run_flag = bool(getattr(args, "dry_run", False))
+    sync_notion_flag = bool(getattr(args, "sync_notion", False))
+    if (dry_run_flag or sync_notion_flag) and not args.stale:
+        bad_flags = []
+        if dry_run_flag:
+            bad_flags.append("--dry-run")
+        if sync_notion_flag:
+            bad_flags.append("--sync-notion")
+        print(
+            f"✗ {' / '.join(bad_flags)} は --stale と組み合わせて使うフラグです。"
+            "workflow_id 指定モードでは --cancel-reason を使ってください。",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     if args.workflow_id:
         # 指定 workflow の worktree を削除
@@ -2293,12 +2317,15 @@ def _handle_cleanup(args, config):
         #
         # M2.6 (Issue #107) findings §4.3: --dry-run で誤操作防止、
         # --sync-notion でゴースト残留防止。両フラグ default off で完全後方互換。
-        dry_run = bool(getattr(args, "dry_run", False))
-        sync_notion = bool(getattr(args, "sync_notion", False))
+        dry_run = dry_run_flag
+        sync_notion = sync_notion_flag
         workflows = store.list_active_workflows()
         worktree_root = config.worktree_root
         cleaned = 0
-        deleted_workflow_ids: list[str] = []
+        # 同一 workflow が複数 repo/worktree を持つケースで wf_id が重複し、
+        # --sync-notion 時に Notion 更新が二重発火する（Copilot Round 2 指摘）。
+        # set で一意化しつつ、最初に出現した順序を保つため挿入順 dict を使う。
+        deleted_workflow_ids: dict[str, None] = {}
 
         if dry_run:
             print("⚠ --dry-run: 実際の削除は行いません（候補のみ列挙）")
@@ -2319,14 +2346,14 @@ def _handle_cleanup(args, config):
                         if dry_run:
                             print(f"(dry-run) 削除予定: {wt_dir}")
                             cleaned += 1
-                            deleted_workflow_ids.append(wf_id)
+                            deleted_workflow_ids[wf_id] = None
                             continue
                         try:
                             import shutil
                             shutil.rmtree(wt_dir)
                             print(f"🧹 stale 削除: {wt_dir}")
                             cleaned += 1
-                            deleted_workflow_ids.append(wf_id)
+                            deleted_workflow_ids[wf_id] = None
                         except Exception as e:
                             print(f"⚠️ 削除失敗: {wt_dir}: {e}")
 
@@ -2349,11 +2376,12 @@ def _handle_cleanup(args, config):
         # Notion Workflows DB の Status を Canceled 化する（reason="stale cleanup"）。
         # store.load_workflow が None を返す orphan（DB から既に消えている）は
         # state を組めないため warning のみ。dry-run 時は実 API 呼ばずプレビュー出力。
+        # dict の keys() は挿入順を保つため、観測順で同期される。
         if sync_notion and deleted_workflow_ids:
             _sync_stale_workflows_notion(
                 config=config,
                 store=store,
-                workflow_ids=deleted_workflow_ids,
+                workflow_ids=list(deleted_workflow_ids),
                 dry_run=dry_run,
             )
 
