@@ -26,7 +26,7 @@ LLM Gateway **Phase 2 enforcement ロードマップ** を完成。Phase 1 audit
 
 #### M1: Enforcement 切替経路
 
-- **M1.1** ([#87](https://github.com/shigenoko/hokusai/pull/87)): `interceptor.intercept()` に `decision="block"` 経路を追加（`log_only=False` + `policy_hits` 非空）。`Decision.BLOCK` を既存 vocabulary と整合。
+- **M1.1** ([#87](https://github.com/shigenoko/hokusai/pull/87)): `interceptor.intercept()` に `decision="block"` 経路を追加（`log_only=False` + `policy_hits` 非空）。実装は `DECISION_BLOCK = "block"` 定数で既存 vocabulary と整合。
 - **M1.2** ([#89](https://github.com/shigenoko/hokusai/pull/89)): `configs/profile-config-template.yaml` / `example-profile-company.yaml` に `llm_gateway:` セクション追加。`log_only` ロールアウト戦略（自社 profile 先行 enforce / 案件 profile 維持）をコメントで明示。
 - **M1.3** ([#91](https://github.com/shigenoko/hokusai/pull/91)): `docs/hokusai-llm-gateway-requirements.md` に **§4.4 fail-open 原則** を新設。明示的 `block` / `require_human_approval` 以外の Gateway 内部異常は workflow を止めない契約を文書化、§14 受け入れ基準にも反映。
 
@@ -44,7 +44,6 @@ LLM Gateway **Phase 2 enforcement ロードマップ** を完成。Phase 1 audit
 
 ### Docs
 
-- **[#91](https://github.com/shigenoko/hokusai/pull/91)** (上記 M1.3 と同 PR): 要件 doc §4.4 fail-open 原則 + §14 受け入れ基準。
 - **[#105](https://github.com/shigenoko/hokusai/pull/105)**: README (英日両版) を v0.4.8 / Phase 2 enforcement / 新 CLI コマンドに整合化。LLM Gateway / `cleanup` 新フラグ / Notion 環境変数 6 件 / `default_profile` implicit 解決 / v0.4.8 タグを反映。
 
 ### 後方互換
