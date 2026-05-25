@@ -140,7 +140,7 @@ HOKUSAI は、AI を実世界のワークフローに統合する **運用フレ
 ### 標準機能
 
 - 10 フェーズの LangGraph ワークフロー（調査 → 設計 → 計画 → 実装 → 検証 → レビュー → ブランチ衛生 → PR draft → 統合レビューループ → 記録）
-- CLI コマンド: `start`、`continue`、`status`、`list`、`cleanup`、`pr-status`、`connect`、`notion-setup`、`profile`、`dashboard`
+- CLI コマンド: `start`、`continue`、`status`、`list`、`cleanup`、`pr-status`、`connect`、`notion-setup`、`notion-migrate-schema`（v0.4.8〜）、`profile`、`prime`、`dashboard`
 - Operations Console（`hokusai dashboard`）にサービス接続状態、profile 表示、Basic 認証、再送・診断パネルを内蔵
 - SQLite による永続化と LangGraph checkpoint
 - LLM ベースのコーディングエージェント連携による自律実装（デフォルトは Claude Code）
@@ -154,6 +154,8 @@ HOKUSAI は、AI を実世界のワークフローに統合する **運用フレ
 - `prompts/` 配下のカスタマイズ可能なプロンプト
 - `hokusai connect <github|gitlab>` / `hokusai connect --status` による CLI 認証導線と接続状態の一括表示
 - Slack 通知（Incoming Webhook 経由）— ワークフロー開始 / Human-in-the-loop 待機 / 失敗 / PR 作成 / 完了をチームへ通知
+- **`hokusai cleanup` ワークフロー生涯管理** — `--cancel-reason "<text>"` で Notion Workflows DB に cancel 理由を記録、`--gc-workflows`（`--retention-days N`、既定 90 日）で保持期間を超えた完了済み workflow を `workflow.db` から削除し、`checkpoints` / `audit_logs` / `notion_sync_*` / `figma_sync_*` / `miro_sync_*` / `design_writeback_idempotency` まで cascade 削除
+- **LLM Gateway** — 既定で Phase 1 audit log-only。すべての LLM 呼び出しは `dispatch_via_gateway` を経由し、`provider` / `model` / `purpose` / `policy_hits` を SQLite `audit_logs` に記録する（prompt 本文は **保存しない**、hash + length のみ）。`llm_gateway.log_only=false` を profile config で明示すると Phase 2 enforcement が opt-in され、`allowed_providers` / `allowed_models` policy 違反の呼び出しは `LLMGatewayBlockedError` で実送信を中断する。Gateway 内部の予期せぬ失敗（audit 永続化の失敗等）は要件 §4.4 fail-open 原則に従って握り潰し、Gateway バグが workflow を止めないことを保証する（明示的な policy 判断のみ block する）。
 
 ### 実験的機能
 
@@ -266,6 +268,8 @@ hokusai profile doctor company-a
 hokusai --profile company-a dashboard
 ```
 
+`--profile` も `-c/--config` も指定しないで起動した場合、HOKUSAI は registry の `default_profile` を自動解決する（v0.4.8〜）。これは `hokusai list` / `hokusai start` / `hokusai prime` などすべてのサブコマンドに一貫して適用され、既定案件のデータが自動的に読み込まれる。CLI は `Profile: <name> (default_profile)` を表示して明示 `--profile` と implicit 解決を区別する。registry 不在 / `default_profile` 未設定の環境では従来通り `claude-workflow.yaml` 探索にフォールバックする（registry を持たないユーザの挙動は変わらない）。
+
 ### Notion dashboard セットアップ（任意）
 
 HOKUSAI は Notion API 経由で Operations Dashboard を作成・同期できる。token 値は YAML ではなく環境変数で渡す。
@@ -275,7 +279,7 @@ export HOKUSAI_NOTION_API_TOKEN="secret_..."
 hokusai notion-setup --parent-page-id <notion-page-id> --persist
 ```
 
-セットアップ後に生成された DB ID は、`HOKUSAI_NOTION_WORKFLOWS_DB_ID`、`HOKUSAI_NOTION_PR_DB_ID` などの環境変数から参照する。
+セットアップ後に生成された DB ID は、`HOKUSAI_NOTION_WORKFLOWS_DB_ID`、`HOKUSAI_NOTION_PR_DB_ID`、`HOKUSAI_NOTION_REVIEW_ISSUES_DB_ID`、`HOKUSAI_NOTION_WORK_ITEMS_DB_ID`、`HOKUSAI_NOTION_WORKFLOW_GATES_DB_ID`、`HOKUSAI_NOTION_PROJECT_MEMORY_DB_ID` などの環境変数から参照する。
 
 複数の Notion ワークスペースを profile 単位で使い分ける場合は、profile config の `notion_dashboard.api_token_env` / `workflows_db_id_env` / `pull_requests_db_id_env` に案件固有の env 変数名を指定できる。`--profile <name>` を `notion-setup` に渡すと、HOKUSAI は profile config から env 名を自動で採用し、`--persist` で rc に書き込む際も profile 別マーカーを使って複数 profile を同じ rc ファイル内に並列保存できる:
 

@@ -140,7 +140,7 @@ HOKUSAI is an **operational framework** for integrating AI into real-world workf
 ### Standard
 
 - 10-phase LangGraph workflow (research → design → plan → implement → verify → review → branch hygiene → PR draft → unified review loop → record)
-- CLI commands: `start`, `continue`, `status`, `list`, `cleanup`, `pr-status`, `connect`, `notion-setup`, `profile`, `dashboard`
+- CLI commands: `start`, `continue`, `status`, `list`, `cleanup`, `pr-status`, `connect`, `notion-setup`, `notion-migrate-schema` (v0.4.8+), `profile`, `prime`, `dashboard`
 - Operations Console (`hokusai dashboard`) with service connection status, profile display, Basic Auth support, and retry/diagnostic panels
 - SQLite-based persistence and LangGraph checkpointing
 - LLM-based coding agent integration for autonomous implementation (Claude Code by default)
@@ -154,6 +154,8 @@ HOKUSAI is an **operational framework** for integrating AI into real-world workf
 - Customizable prompts in `prompts/`
 - `hokusai connect <github|gitlab>` / `hokusai connect --status` for guided CLI authentication and a quick connection-status read-out
 - Slack notifications (Incoming Webhook) for workflow start, human-review pauses, failures, PR creation, and completion
+- **`hokusai cleanup` workflow lifecycle** — `--cancel-reason "<text>"` records a cancel reason on the Notion Workflows DB row; `--gc-workflows` (with `--retention-days N`, default 90) deletes completed workflows older than the retention window from `workflow.db`, cascading to `checkpoints` / `audit_logs` / `notion_sync_*` / `figma_sync_*` / `miro_sync_*` / `design_writeback_idempotency`.
+- **LLM Gateway** — Phase 1 audit log-only by default. Every LLM call routes through `dispatch_via_gateway`, which records `provider` / `model` / `purpose` / `policy_hits` to SQLite `audit_logs` (prompt body is **never** stored; only hash + length). Opt-in Phase 2 enforcement via `llm_gateway.log_only=false` raises `LLMGatewayBlockedError` and aborts LLM execution when a call violates the configured `allowed_providers` / `allowed_models` policy. Gateway-internal failures (audit persistence errors, etc.) fall back open per the §4.4 fail-open principle, so a gateway bug never blocks the workflow — only explicit policy decisions do.
 
 ### Experimental
 
@@ -266,6 +268,8 @@ hokusai profile doctor company-a
 hokusai --profile company-a dashboard
 ```
 
+When neither `--profile` nor `-c/--config` is specified, HOKUSAI automatically resolves the registry's `default_profile` (v0.4.8+), so the default project's data is loaded consistently across every subcommand — `hokusai list`, `hokusai start`, `hokusai prime`, etc. The CLI prints `Profile: <name> (default_profile)` to distinguish implicit resolution from explicit `--profile` use. If the registry is missing or `default_profile` is unset, HOKUSAI silently falls back to the legacy `claude-workflow.yaml` search (no behavior change for users without a registry).
+
 ### Notion dashboard setup (optional)
 
 HOKUSAI can create and sync a Notion operations dashboard through the Notion API. Token values are passed through environment variables, not YAML.
@@ -275,7 +279,7 @@ export HOKUSAI_NOTION_API_TOKEN="secret_..."
 hokusai notion-setup --parent-page-id <notion-page-id> --persist
 ```
 
-After setup, the generated database IDs can be referenced through environment variables such as `HOKUSAI_NOTION_WORKFLOWS_DB_ID` and `HOKUSAI_NOTION_PR_DB_ID`.
+After setup, the generated database IDs can be referenced through environment variables such as `HOKUSAI_NOTION_WORKFLOWS_DB_ID`, `HOKUSAI_NOTION_PR_DB_ID`, `HOKUSAI_NOTION_REVIEW_ISSUES_DB_ID`, `HOKUSAI_NOTION_WORK_ITEMS_DB_ID`, `HOKUSAI_NOTION_WORKFLOW_GATES_DB_ID`, and `HOKUSAI_NOTION_PROJECT_MEMORY_DB_ID`.
 
 For profile-based operation with multiple Notion workspaces, the env variable names can be customized per profile in the profile config (`notion_dashboard.api_token_env` / `workflows_db_id_env` / `pull_requests_db_id_env`). When `--profile <name>` is supplied to `notion-setup`, HOKUSAI automatically reads those env names from the profile config. With `--persist` enabled, HOKUSAI writes the resolved names to the rc file using a profile-tagged marker so that multiple profiles can coexist in the same rc file (without `--persist`, only the `export` example is printed to stdout):
 
