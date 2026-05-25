@@ -164,6 +164,21 @@ class SQLiteStore:
                 ON notion_sync_errors(workflow_id)
             """)
 
+            # Issue #109 / PR #110 Copilot Round 4 指摘: fail-fast 経路の
+            # `record_permanent_notion_sync_failure` が WHERE NOT EXISTS で
+            # idempotency_key を毎回 lookup するため、errors 増加でフルスキャン
+            # にならないよう専用 index を追加。`has_failed_workflow_started` 用に
+            # (workflow_id, event_type) 複合 index も追加し O(log n) 維持。
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_sync_errors_idempotency_key
+                ON notion_sync_errors(idempotency_key)
+            """)
+
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_sync_errors_workflow_event
+                ON notion_sync_errors(workflow_id, event_type)
+            """)
+
             # Phase E (v0.4.0): Figma / Miro 書き戻し（コメント / カード投稿）の
             # outbox / errors / idempotency テーブル。
             # 詳細は docs/hokusai-figma-miro-writeback-implementation-plan.md §5 を参照。
@@ -986,6 +1001,92 @@ class SQLiteStore:
             conn.execute(
                 "DELETE FROM notion_sync_outbox WHERE idempotency_key = ?",
                 (idempotency_key,),
+            )
+            conn.commit()
+
+    def has_failed_workflow_started(self, workflow_id: str) -> bool:
+        """指定 workflow の `workflow_started` イベントが既に永続失敗（errors 入り）か判定。
+
+        Issue #109 / fail-fast モード用 helper。`notion_sync_errors` テーブルに
+        該当 workflow_id × event_type='workflow_started' の行が 1 件でもあれば True。
+        dispatcher は新規子イベントを enqueue 前にこれを呼び、True なら outbox を
+        skip して errors テーブルに直送する。
+
+        Returns:
+            True: workflow_started が永続失敗で errors に入っている
+            False: 永続失敗していない（成功済み / pending / 未試行）
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT 1 FROM notion_sync_errors
+                WHERE workflow_id = ? AND event_type = 'workflow_started'
+                LIMIT 1
+                """,
+                (workflow_id,),
+            ).fetchone()
+            return row is not None
+
+    def record_permanent_notion_sync_failure(
+        self,
+        *,
+        idempotency_key: str,
+        workflow_id: str,
+        event_type: str,
+        payload: dict[str, Any],
+        error: str,
+    ) -> None:
+        """outbox を経由せず直接 `notion_sync_errors` に行を挿入する。
+
+        Issue #109 / fail-fast モード用。`workflow_started` が既に永続失敗している
+        環境で、子イベント（pr_created / phase_changed 等）を発生時点で
+        errors テーブルに直送する用途。
+
+        `attempts=0` で記録する（retry を一度も試みていないため）。
+        既存の `move_notion_sync_to_error` は outbox 経由のため、新規行を
+        直接入れる別 helper として用意する。
+
+        **冪等性 / race-free** (PR #110 Copilot Round 1 / Round 3 指摘):
+        同一 idempotency_key の失敗が複数回発生しても errors 側に重複行を作らない。
+        outbox は `idempotency_key TEXT NOT NULL UNIQUE` で冪等担保しているが、
+        errors テーブルは履歴用に UNIQUE 制約を持たない（複数の error event を
+        履歴として残せる余地を維持するため）。
+        SELECT→INSERT の 2 段階だと並行実行時に race で重複挿入が起こりうるので、
+        `INSERT ... SELECT ... WHERE NOT EXISTS ...` の単一ステートメントで
+        atomic に重複抑止する。
+
+        **シリアライズ方針** (PR #110 Copilot Round 2 指摘):
+        `enqueue_notion_sync` と同じく `default=str` を渡し、datetime 等の
+        JSON 非対応型が payload に混ざっても TypeError で fail-fast 経路が落ちない
+        ようにする。落ちると通常 outbox fallback に分岐してしまい、fail-fast の
+        本来の目的（outbox 膨張抑止）が達成できなくなる。
+        """
+        now = datetime.now().isoformat()
+        payload_json = json.dumps(payload, ensure_ascii=False, default=str)
+        with self._connect() as conn:
+            # atomic な「存在しなければ挿入」: SELECT→INSERT の race を回避
+            # （Copilot Round 3 指摘）。重複時は cursor.rowcount=0 で no-op。
+            conn.execute(
+                """
+                INSERT INTO notion_sync_errors (
+                    idempotency_key, workflow_id, event_type, payload_json,
+                    error, attempts, failed_at
+                )
+                SELECT ?, ?, ?, ?, ?, ?, ?
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM notion_sync_errors WHERE idempotency_key = ?
+                )
+                """,
+                (
+                    idempotency_key,
+                    workflow_id,
+                    event_type,
+                    payload_json,
+                    error,
+                    0,
+                    now,
+                    idempotency_key,
+                ),
             )
             conn.commit()
 

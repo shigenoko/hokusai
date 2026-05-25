@@ -104,6 +104,13 @@ class NotionSyncOutboxConfig:
 
     enabled: bool = True
     max_retry_attempts: int = 10
+    # A. fail-fast モード（Issue #109 / dogfooding-findings §3.1）。
+    # 同一 workflow の `workflow_started` が既に `notion_sync_errors` に
+    # 永続失敗で入っている場合、後続子イベント（pr_created / phase_changed 等）
+    # を outbox 経由の retry に乗せず、新規発生時点で直接 errors に直送する。
+    # Workflows DB share 未完了など永続障害環境での outbox 膨張を抑止する用途。
+    # default off で完全後方互換。
+    fail_fast_on_workflow_started_error: bool = False
 
 
 @dataclass

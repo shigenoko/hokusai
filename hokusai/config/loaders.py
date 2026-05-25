@@ -620,7 +620,20 @@ def _parse_sync_outbox(raw: object) -> NotionSyncOutboxConfig:
     elif max_retry > 100:
         max_retry = 100
 
-    return NotionSyncOutboxConfig(enabled=enabled, max_retry_attempts=max_retry)
+    # Issue #109 / fail-fast モードの YAML 読み取り（Copilot Round 3 指摘）。
+    # bool 以外（int, str 等）は defaults の False に倒す。
+    fail_fast = raw.get(
+        "fail_fast_on_workflow_started_error",
+        defaults.fail_fast_on_workflow_started_error,
+    )
+    if not isinstance(fail_fast, bool):
+        fail_fast = defaults.fail_fast_on_workflow_started_error
+
+    return NotionSyncOutboxConfig(
+        enabled=enabled,
+        max_retry_attempts=max_retry,
+        fail_fast_on_workflow_started_error=fail_fast,
+    )
 
 
 def _parse_retry(raw: object) -> NotionSyncRetryConfig:
