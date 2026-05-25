@@ -25,6 +25,43 @@ from ..logging_config import get_logger
 logger = get_logger("llm_gateway")
 
 
+class LLMGatewayBlockedError(Exception):
+    """LLM Gateway が policy violation により送信を block したことを示す例外
+    （Issue #102 / Phase 2 enforcement 本体配線）。
+
+    呼び出し側（3 client: claude_code / codex / gemini）はこの例外を握り潰さず
+    上位に伝播させ、LLM への実送信を中断する必要がある。
+
+    fail-open 原則（要件 §4.4 / Issue #90）との関係:
+    - Gateway 内部の予期せぬ例外（audit log 永続化失敗 / API 失敗 / context
+      不足等）→ 握り潰す = fail-open（workflow 継続）
+    - 明示的な policy block（`decision="block"`）→ 握り潰さない = fail-closed
+      （意図的 enforcement の結果なので必ず送信抑止）
+
+    例外 message と attributes には provider / purpose / policy_hits / reason
+    のみを含め、**prompt 本文は絶対に含めない**（secret/PII が例外メッセージ
+    経由で log/stderr に漏洩するリスクを排除、要件 §14 受け入れ基準）。
+    """
+
+    def __init__(
+        self,
+        *,
+        provider: str,
+        purpose: str,
+        policy_hits: tuple[str, ...],
+        reason: str,
+    ):
+        self.provider = provider
+        self.purpose = purpose
+        self.policy_hits = policy_hits
+        self.reason = reason
+        super().__init__(
+            f"LLM Gateway blocked: provider={provider!r}, "
+            f"purpose={purpose!r}, policy_hits={list(policy_hits)}, "
+            f"reason={reason!r}"
+        )
+
+
 def log_suppressed_exception(message: str, exc: BaseException) -> None:
     """LLM Gateway 例外を **メッセージ本文を含めずに** debug ログに残す。
 
@@ -94,11 +131,19 @@ def dispatch_via_gateway(
         phase: 呼び出し元 phase 番号（state を持つ node から呼ばれた場合）。
 
     Returns:
-        None。decision は Phase 1 では使わず、副作用（audit log 出力）のみ。
+        None。M1.1 まで decision は副作用（audit log 出力）のみ。
+        Phase 2 enforcement 配線 (Issue #102) で `decision="block"` のときに
+        `LLMGatewayBlockedError` を raise するように拡張された。
+
+    Raises:
+        LLMGatewayBlockedError: interceptor が `decision="block"` を返した
+            ときに raise。呼び出し側で握り潰さず LLM 実送信を中断する用途。
+            log_only=True (default) では絶対に発生しない（M1.1 仕様）。
 
     Notes:
-        既存フローへの影響をゼロにするため例外を完全に握り潰す。Phase 5+ で
-        block decision を返す時には呼び出し側の例外処理を見直す必要がある。
+        既存フローへの影響を最小化するため、`LLMGatewayBlockedError` 以外の
+        例外は完全に握り潰す（M1.3 §4.4 fail-open 原則）。意図的な policy
+        block のみ fail-closed で上位伝播する設計。
 
         **workflow_id / phase の伝播状況** (Issue #80 / M0.1): 本 PR では
         helper API に optional 引数として追加し、interceptor から SQLite
@@ -111,7 +156,7 @@ def dispatch_via_gateway(
     try:
         from ..config import get_config
         from .context import LLMGatewayContext
-        from .interceptor import LLMGatewayInterceptor
+        from .interceptor import DECISION_BLOCK, LLMGatewayInterceptor
 
         config = get_config()
         gateway_config = getattr(config, "llm_gateway", None)
@@ -125,7 +170,26 @@ def dispatch_via_gateway(
             phase=phase,
             metadata=dict(metadata or {}),
         )
-        LLMGatewayInterceptor(gateway_config).intercept(context, prompt)
+        decision = LLMGatewayInterceptor(gateway_config).intercept(
+            context, prompt
+        )
+        # Issue #102 / Phase 2 enforcement 本体配線:
+        # interceptor が明示的に block decision を返した場合は、fail-open 対象
+        # 外として LLMGatewayBlockedError を上位伝播し LLM 実送信を中断する。
+        # log_only=True (default) では interceptor 側で BLOCK 判定が起きない
+        # ため、デフォルト挙動では絶対にこの分岐を通らない（後方互換保証）。
+        if decision.decision == DECISION_BLOCK:
+            raise LLMGatewayBlockedError(
+                provider=provider,
+                purpose=purpose,
+                policy_hits=decision.policy_hits,
+                reason=decision.reason,
+            )
+    except LLMGatewayBlockedError:
+        # 意図的な policy block は fail-closed で上位伝播（M1.3 §4.4）。
+        # ここで catch / 再 raise を明示することで、下の generic Exception
+        # ブロックに巻き込まれて握り潰されないことを保証する。
+        raise
     except Exception as exc:
         # exc_info=True は exc.args 経由で例外メッセージ本文を log に流すため、
         # 代わりに log_suppressed_exception で type + frame のみを記録する

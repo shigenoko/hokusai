@@ -1720,3 +1720,222 @@ def test_dispatch_helper_copies_metadata(caplog):
     )
     # audit には呼び出し時の値が残る
     assert payload["context"]["metadata"]["key"] == "original"
+
+
+# ---------------------------------------------------------------------------
+# Issue #102 / Phase 2 enforcement 本体配線:
+# decision="block" のとき LLMGatewayBlockedError を上位に伝播させ、
+# LLM 実送信を抑止する経路の単体テスト。
+# fail-open 原則 (M1.3 §4.4) との関係:
+#   - 意図的な block → fail-closed: 例外伝播
+#   - 他の予期せぬ例外 → fail-open: 握り潰す
+# ---------------------------------------------------------------------------
+
+
+def test_llm_gateway_blocked_error_does_not_carry_prompt_body():
+    """LLMGatewayBlockedError は prompt 本文を保持しない（要件 §14: secret/PII
+    が例外メッセージ経由で log/stderr に漏洩するリスクを排除）."""
+    from hokusai.llm_gateway.dispatch import LLMGatewayBlockedError
+
+    err = LLMGatewayBlockedError(
+        provider="claude_code",
+        purpose="generate",
+        policy_hits=("unknown_model",),
+        reason="phase2_policy_block",
+    )
+    # __str__ / args に prompt 本文が混入しないこと
+    msg = str(err)
+    assert "secret-key-1234" not in msg
+    assert "prompt body" not in msg.lower()
+    # provider / purpose / policy_hits / reason は含まれる（diagnostic 用）
+    assert "claude_code" in msg
+    assert "generate" in msg
+    assert "unknown_model" in msg
+    assert "phase2_policy_block" in msg
+    # attributes も同様
+    assert err.provider == "claude_code"
+    assert err.purpose == "generate"
+    assert err.policy_hits == ("unknown_model",)
+    assert err.reason == "phase2_policy_block"
+
+
+def test_dispatch_raises_blocked_error_when_decision_is_block(monkeypatch):
+    """interceptor が decision="block" を返したとき dispatch_via_gateway が
+    LLMGatewayBlockedError を raise すること（enforcement 配線の核心動作）."""
+    from hokusai.config import set_config
+    from hokusai.config.models import (
+        LLMGatewayAllowedModelsConfig,
+        WorkflowConfig,
+    )
+    from hokusai.llm_gateway.dispatch import (
+        LLMGatewayBlockedError,
+        dispatch_via_gateway,
+    )
+
+    cfg = WorkflowConfig(
+        llm_gateway=LLMGatewayConfig(
+            enabled=True,
+            log_only=False,  # block 経路を発動させる
+            audit_log_enabled=True,
+            allowed_models=LLMGatewayAllowedModelsConfig(
+                high_cost_requires_gate=["claude-opus"],
+            ),
+        ),
+    )
+    set_config(cfg)
+
+    with pytest.raises(LLMGatewayBlockedError) as excinfo:
+        dispatch_via_gateway(
+            provider="claude_code",
+            model="claude-opus",
+            purpose="cross_review",
+            prompt="any prompt",
+        )
+
+    err = excinfo.value
+    assert err.provider == "claude_code"
+    assert err.purpose == "cross_review"
+    assert "high_cost_model" in err.policy_hits
+    assert err.reason == "phase2_policy_block"
+
+
+def test_dispatch_does_not_raise_when_decision_is_log(monkeypatch):
+    """既存挙動の回帰防止: log_only=True (default) では BLOCK 判定が起きず、
+    enforcement の影響を一切受けない（後方互換保証）."""
+    from hokusai.config import set_config
+    from hokusai.config.models import (
+        LLMGatewayAllowedModelsConfig,
+        WorkflowConfig,
+    )
+    from hokusai.llm_gateway.dispatch import dispatch_via_gateway
+
+    cfg = WorkflowConfig(
+        llm_gateway=LLMGatewayConfig(
+            enabled=True,
+            log_only=True,  # 既存挙動（M1.1 で BLOCK 判定が起きない条件）
+            audit_log_enabled=True,
+            allowed_models=LLMGatewayAllowedModelsConfig(
+                high_cost_requires_gate=["claude-opus"],
+            ),
+        ),
+    )
+    set_config(cfg)
+
+    # policy_hits は積まれるが log_only=True なので BLOCK にならず例外も
+    # raise されない
+    dispatch_via_gateway(
+        provider="claude_code",
+        model="claude-opus",
+        purpose="cross_review",
+        prompt="any prompt",
+    )
+
+
+def test_dispatch_does_not_raise_when_no_policy_hits(monkeypatch):
+    """log_only=False でも policy_hits が空なら BLOCK 判定にならず例外なし."""
+    from hokusai.config import set_config
+    from hokusai.config.models import WorkflowConfig
+    from hokusai.llm_gateway.dispatch import dispatch_via_gateway
+
+    cfg = WorkflowConfig(
+        llm_gateway=LLMGatewayConfig(
+            enabled=True,
+            log_only=False,
+            audit_log_enabled=True,
+            # allowed_providers / allowed_models 未指定 → policy_hits 空
+        ),
+    )
+    set_config(cfg)
+
+    dispatch_via_gateway(
+        provider="claude_code",
+        model="claude-sonnet",
+        purpose="cross_review",
+        prompt="any prompt",
+    )
+
+
+def test_dispatch_swallows_non_block_exceptions(monkeypatch):
+    """interceptor が予期せぬ例外を出した場合は fail-open で握り潰す
+    （M1.3 §4.4: Gateway 内部の不具合は workflow 進行を止めない）.
+
+    PR #103 Copilot Round 1 指摘: dispatch_via_gateway は関数内で都度
+    `from .interceptor import ... LLMGatewayInterceptor` するため、
+    dispatch モジュール側の属性差し替えは効かない。元クラスの `intercept`
+    メソッドを直接差し替えて、確実に例外経路を通すこと."""
+    from hokusai.config import set_config
+    from hokusai.config.models import WorkflowConfig
+    from hokusai.llm_gateway import interceptor as interceptor_mod
+    from hokusai.llm_gateway.dispatch import dispatch_via_gateway
+
+    cfg = WorkflowConfig(
+        llm_gateway=LLMGatewayConfig(
+            enabled=True, log_only=False, audit_log_enabled=True,
+        ),
+    )
+    set_config(cfg)
+
+    # interceptor module 側の LLMGatewayInterceptor.intercept を直接差し替え
+    # （dispatch_via_gateway が import する経路で確実に有効になる）
+    boom_called: list[bool] = []
+
+    def _boom(self, *a, **kw):
+        boom_called.append(True)
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(
+        interceptor_mod.LLMGatewayInterceptor, "intercept", _boom,
+    )
+
+    # RuntimeError は内部で握り潰され、dispatch_via_gateway は例外なく完了
+    dispatch_via_gateway(
+        provider="claude_code",
+        model="",
+        purpose="generate",
+        prompt="p",
+    )
+    # monkeypatch が effective に経路を通ったことを assert（PR #103
+    # Copilot Round 1 指摘: monkeypatch が無効化されていると fail-open
+    # 経路を通らず偽 green になるため、必ず差し替えた intercept が呼ばれた
+    # ことを確認する）
+    assert boom_called, (
+        "monkeypatched intercept was not invoked; "
+        "dispatch_via_gateway may have bypassed it"
+    )
+
+
+def test_claude_code_client_propagates_blocked_error(
+    monkeypatch, tmp_path
+):
+    """ClaudeCodeClient._dispatch_via_gateway が LLMGatewayBlockedError を
+    握り潰さず上位に伝播することを確認（_run_claude_code 経由テスト）."""
+    from hokusai.config import set_config
+    from hokusai.config.models import WorkflowConfig
+    from hokusai.integrations.claude_code import ClaudeCodeClient
+    from hokusai.llm_gateway.dispatch import LLMGatewayBlockedError
+
+    cfg = WorkflowConfig(
+        llm_gateway=LLMGatewayConfig(
+            enabled=True,
+            log_only=False,
+            audit_log_enabled=True,
+            allowed_providers=["openai"],  # claude_code を block 対象に
+        ),
+    )
+    set_config(cfg)
+
+    client = ClaudeCodeClient(working_dir=tmp_path)
+    monkeypatch.setattr(
+        ClaudeCodeClient, "claude_path", "/usr/bin/false"
+    )
+    monkeypatch.setattr(
+        "hokusai.integrations.claude_code.ShellRunner",
+        lambda cwd=None: type(
+            "S", (), {"run": lambda self, cmd, timeout: _FakeShellResult()}
+        )(),
+    )
+
+    with pytest.raises(LLMGatewayBlockedError):
+        client._run_claude_code(
+            "prompt body", timeout=10, gateway_purpose="test_purpose"
+        )

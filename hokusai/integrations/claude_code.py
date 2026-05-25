@@ -291,6 +291,24 @@ class ClaudeCodeClient:
                 phase=phase,
             )
         except Exception as exc:
+            # Issue #102 / Phase 2 enforcement 本体配線:
+            # 意図的な policy block (LLMGatewayBlockedError) は握り潰さず
+            # 上位伝播し、LLM 実送信を中断する。それ以外の例外は M1.3 §4.4
+            # fail-open 原則に従って従来通り握り潰す（既存フロー影響ゼロ）。
+            is_policy_block = False
+            try:
+                from ..llm_gateway.dispatch import LLMGatewayBlockedError
+                is_policy_block = isinstance(exc, LLMGatewayBlockedError)
+            except Exception:
+                # PR #103 Copilot Round 2 指摘: ImportError 以外（SyntaxError
+                # / RuntimeError 等で dispatch module が壊れているケース）
+                # でも fail-open を維持するため Exception 全捕捉に拡張。
+                # この経路では「block 機能なし」とみなし従来通り続行する。
+                pass
+
+            if is_policy_block:
+                raise
+
             # 第一選択: dispatch.log_suppressed_exception で 3 client 統一。
             # import 失敗時のみ inline fallback（Issue #66 Copilot Round 5）。
             try:
