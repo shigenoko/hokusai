@@ -245,6 +245,33 @@ def _build_parser():
             "削除されない。"
         ),
     )
+    cleanup_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        # dest="cleanup_dry_run": トップレベル --dry-run (`print_dry_run_mode`
+        # 用) と cleanup サブパーサの --dry-run (--stale worktree 削除を空振り
+        # させる) は意味が異なるため、namespace 属性を分離する（Copilot Round 5
+        # 指摘）。
+        # 旧実装は dest 衝突 + SUPPRESS 併用で `hokusai --dry-run cleanup wf-x`
+        # も M2.6 validation で reject されていたが、トップレベル --dry-run は
+        # 元々 cleanup では no-op なので、後方互換のため別 dest に逃がす。
+        # 参照は getattr(args, "cleanup_dry_run", False) で取る。
+        dest="cleanup_dry_run",
+        default=argparse.SUPPRESS,
+        help=(
+            "--stale と組み合わせて、実際の worktree 削除を行わず削除予定を "
+            "列挙のみ（誤操作防止、findings §4.3 / Issue #107 / M2.6）。"
+        ),
+    )
+    cleanup_parser.add_argument(
+        "--sync-notion",
+        action="store_true",
+        help=(
+            "--stale で削除した workflow について Notion Workflows DB の "
+            "Status を Canceled 化し Cancel Reason='stale cleanup' を記入する"
+            "（ゴースト残留防止、findings §4.3 / Issue #107 / M2.6）。"
+        ),
+    )
 
     # pr-status コマンド
     pr_status_parser = subparsers.add_parser(
@@ -2161,6 +2188,51 @@ def _sync_workflow_cancel_reason(
         )
 
 
+def _sync_stale_workflows_notion(
+    *, config, store, workflow_ids: list[str], dry_run: bool
+) -> None:
+    """`cleanup --stale --sync-notion` の Notion 同期パス（Issue #107 / M2.6）。
+
+    stale 削除した worktree に対応する workflow を Workflows DB 上で Canceled 化する。
+    `_sync_workflow_cancel_reason` を `cancel_reason="stale cleanup"` で呼ぶ薄いラッパ。
+
+    `store.load_workflow(wf_id) is None`（DB から既に消えている orphan）は state を
+    組めないため warning + skip。Notion 接続無し環境は `_sync_workflow_cancel_reason`
+    側の既存ロジックで skip される。
+
+    `dry_run=True` 時は load のみ実施して「同期予定」のみ表示し、実 API 呼ばない。
+    """
+    if dry_run:
+        for wf_id in workflow_ids:
+            state = store.load_workflow(wf_id)
+            if state is None:
+                # 警告は通常経路と同じく stderr に統一（Copilot Round 2 指摘）。
+                # stdout を一覧取得用にパイプする運用を阻害しないため。
+                print(
+                    f"(dry-run) ⚠ {wf_id}: workflow.db に state 無し、Notion 同期スキップ",
+                    file=sys.stderr,
+                )
+                continue
+            print(f"(dry-run) Notion 同期予定: {wf_id} → Status=Canceled, cancel_reason='stale cleanup'")
+        return
+
+    for wf_id in workflow_ids:
+        state = store.load_workflow(wf_id)
+        if state is None:
+            print(
+                f"⚠ {wf_id}: workflow.db に state が無いため Notion 同期 skip"
+                "（orphan worktree、Notion 側は手動更新が必要な可能性）",
+                file=sys.stderr,
+            )
+            continue
+        _sync_workflow_cancel_reason(
+            config=config,
+            workflow_id=wf_id,
+            state=state,
+            cancel_reason="stale cleanup",
+        )
+
+
 def _handle_cleanup(args, config):
     """cleanup コマンドのハンドラ"""
     from .integrations.git import GitClient
@@ -2176,6 +2248,38 @@ def _handle_cleanup(args, config):
         if isinstance(raw_cancel_reason, str)
         else None
     ) or None
+
+    # M2.6 (#107) Copilot Round 2 指摘: --dry-run / --sync-notion は --stale 専用。
+    # `hokusai cleanup wf-xxx --dry-run` のように workflow_id 指定モードで一緒に
+    # 渡されたとき、現状の workflow_id 経路は両フラグを参照しないため「dry-run
+    # なので安全」とユーザが誤解して実削除される事故になり得る。明示的に reject する。
+    #
+    # Copilot Round 5 指摘: トップレベル --dry-run は元々 cleanup では no-op
+    # なので reject 対象外。cleanup サブパーサの --dry-run のみ別 dest
+    # ("cleanup_dry_run") で受けて、ここでは cleanup 側のみを判定する。
+    dry_run_flag = bool(getattr(args, "cleanup_dry_run", False))
+    sync_notion_flag = bool(getattr(args, "sync_notion", False))
+    if (dry_run_flag or sync_notion_flag) and not args.stale:
+        bad_flags = []
+        if dry_run_flag:
+            bad_flags.append("--dry-run")
+        if sync_notion_flag:
+            bad_flags.append("--sync-notion")
+        base_msg = (
+            f"✗ {' / '.join(bad_flags)} は --stale 専用のフラグです "
+            "（workflow_id 指定 / --gc-workflows 単独 / 引数なしと併用不可）。"
+        )
+        # workflow_id 指定モードのときだけ --cancel-reason の案内を追加。
+        # `cleanup --gc-workflows --dry-run` や引数なしのケースでは
+        # --cancel-reason が無関係なため案内に含めない（Copilot Round 4 指摘）。
+        # 連結時の文の区切りを明示するため改行を挟む（Copilot Round 5 指摘）。
+        if args.workflow_id:
+            base_msg += (
+                "\n  workflow_id 指定モードで Notion 同期したい場合は "
+                "--cancel-reason を使ってください。"
+            )
+        print(base_msg, file=sys.stderr)
+        sys.exit(1)
 
     if args.workflow_id:
         # 指定 workflow の worktree を削除
@@ -2226,9 +2330,21 @@ def _handle_cleanup(args, config):
         # `return` で関数を抜けていたため、`--stale --gc-workflows` 併用時に
         # 後段の GC post-action に到達できないバグがあった。worktree 走査が
         # no-op になるだけにして、writeback cleanup と GC は必ず実行する。
+        #
+        # M2.6 (Issue #107) findings §4.3: --dry-run で誤操作防止、
+        # --sync-notion でゴースト残留防止。両フラグ default off で完全後方互換。
+        dry_run = dry_run_flag
+        sync_notion = sync_notion_flag
         workflows = store.list_active_workflows()
         worktree_root = config.worktree_root
         cleaned = 0
+        # 同一 workflow が複数 repo/worktree を持つケースで wf_id が重複し、
+        # --sync-notion 時に Notion 更新が二重発火する（Copilot Round 2 指摘）。
+        # set で一意化しつつ、最初に出現した順序を保つため挿入順 dict を使う。
+        deleted_workflow_ids: dict[str, None] = {}
+
+        if dry_run:
+            print("⚠ --dry-run: 実際の削除は行いません（候補のみ列挙）")
 
         if not worktree_root.exists():
             print("✓ worktree ディレクトリが存在しません。worktree 削除はスキップ。")
@@ -2243,16 +2359,23 @@ def _handle_cleanup(args, config):
                 if len(parts) == 2:
                     wf_id = f"wf-{parts[1]}"
                     if wf_id not in active_ids:
+                        if dry_run:
+                            print(f"(dry-run) 削除予定: {wt_dir}")
+                            cleaned += 1
+                            deleted_workflow_ids[wf_id] = None
+                            continue
                         try:
                             import shutil
                             shutil.rmtree(wt_dir)
                             print(f"🧹 stale 削除: {wt_dir}")
                             cleaned += 1
+                            deleted_workflow_ids[wf_id] = None
                         except Exception as e:
                             print(f"⚠️ 削除失敗: {wt_dir}: {e}")
 
             # git worktree prune で削除済みディレクトリの登録を解除
-            if cleaned > 0:
+            # （dry-run 時は実削除していないので prune も skip）
+            if cleaned > 0 and not dry_run:
                 for repo in config.get_all_repositories():
                     try:
                         git = GitClient(str(repo.path))
@@ -2260,15 +2383,33 @@ def _handle_cleanup(args, config):
                     except Exception:
                         pass
 
-            print(f"✓ {cleaned} 件の stale worktree を削除しました")
+            if dry_run:
+                print(f"(dry-run) {cleaned} 件の stale worktree が削除候補")
+            else:
+                print(f"✓ {cleaned} 件の stale worktree を削除しました")
+
+        # M2.6: --sync-notion 時、stale 削除した workflow について
+        # Notion Workflows DB の Status を Canceled 化する（cancel_reason="stale cleanup"）。
+        # store.load_workflow が None を返す orphan（DB から既に消えている）は
+        # state を組めないため warning のみ。dry-run 時は実 API 呼ばずプレビュー出力。
+        # dict の keys() は挿入順を保つため、観測順で同期される。
+        if sync_notion and deleted_workflow_ids:
+            _sync_stale_workflows_notion(
+                config=config,
+                store=store,
+                workflow_ids=list(deleted_workflow_ids),
+                dry_run=dry_run,
+            )
 
         # Phase E (v0.4.0): writeback errors / idempotency を 30 日経過で削除
         # worktree_root 不在でも実行する（DB 側のクリーンアップは worktree
-        # の有無と独立）。
-        try:
-            _cleanup_writeback_old_errors(config)
-        except Exception as e:
-            print(f"⚠️ writeback cleanup でエラー: {type(e).__name__}: {e}")
+        # の有無と独立）。dry-run 時は writeback cleanup も skip（実 DB 書き換え
+        # を伴うため副作用なしの原則を守る）。
+        if not dry_run:
+            try:
+                _cleanup_writeback_old_errors(config)
+            except Exception as e:
+                print(f"⚠️ writeback cleanup でエラー: {type(e).__name__}: {e}")
 
     elif args.gc_workflows:
         # gc-workflows のみの実行（workflow_id / --stale なし）。下の
