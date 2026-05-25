@@ -4,7 +4,7 @@ Environment Check Service
 環境変数とシステム設定をチェックするサービス。
 """
 
-import os
+from ...utils.skip_notion import is_skip_notion
 
 
 def check_environment() -> list[str]:
@@ -15,8 +15,9 @@ def check_environment() -> list[str]:
     """
     warnings = []
 
-    # HOKUSAI_SKIP_NOTION: 既に設定されている場合は警告
-    if os.environ.get("HOKUSAI_SKIP_NOTION") == "1":
+    # Issue #111: profile-aware な is_skip_notion() で判定（HOKUSAI_ACTIVE_PROFILE
+    # 経由の profile suffix env と legacy global の両方を統合評価）。
+    if is_skip_notion():
         warnings.append(
             "HOKUSAI_SKIP_NOTION=1: Notion接続をスキップモードで実行します"
         )

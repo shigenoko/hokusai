@@ -622,7 +622,10 @@ def _check_notion_mcp(mode: str) -> dict[str, Any]:
     label = "Notion MCP"
     required_for = ["notion_sync", "task_backend"]
 
-    if os.environ.get("HOKUSAI_SKIP_NOTION") == "1":
+    # Issue #111: profile-aware な is_skip_notion() に統一。HOKUSAI_ACTIVE_PROFILE
+    # が set されていれば profile suffix env (`HOKUSAI_SKIP_NOTION_<SLUG>`) も評価。
+    from ..utils.skip_notion import is_skip_notion
+    if is_skip_notion():
         return _build_result(
             service_id=service_id,
             label=label,

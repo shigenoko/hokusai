@@ -11,6 +11,7 @@ from enum import Enum
 from typing import NotRequired, Optional, TypedDict
 
 from .config import get_config
+from .utils.skip_notion import is_skip_notion as _is_skip_notion
 
 
 class PhaseStatus(str, Enum):
@@ -435,7 +436,10 @@ def create_initial_state(
         branch_hygiene_issues=[],
         cherry_picked_from=None,
         cherry_picked_commits=[],
-        notion_connected=os.environ.get("HOKUSAI_SKIP_NOTION") != "1",
+        # Issue #111: is_skip_notion() で HOKUSAI_ACTIVE_PROFILE + 旧 SKIP_NOTION
+        # を統合判定。profile を切り替えても別 profile の skip フラグが残らないよう
+        # profile-aware な lookup に統一。
+        notion_connected=not _is_skip_notion(),
         # Figma / Miro 連携
         miro_url=None,
         figma_url=None,
