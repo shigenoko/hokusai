@@ -73,6 +73,26 @@ def test_has_failed_workflow_started_isolates_workflows(tmp_path):
     assert store.has_failed_workflow_started("wf-other") is True
 
 
+def test_record_permanent_notion_sync_failure_is_idempotent(tmp_path):
+    """同一 idempotency_key の重複呼び出しでは errors に行が増えない（Round 1 指摘）"""
+    store = SQLiteStore(tmp_path / "wf.db")
+    key = "wf-y:pr_created:0:0"
+    for _ in range(3):
+        store.record_permanent_notion_sync_failure(
+            idempotency_key=key,
+            workflow_id="wf-y",
+            event_type="pr_created",
+            payload={"workflow_id": "wf-y"},
+            error="fail-fast",
+        )
+    with store._connect() as conn:
+        rows = conn.execute(
+            "SELECT COUNT(*) FROM notion_sync_errors WHERE idempotency_key = ?",
+            (key,),
+        ).fetchone()
+    assert rows[0] == 1, "同一 idempotency_key は 1 行のみ（重複挿入されない）"
+
+
 def test_record_permanent_notion_sync_failure_inserts_row(tmp_path):
     """errors テーブルに新規行が attempts=0 で挿入される"""
     store = SQLiteStore(tmp_path / "wf.db")

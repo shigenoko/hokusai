@@ -1030,11 +1030,24 @@ class SQLiteStore:
         `attempts=0` で記録する（retry を一度も試みていないため）。
         既存の `move_notion_sync_to_error` は outbox 経由のため、新規行を
         直接入れる別 helper として用意する。
+
+        **冪等性** (PR #110 Copilot Round 1 指摘): 同一 idempotency_key の失敗が
+        複数回発生しても errors 側に重複行を作らない。outbox は
+        `idempotency_key TEXT NOT NULL UNIQUE` で冪等担保しているが、errors
+        テーブルは履歴用に UNIQUE 制約を持たないため、INSERT 前に既存行を
+        check して二重挿入を抑止する。
         """
         import json
 
         now = datetime.now().isoformat()
         with self._connect() as conn:
+            existing = conn.execute(
+                "SELECT 1 FROM notion_sync_errors WHERE idempotency_key = ? LIMIT 1",
+                (idempotency_key,),
+            ).fetchone()
+            if existing is not None:
+                # 既に同じ key で errors に入っているため no-op（冪等性維持）
+                return
             conn.execute(
                 """
                 INSERT INTO notion_sync_errors (
