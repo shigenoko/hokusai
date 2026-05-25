@@ -239,7 +239,9 @@ def test_check_environment_warning_shows_actual_env_name():
 
 
 def test_check_environment_uses_profile_aware_helper():
-    """cli/services/environment.py が is_skip_notion() を経由している"""
+    """cli/services/environment.py が active_skip_env_name() 経由で
+    profile-aware lookup を提供している（is_skip_notion と同じ評価順）.
+    """
     from hokusai.cli.services.environment import check_environment
 
     # legacy 経路: HOKUSAI_SKIP_NOTION=1 で warning が出る（後方互換）
