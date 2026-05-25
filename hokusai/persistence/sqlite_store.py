@@ -1036,10 +1036,15 @@ class SQLiteStore:
         `idempotency_key TEXT NOT NULL UNIQUE` で冪等担保しているが、errors
         テーブルは履歴用に UNIQUE 制約を持たないため、INSERT 前に既存行を
         check して二重挿入を抑止する。
-        """
-        import json
 
+        **シリアライズ方針** (PR #110 Copilot Round 2 指摘):
+        `enqueue_notion_sync` と同じく `default=str` を渡し、datetime 等の
+        JSON 非対応型が payload に混ざっても TypeError で fail-fast 経路が落ちない
+        ようにする。落ちると通常 outbox fallback に分岐してしまい、fail-fast の
+        本来の目的（outbox 膨張抑止）が達成できなくなる。
+        """
         now = datetime.now().isoformat()
+        payload_json = json.dumps(payload, ensure_ascii=False, default=str)
         with self._connect() as conn:
             existing = conn.execute(
                 "SELECT 1 FROM notion_sync_errors WHERE idempotency_key = ? LIMIT 1",
@@ -1059,7 +1064,7 @@ class SQLiteStore:
                     idempotency_key,
                     workflow_id,
                     event_type,
-                    json.dumps(payload, ensure_ascii=False),
+                    payload_json,
                     error,
                     0,
                     now,

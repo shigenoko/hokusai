@@ -73,6 +73,40 @@ def test_has_failed_workflow_started_isolates_workflows(tmp_path):
     assert store.has_failed_workflow_started("wf-other") is True
 
 
+def test_record_permanent_notion_sync_failure_handles_non_json_types(tmp_path):
+    """payload に datetime 等の JSON 非対応型が混ざっても落ちない（Round 2 指摘）.
+
+    enqueue_notion_sync と同じく `default=str` でフォールバックする方針に揃え、
+    fail-fast 経路が TypeError で落ちて通常 outbox に fallback してしまう
+    バグを防ぐ。
+    """
+    from datetime import datetime as _dt
+
+    store = SQLiteStore(tmp_path / "wf.db")
+    # datetime はそのままでは json.dumps できないが、default=str で文字列化される
+    payload = {
+        "workflow_id": "wf-dt",
+        "occurred_at": _dt(2026, 5, 25, 19, 38, 0),
+    }
+    store.record_permanent_notion_sync_failure(
+        idempotency_key="wf-dt:pr_created:0:0",
+        workflow_id="wf-dt",
+        event_type="pr_created",
+        payload=payload,
+        error="fail-fast",
+    )
+    with store._connect() as conn:
+        row = conn.execute(
+            "SELECT payload_json FROM notion_sync_errors WHERE idempotency_key = ?",
+            ("wf-dt:pr_created:0:0",),
+        ).fetchone()
+    decoded = json.loads(row[0])
+    assert decoded["workflow_id"] == "wf-dt"
+    # default=str で datetime が文字列化されている
+    assert isinstance(decoded["occurred_at"], str)
+    assert "2026-05-25" in decoded["occurred_at"]
+
+
 def test_record_permanent_notion_sync_failure_is_idempotent(tmp_path):
     """同一 idempotency_key の重複呼び出しでは errors に行が増えない（Round 1 指摘）"""
     store = SQLiteStore(tmp_path / "wf.db")
