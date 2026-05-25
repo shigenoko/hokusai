@@ -40,6 +40,23 @@ def profile_skip_env_name(profile_name: str) -> str:
     return f"HOKUSAI_SKIP_NOTION_{slug}"
 
 
+def active_skip_env_name() -> str | None:
+    """skip を起こしている env 変数名を返す（PR #112 Copilot Round 1 指摘）.
+
+    warning / skip-reason 文言に正確な env 名（``HOKUSAI_SKIP_NOTION_<SLUG>`` か
+    legacy global ``HOKUSAI_SKIP_NOTION`` か）を出すための補助 helper。
+    skip 状態でないなら None を返す。``is_skip_notion`` と同じ評価順を踏襲。
+    """
+    active = os.environ.get(ACTIVE_PROFILE_ENV, "").strip()
+    if active:
+        suffix_name = profile_skip_env_name(active)
+        if os.environ.get(suffix_name) == "1":
+            return suffix_name
+    if os.environ.get(LEGACY_GLOBAL_ENV) == "1":
+        return LEGACY_GLOBAL_ENV
+    return None
+
+
 def is_skip_notion(profile_name: str | None = None) -> bool:
     """Notion 同期を skip するか判定する。
 

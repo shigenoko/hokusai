@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from hokusai.utils.skip_notion import (  # noqa: E402
     ACTIVE_PROFILE_ENV,
     LEGACY_GLOBAL_ENV,
+    active_skip_env_name,
     is_skip_notion,
     profile_skip_env_name,
     set_active_profile,
@@ -171,6 +172,72 @@ def test_set_active_profile_empty_string_is_noop():
 # --- core パス置換の統合テスト ---
 
 
+# --- active_skip_env_name の評価テスト（Round 1 指摘） ---
+
+
+def test_active_skip_env_name_returns_none_when_no_skip():
+    """skip 状態でないなら None"""
+    with patch.dict(os.environ, {}, clear=True):
+        assert active_skip_env_name() is None
+
+
+def test_active_skip_env_name_returns_profile_suffix_when_active():
+    """context env で active profile が set されており suffix env が "1" なら suffix 名を返す"""
+    with patch.dict(
+        os.environ,
+        {
+            ACTIVE_PROFILE_ENV: "hokusai",
+            "HOKUSAI_SKIP_NOTION_HOKUSAI": "1",
+        },
+        clear=True,
+    ):
+        assert active_skip_env_name() == "HOKUSAI_SKIP_NOTION_HOKUSAI"
+
+
+def test_active_skip_env_name_returns_legacy_when_only_global_set():
+    """profile suffix が無く legacy global のみなら legacy 名を返す"""
+    with patch.dict(os.environ, {LEGACY_GLOBAL_ENV: "1"}, clear=True):
+        assert active_skip_env_name() == LEGACY_GLOBAL_ENV
+
+
+def test_active_skip_env_name_prefers_profile_suffix_over_legacy():
+    """両方 set されていたら profile suffix が優先される"""
+    with patch.dict(
+        os.environ,
+        {
+            ACTIVE_PROFILE_ENV: "hokusai",
+            "HOKUSAI_SKIP_NOTION_HOKUSAI": "1",
+            LEGACY_GLOBAL_ENV: "1",
+        },
+        clear=True,
+    ):
+        assert active_skip_env_name() == "HOKUSAI_SKIP_NOTION_HOKUSAI"
+
+
+# --- 文言動的化テスト（Round 1 指摘） ---
+
+
+def test_check_environment_warning_shows_actual_env_name():
+    """warning 文言に実際に効いている env 名が入る"""
+    from hokusai.cli.services.environment import check_environment
+
+    with patch.dict(
+        os.environ,
+        {
+            ACTIVE_PROFILE_ENV: "hokusai",
+            "HOKUSAI_SKIP_NOTION_HOKUSAI": "1",
+        },
+        clear=True,
+    ):
+        warnings = check_environment()
+        # profile suffix env 名が含まれる
+        assert any("HOKUSAI_SKIP_NOTION_HOKUSAI=1" in w for w in warnings)
+        # legacy 名のみは含まれない（profile suffix が優先表示）
+        assert not any(
+            w.startswith("HOKUSAI_SKIP_NOTION=1") for w in warnings
+        )
+
+
 def test_check_environment_uses_profile_aware_helper():
     """cli/services/environment.py が is_skip_notion() を経由している"""
     from hokusai.cli.services.environment import check_environment
@@ -181,6 +248,7 @@ def test_check_environment_uses_profile_aware_helper():
         assert any("HOKUSAI_SKIP_NOTION=1" in w for w in warnings)
 
     # 新経路: profile suffix env で warning（active profile via context env）
+    # Round 1 対応: 文言は実際に効いている env 名を含むようになった
     with patch.dict(
         os.environ,
         {
@@ -190,7 +258,7 @@ def test_check_environment_uses_profile_aware_helper():
         clear=True,
     ):
         warnings = check_environment()
-        assert any("HOKUSAI_SKIP_NOTION=1" in w for w in warnings)
+        assert any("HOKUSAI_SKIP_NOTION_HOKUSAI=1" in w for w in warnings)
 
     # どちらも無ければ warning 出ない
     with patch.dict(os.environ, {}, clear=True):

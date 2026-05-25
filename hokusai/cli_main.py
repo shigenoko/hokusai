@@ -795,8 +795,10 @@ def main():
     # is_skip_notion() が profile-aware lookup できるようにする。
     # legacy 経路 (notion_helpers / 各 _safe_notion_dispatch warning) は
     # 後続 PR で置換する（本 PR スコープ外）。
+    # profile_arg は既に explicit / implicit を統合済みなのでそのまま渡す
+    # （Copilot Round 1 指摘: `profile_arg or implicit_default_profile` の or は冗長）。
     from .utils.skip_notion import set_active_profile
-    set_active_profile(profile_arg or implicit_default_profile)
+    set_active_profile(profile_arg)
 
     # dashboard コマンド: config 解決後に起動（WorkflowRunner は不要）
     if args.command == "dashboard":
