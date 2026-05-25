@@ -708,7 +708,11 @@ class WorkflowRunner:
             # （is_configured() は env が揃っていれば True になり得るが、
             # SKIP_NOTION=1 はそれより上位のオプトアウトシグナル）。
             # Issue #111: profile-aware な is_skip_notion() に統一。
-            if is_skip_notion():
+            # WorkflowRunner は self.profile_name を保持しているので明示的に渡し、
+            # HOKUSAI_ACTIVE_PROFILE が未 setenv（CLI main() を経由しない
+            # テスト/ライブラリ利用）でも profile suffix env を評価可能にする
+            # （Copilot Round 3 指摘）。
+            if is_skip_notion(self.profile_name):
                 return None
 
             from .integrations.notion_dashboard.client import NotionAPIClient
@@ -905,8 +909,9 @@ class WorkflowRunner:
 
             workflow_id = existing["workflow_id"]
             current_phase = existing["current_phase"]
-            # Issue #111: profile-aware な is_skip_notion() に統一。
-            notion_connected_env = not is_skip_notion()
+            # Issue #111 / Round 3: self.profile_name を明示的に渡して
+            # env 依存を減らす。
+            notion_connected_env = not is_skip_notion(self.profile_name)
             # Notion リトライで True に復元済みなら上書きしない
             if notion_connected_env or existing.get("notion_connected") is not True:
                 if existing.get("notion_connected") != notion_connected_env:
@@ -924,8 +929,8 @@ class WorkflowRunner:
             run_mode=("step" if self.step_mode else "auto"),
         )
         # Notion接続状態を実行時点の環境に合わせて明示的に反映
-        # Issue #111: profile-aware な is_skip_notion() に統一。
-        state["notion_connected"] = not is_skip_notion()
+        # Issue #111 / Round 3: self.profile_name を明示的に渡して env 依存を減らす。
+        state["notion_connected"] = not is_skip_notion(self.profile_name)
         # profile_name を state に注入（Phase E、workflows.profile_name 永続化用）
         # None の場合は state に入れず、save_workflow 側の COALESCE で既存値を保持
         if self.profile_name is not None:
@@ -1045,8 +1050,8 @@ class WorkflowRunner:
         # 実行時点の Notion 接続状態を state に反映し、ダッシュボードで即時可視化する
         # ただし、ダッシュボードからの Notion リトライで True に復元済みの場合は
         # 上書きしない（非対話モードの接続チェック失敗で False に戻るのを防止）
-        # Issue #111: profile-aware な is_skip_notion() に統一。
-        notion_connected_env = not is_skip_notion()
+        # Issue #111 / Round 3: self.profile_name を明示的に渡して env 依存を減らす。
+        notion_connected_env = not is_skip_notion(self.profile_name)
         if notion_connected_env or state.get("notion_connected") is not True:
             state["notion_connected"] = notion_connected_env
         self.store.save_workflow(workflow_id, state)

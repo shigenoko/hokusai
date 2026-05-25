@@ -83,8 +83,12 @@ def is_skip_notion(profile_name: str | None = None) -> bool:
 def set_active_profile(profile_name: str | None) -> None:
     """``HOKUSAI_ACTIVE_PROFILE`` を setenv する（``main()`` から呼ぶ想定）.
 
-    ``profile_name`` が None / 空文字なら何もしない（既存 env を消したり上書き
-    したりしない）。
+    既に env が set されていれば **上書きしない** (Copilot Round 3 指摘:
+    docstring の「既存 env を消したり上書きしたりしない」契約と整合)。
+    親プロセスが意図的に ``HOKUSAI_ACTIVE_PROFILE`` を export しているケース
+    （subprocess / 外部呼び出し）を尊重するために setdefault を使う。
+
+    ``profile_name`` が None / 空文字なら何もしない。
     """
     if profile_name and profile_name.strip():
-        os.environ[ACTIVE_PROFILE_ENV] = profile_name.strip()
+        os.environ.setdefault(ACTIVE_PROFILE_ENV, profile_name.strip())
