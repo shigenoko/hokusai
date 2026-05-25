@@ -248,12 +248,15 @@ def _build_parser():
     cleanup_parser.add_argument(
         "--dry-run",
         action="store_true",
-        # default=argparse.SUPPRESS: notion-migrate-schema と同じ理由
-        # （Copilot 指摘）。トップレベル --dry-run が store_true で常に
-        # 属性追加されるため、サブパーサ側で `default=False` を持つと
-        # `hokusai --dry-run cleanup --stale` がサブパーサ側未指定 False で
-        # 上書きされる。SUPPRESS なら未指定時に属性を追加せず、トップレベルの
-        # 値を保持できる。参照側は getattr(args, "dry_run", False) で取得。
+        # dest="cleanup_dry_run": トップレベル --dry-run (`print_dry_run_mode`
+        # 用) と cleanup サブパーサの --dry-run (--stale worktree 削除を空振り
+        # させる) は意味が異なるため、namespace 属性を分離する（Copilot Round 5
+        # 指摘）。
+        # 旧実装は dest 衝突 + SUPPRESS 併用で `hokusai --dry-run cleanup wf-x`
+        # も M2.6 validation で reject されていたが、トップレベル --dry-run は
+        # 元々 cleanup では no-op なので、後方互換のため別 dest に逃がす。
+        # 参照は getattr(args, "cleanup_dry_run", False) で取る。
+        dest="cleanup_dry_run",
         default=argparse.SUPPRESS,
         help=(
             "--stale と組み合わせて、実際の worktree 削除を行わず削除予定を "
@@ -2250,7 +2253,11 @@ def _handle_cleanup(args, config):
     # `hokusai cleanup wf-xxx --dry-run` のように workflow_id 指定モードで一緒に
     # 渡されたとき、現状の workflow_id 経路は両フラグを参照しないため「dry-run
     # なので安全」とユーザが誤解して実削除される事故になり得る。明示的に reject する。
-    dry_run_flag = bool(getattr(args, "dry_run", False))
+    #
+    # Copilot Round 5 指摘: トップレベル --dry-run は元々 cleanup では no-op
+    # なので reject 対象外。cleanup サブパーサの --dry-run のみ別 dest
+    # ("cleanup_dry_run") で受けて、ここでは cleanup 側のみを判定する。
+    dry_run_flag = bool(getattr(args, "cleanup_dry_run", False))
     sync_notion_flag = bool(getattr(args, "sync_notion", False))
     if (dry_run_flag or sync_notion_flag) and not args.stale:
         bad_flags = []
@@ -2265,8 +2272,12 @@ def _handle_cleanup(args, config):
         # workflow_id 指定モードのときだけ --cancel-reason の案内を追加。
         # `cleanup --gc-workflows --dry-run` や引数なしのケースでは
         # --cancel-reason が無関係なため案内に含めない（Copilot Round 4 指摘）。
+        # 連結時の文の区切りを明示するため改行を挟む（Copilot Round 5 指摘）。
         if args.workflow_id:
-            base_msg += "workflow_id 指定モードで Notion 同期したい場合は --cancel-reason を使ってください。"
+            base_msg += (
+                "\n  workflow_id 指定モードで Notion 同期したい場合は "
+                "--cancel-reason を使ってください。"
+            )
         print(base_msg, file=sys.stderr)
         sys.exit(1)
 

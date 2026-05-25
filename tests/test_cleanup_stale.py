@@ -38,10 +38,16 @@ def _make_args(
     gc_workflows=False,
     retention_days=90,
 ) -> argparse.Namespace:
+    """テスト用の args namespace を組む。
+
+    cleanup の --dry-run は `dest="cleanup_dry_run"` で受けるため、テスト側でも
+    `cleanup_dry_run` 属性を使う。トップレベル --dry-run（args.dry_run）は
+    cleanup では参照されないので、ここでは設定しない。
+    """
     return argparse.Namespace(
         workflow_id=workflow_id,
         stale=stale,
-        dry_run=dry_run,
+        cleanup_dry_run=dry_run,
         sync_notion=sync_notion,
         cancel_reason=cancel_reason,
         gc_workflows=gc_workflows,
@@ -280,24 +286,27 @@ def test_stale_normal_runs_writeback_cleanup(tmp_path, monkeypatch):
 
 
 def test_parser_dry_run_after_subcommand():
-    """`hokusai cleanup --stale --dry-run` で args.dry_run=True"""
+    """`hokusai cleanup --stale --dry-run` で args.cleanup_dry_run=True"""
     parser, _, _ = cli_main._build_parser()
     args = parser.parse_args(["cleanup", "--stale", "--dry-run"])
-    assert getattr(args, "dry_run", False) is True
+    assert getattr(args, "cleanup_dry_run", False) is True
 
 
-def test_parser_dry_run_before_subcommand():
-    """`hokusai --dry-run cleanup --stale` でもサブパーサが上書きせず True を維持"""
+def test_parser_dry_run_before_subcommand_no_cleanup_dry_run():
+    """`hokusai --dry-run cleanup --stale` ではトップレベル dry_run のみ True、
+    cleanup_dry_run は属性無し（後方互換: トップレベル --dry-run は cleanup では no-op）。
+    """
     parser, _, _ = cli_main._build_parser()
     args = parser.parse_args(["--dry-run", "cleanup", "--stale"])
     assert getattr(args, "dry_run", False) is True
+    assert getattr(args, "cleanup_dry_run", False) is False
 
 
 def test_parser_dry_run_default_false():
-    """`hokusai cleanup --stale` でフラグ未指定なら dry_run は False（トップレベル既定）"""
+    """`hokusai cleanup --stale` でフラグ未指定なら cleanup_dry_run は False"""
     parser, _, _ = cli_main._build_parser()
     args = parser.parse_args(["cleanup", "--stale"])
-    assert getattr(args, "dry_run", False) is False
+    assert getattr(args, "cleanup_dry_run", False) is False
 
 
 def test_parser_sync_notion_default_false():
@@ -340,6 +349,32 @@ def test_sync_notion_without_stale_rejected(tmp_path, capsys):
     assert excinfo.value.code == 1
     captured = capsys.readouterr()
     assert "--sync-notion" in captured.err
+
+
+def test_toplevel_dry_run_does_not_reject_cleanup(tmp_path, monkeypatch):
+    """`hokusai --dry-run cleanup wf-x` のように **トップレベル** --dry-run のみ
+    指定された場合は M2.6 validation で reject されない（後方互換、Round 5 指摘）。
+
+    cleanup_dry_run が False のまま args.dry_run のみ True になる状況を再現し、
+    validation を通過することを確認する。
+    """
+    config = _make_config(tmp_path)
+    store = SQLiteStore(config.database_path)
+    _seed_active_workflow(store, "wf-x")
+    # workflow_id 経路は worktree_created=True が無いと no-op で抜けるので
+    # state も含めて整える
+    args = _make_args(workflow_id="wf-x")
+    # トップレベル --dry-run 相当: args.dry_run のみ True、cleanup_dry_run は False
+    args.dry_run = True
+
+    # workflow_id 経路は _warn_cleanup_without_cancel_reason を呼ぶので
+    # Notion 連携を skip するよう SKIP_NOTION を立てる
+    monkeypatch.setenv("HOKUSAI_SKIP_NOTION", "1")
+
+    # exit(1) せず正常完了することを確認
+    with redirect_stdout(io.StringIO()):
+        cli_main._handle_cleanup(args, config)
+    # 例外なしで抜けたら OK（assertion 不要、SystemExit 出れば test 失敗）
 
 
 def test_reject_message_includes_cancel_reason_only_for_workflow_id_mode(tmp_path, capsys):
