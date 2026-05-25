@@ -12,8 +12,51 @@ HOKUSAI のすべての特筆すべき変更をこのファイルに記録する
 
 ## [Unreleased]
 
-### 追加 / 変更 / 削除予定
-- 未定
+LLM Gateway **Phase 2 enforcement ロードマップ** を完成。Phase 1 audit log-only から、profile policy 違反で LLM 実送信を抑止する Phase 2 enforcement までの全配線を入れた（[ロードマップ](https://www.notion.so/LLM-Gateway-Phase-2-Enforcement-36985495565d81949239fd2bdc831e00)、出典: `docs/dogfooding-findings.md` / PR #79）。
+
+ロードマップ構成: M0 前提条件（3 PR）→ M1 enforcement 切替（3 PR）→ M2 独立小穴（5 PR）→ 本体配線（1 PR）の 12 PR + README 整合（1 PR）。`LLMGatewayConfig.log_only=False` を opt-in した profile でのみ block が発火し、`log_only=True`（default）では後方互換 100%。
+
+### Added
+
+#### M0: Phase 2 enforcement の前提条件
+
+- **M0.1** ([#81](https://github.com/shigenoko/hokusai/pull/81)): `LLMGatewayInterceptor._emit_audit` を SQLite `audit_logs` に永続化。`workflow_id` が埋まる呼び出しのみ INSERT（orphan / FK 違反回避）。`_AUDIT_STORE_CACHE` モジュールレベル cache で DDL 再実行を抑止。
+- **M0.2** ([#83](https://github.com/shigenoko/hokusai/pull/83)): `hokusai start` 冒頭で Notion DB share 健全性チェック（`NotionSyncDispatcher.check_db_share_health`）。404 を構造的検出（`e.status == 404`）、preflight 専用 client（`max_attempts=1`）で retry 抑制。
+- **M0.3** ([#85](https://github.com/shigenoko/hokusai/pull/85)): `hokusai status` に Notion outbox 失敗の可視化追加。`SQLiteStore.fetch_recent_outbox_with_errors` で `next_attempt_at ASC` 安定 sort。
+
+#### M1: Enforcement 切替経路
+
+- **M1.1** ([#87](https://github.com/shigenoko/hokusai/pull/87)): `interceptor.intercept()` に `decision="block"` 経路を追加（`log_only=False` + `policy_hits` 非空）。`Decision.BLOCK` を既存 vocabulary と整合。
+- **M1.2** ([#89](https://github.com/shigenoko/hokusai/pull/89)): `configs/profile-config-template.yaml` / `example-profile-company.yaml` に `llm_gateway:` セクション追加。`log_only` ロールアウト戦略（自社 profile 先行 enforce / 案件 profile 維持）をコメントで明示。
+- **M1.3** ([#91](https://github.com/shigenoko/hokusai/pull/91)): `docs/hokusai-llm-gateway-requirements.md` に **§4.4 fail-open 原則** を新設。明示的 `block` / `require_human_approval` 以外の Gateway 内部異常は workflow を止めない契約を文書化、§14 受け入れ基準にも反映。
+
+#### M2: 独立小穴
+
+- **M2.1** ([#97](https://github.com/shigenoko/hokusai/pull/97)): `HOKUSAI_SKIP_NOTION=1` pre-set 時に profile 整合性 warning を `main()` で出す。Notion 設定済み profile での mismatch を可視化。
+- **M2.2** ([#99](https://github.com/shigenoko/hokusai/pull/99)): `hokusai cleanup` `--cancel-reason` 未指定時の Notion ゴースト警告（worktree 削除済み but Notion Status 未更新の発生防止）。
+- **M2.3** ([#95](https://github.com/shigenoko/hokusai/pull/95)): `default_profile` を CLI 全体で implicit 解決。`hokusai/config/profiles.py::try_resolve_default_profile_name()` を fail-safe（`is_file()` + 1 バイト read 検証）で実装。`--profile` 未指定 + `-c/--config` 未指定で registry の `default_profile` を自動適用。CLI 表示で `(default_profile)` suffix で明示と区別。
+- **M2.4** ([#93](https://github.com/shigenoko/hokusai/pull/93)): `hokusai prime` 空状態に構成要素別 diagnostics 行を追加（`*Project Memory DB: 未設定 (env XXX)*` 等の原因切り分けライン）。`_build_prime_diagnostics` 純粋関数で実装。
+- **M2.5** ([#101](https://github.com/shigenoko/hokusai/pull/101)): `hokusai cleanup --gc-workflows [--retention-days N]`（default 90 日）。完了済み workflow（`current_phase >= 10`）を 9 dependent table と cascade 削除。`sqlite_master` existence check + argparse `type` で `retention >= 1` 検証。
+
+#### 本体配線
+
+- **[#103](https://github.com/shigenoko/hokusai/pull/103)**: `LLMGatewayBlockedError` 例外クラスを `dispatch.py` に新設。`dispatch_via_gateway` で `decision="block"` のとき raise、3 client（claude_code / codex / gemini）の except 句で fail-closed 伝播（M1.3 §4.4 例外）。Gateway 内部の予期せぬ例外は引き続き fail-open。`prompt` 本文は例外メッセージ / attributes に **含めない**（要件 §14 secret / PII 保護）。
+
+### Docs
+
+- **[#91](https://github.com/shigenoko/hokusai/pull/91)** (上記 M1.3 と同 PR): 要件 doc §4.4 fail-open 原則 + §14 受け入れ基準。
+- **[#105](https://github.com/shigenoko/hokusai/pull/105)**: README (英日両版) を v0.4.8 / Phase 2 enforcement / 新 CLI コマンドに整合化。LLM Gateway / `cleanup` 新フラグ / Notion 環境変数 6 件 / `default_profile` implicit 解決 / v0.4.8 タグを反映。
+
+### 後方互換
+
+- `LLMGatewayConfig.log_only=True`（default）では Phase 2 enforcement の挙動は一切発動しない（M1.1 仕様で BLOCK 判定が起きない）
+- profile registry を持たない環境では従来通り `claude-workflow.yaml` 探索にフォールバック（M2.3 fail-safe）
+- legacy DB（古いスキーマ）でも `--gc-workflows` は `sqlite_master` existence check で skip（M2.5）
+- 既存テスト 2000+ ケース全 pass（doc 変更含む）
+
+### バージョン
+
+- `pyproject.toml` / `hokusai/__init__.py`: 0.4.8 のまま（Phase 2 enforcement 公開リリース時に bump 予定。`log_only=True` default で実害なし）
 
 ---
 
