@@ -327,7 +327,7 @@ def test_dry_run_without_stale_rejected(tmp_path, capsys):
     assert excinfo.value.code == 1
     captured = capsys.readouterr()
     assert "--dry-run" in captured.err
-    assert "--stale と組み合わせて" in captured.err
+    assert "--stale 専用" in captured.err
 
 
 def test_sync_notion_without_stale_rejected(tmp_path, capsys):

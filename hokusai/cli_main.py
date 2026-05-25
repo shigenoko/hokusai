@@ -2259,8 +2259,9 @@ def _handle_cleanup(args, config):
         if sync_notion_flag:
             bad_flags.append("--sync-notion")
         print(
-            f"✗ {' / '.join(bad_flags)} は --stale と組み合わせて使うフラグです。"
-            "workflow_id 指定モードでは --cancel-reason を使ってください。",
+            f"✗ {' / '.join(bad_flags)} は --stale 専用のフラグです "
+            "（workflow_id 指定 / --gc-workflows 単独 / 引数なしと併用不可）。"
+            "workflow_id 指定モードで Notion 同期したい場合は --cancel-reason を使ってください。",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -2373,7 +2374,7 @@ def _handle_cleanup(args, config):
                 print(f"✓ {cleaned} 件の stale worktree を削除しました")
 
         # M2.6: --sync-notion 時、stale 削除した workflow について
-        # Notion Workflows DB の Status を Canceled 化する（reason="stale cleanup"）。
+        # Notion Workflows DB の Status を Canceled 化する（cancel_reason="stale cleanup"）。
         # store.load_workflow が None を返す orphan（DB から既に消えている）は
         # state を組めないため warning のみ。dry-run 時は実 API 呼ばずプレビュー出力。
         # dict の keys() は挿入順を保つため、観測順で同期される。
