@@ -43,6 +43,28 @@ from .ui.console import (
 from .workflow import WorkflowRunner
 
 
+def _positive_retention_days(value: str) -> int:
+    """argparse type=... 用の retention_days バリデータ（M2.5 / #100）。
+
+    1 以上の整数のみ許容し、それ以外は argparse.ArgumentTypeError を投げて
+    usage と共に非 0 終了させる（PR #101 Copilot Round 1 #2 指摘: user error
+    を CLI 成功終了で隠さない）。
+    """
+    import argparse
+
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError(
+            f"--retention-days には整数を指定してください: got {value!r}"
+        ) from None
+    if parsed < 1:
+        raise argparse.ArgumentTypeError(
+            f"--retention-days は 1 以上の整数を指定してください: got {parsed}"
+        )
+    return parsed
+
+
 def _build_parser():
     """CLI 用 argparse パーサを構築する。
 
@@ -201,6 +223,26 @@ def _build_parser():
             "cleanup で workflow を Canceled 化する際の理由を Workflows DB の "
             "Cancel Reason プロパティに記入する（要件 §9.3.2、引き継ぎ運用時に "
             "推奨）。Workflows DB ID が未設定の環境では no-op。"
+        ),
+    )
+    cleanup_parser.add_argument(
+        "--gc-workflows",
+        action="store_true",
+        help=(
+            "完了済み workflow (current_phase >= 10) のうち --retention-days "
+            "より古いものを workflow.db から cascade 削除する（findings §4.1 / "
+            "Issue #100 / M2.5、opt-in なため明示指定が必要）"
+        ),
+    )
+    cleanup_parser.add_argument(
+        "--retention-days",
+        type=_positive_retention_days,
+        default=90,
+        metavar="N",
+        help=(
+            "--gc-workflows と組み合わせて使う保持期間（日数、1 以上の整数）。"
+            "既定 90 日。進行中 workflow (current_phase < 10) は absolutely "
+            "削除されない。"
         ),
     )
 
@@ -2180,55 +2222,112 @@ def _handle_cleanup(args, config):
 
     elif args.stale:
         # 完了済み workflow の worktree を一括削除
+        # PR #101 Copilot Round 2 #6 指摘: 旧実装は worktree_root 不在時に
+        # `return` で関数を抜けていたため、`--stale --gc-workflows` 併用時に
+        # 後段の GC post-action に到達できないバグがあった。worktree 走査が
+        # no-op になるだけにして、writeback cleanup と GC は必ず実行する。
         workflows = store.list_active_workflows()
-
-        # アクティブでない workflow（Phase 10 完了済み）の state を取得
-        # list_active_workflows は current_phase < 10 のみなので、
-        # worktree_root を直接スキャンする
         worktree_root = config.worktree_root
-        if not worktree_root.exists():
-            print("✓ worktree ディレクトリが存在しません。削除対象なし。")
-            return
-
-        active_ids = {w["workflow_id"] for w in workflows}
         cleaned = 0
 
-        for wt_dir in worktree_root.iterdir():
-            if not wt_dir.is_dir():
-                continue
-            # ディレクトリ名から workflow_id を抽出（{repo_name}_{wf-xxxx}）
-            parts = wt_dir.name.rsplit("_wf-", 1)
-            if len(parts) == 2:
-                wf_id = f"wf-{parts[1]}"
-                if wf_id not in active_ids:
+        if not worktree_root.exists():
+            print("✓ worktree ディレクトリが存在しません。worktree 削除はスキップ。")
+        else:
+            active_ids = {w["workflow_id"] for w in workflows}
+
+            for wt_dir in worktree_root.iterdir():
+                if not wt_dir.is_dir():
+                    continue
+                # ディレクトリ名から workflow_id を抽出（{repo_name}_{wf-xxxx}）
+                parts = wt_dir.name.rsplit("_wf-", 1)
+                if len(parts) == 2:
+                    wf_id = f"wf-{parts[1]}"
+                    if wf_id not in active_ids:
+                        try:
+                            import shutil
+                            shutil.rmtree(wt_dir)
+                            print(f"🧹 stale 削除: {wt_dir}")
+                            cleaned += 1
+                        except Exception as e:
+                            print(f"⚠️ 削除失敗: {wt_dir}: {e}")
+
+            # git worktree prune で削除済みディレクトリの登録を解除
+            if cleaned > 0:
+                for repo in config.get_all_repositories():
                     try:
-                        import shutil
-                        shutil.rmtree(wt_dir)
-                        print(f"🧹 stale 削除: {wt_dir}")
-                        cleaned += 1
-                    except Exception as e:
-                        print(f"⚠️ 削除失敗: {wt_dir}: {e}")
+                        git = GitClient(str(repo.path))
+                        git._run_git("worktree", "prune")
+                    except Exception:
+                        pass
 
-        # git worktree prune で削除済みディレクトリの登録を解除
-        if cleaned > 0:
-            for repo in config.get_all_repositories():
-                try:
-                    git = GitClient(str(repo.path))
-                    git._run_git("worktree", "prune")
-                except Exception:
-                    pass
-
-        print(f"✓ {cleaned} 件の stale worktree を削除しました")
+            print(f"✓ {cleaned} 件の stale worktree を削除しました")
 
         # Phase E (v0.4.0): writeback errors / idempotency を 30 日経過で削除
+        # worktree_root 不在でも実行する（DB 側のクリーンアップは worktree
+        # の有無と独立）。
         try:
             _cleanup_writeback_old_errors(config)
         except Exception as e:
             print(f"⚠️ writeback cleanup でエラー: {type(e).__name__}: {e}")
 
+    elif args.gc_workflows:
+        # gc-workflows のみの実行（workflow_id / --stale なし）。下の
+        # post-action ブロックで処理されるため、ここでは何もしない。
+        pass
     else:
-        print("✗ workflow_id または --stale を指定してください")
+        print(
+            "✗ workflow_id, --stale, または --gc-workflows を指定してください"
+        )
         sys.exit(1)
+
+    # M2.5 (#100): opt-in な workflow 行 GC。workflow_id / --stale / 単独
+    # いずれのモードでも `--gc-workflows` が立っていれば実行する。
+    # retention_days の不正値は argparse 側 (_positive_retention_days) で
+    # 事前 reject されているため、ここでは予期せぬ実行時例外のみ握り潰す
+    # （PR #101 Copilot Round 1 #2 指摘で ValueError catch を削除）。
+    if args.gc_workflows:
+        try:
+            _gc_old_workflows(store, args.retention_days)
+        except Exception as e:
+            print(
+                f"⚠️ workflow GC でエラー: {type(e).__name__}: {e}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+
+def _gc_old_workflows(store, retention_days: int) -> None:
+    """`hokusai cleanup --gc-workflows` の本体ハンドラ（Issue #100 / M2.5）。
+
+    SQLiteStore.delete_old_completed_workflows を呼び、count summary を
+    stdout に出力する。`retention_days < 1` の入力値検証は argparse 側
+    (`_positive_retention_days`) で事前に reject される設計なので、ここでは
+    例外変換は行わない（PR #101 Copilot Round 2 #3 指摘で docstring 整合）。
+    予期せぬ実行時例外（DB lock 等）は呼び出し側 `_handle_cleanup` の
+    try/except で stderr 出力 + sys.exit(1) に変換される。
+    """
+    counts = store.delete_old_completed_workflows(
+        retention_days=retention_days
+    )
+    workflows_deleted = counts.get("workflows", 0)
+    if workflows_deleted == 0:
+        print(
+            f"✓ workflow GC: {retention_days} 日以上前の完了 workflow なし "
+            "（削除対象 0 件）"
+        )
+        return
+
+    print(
+        f"🧹 workflow GC: {workflows_deleted} 件の完了 workflow を削除 "
+        f"(retention: {retention_days} 日)"
+    )
+    detail_parts = [
+        f"{name}={n}"
+        for name, n in counts.items()
+        if n > 0 and name != "workflows"
+    ]
+    if detail_parts:
+        print("    cascade: " + ", ".join(detail_parts))
 
 
 def _cleanup_writeback_old_errors(config) -> None:

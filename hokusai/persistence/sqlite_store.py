@@ -1178,3 +1178,136 @@ class SQLiteStore:
             deleted = cursor.rowcount
             conn.commit()
             return deleted
+
+    # workflow_id をキーに持つ依存テーブル（M2.5 / #100 cascade-delete 用）。
+    # workflows テーブル自体を含めず、cascade 対象の dependent table のみ列挙。
+    # レガシー DB でテーブル不在の場合は skip するため try/except で個別に処理。
+    _WORKFLOW_DEPENDENT_TABLES: tuple[str, ...] = (
+        "checkpoints",
+        "audit_logs",
+        "notion_sync_outbox",
+        "notion_sync_errors",
+        "figma_sync_outbox",
+        "figma_sync_errors",
+        "miro_sync_outbox",
+        "miro_sync_errors",
+        "design_writeback_idempotency",
+    )
+
+    def delete_old_completed_workflows(
+        self, retention_days: int = 90
+    ) -> dict[str, int]:
+        """完了済み workflow (current_phase >= 10) のうち `updated_at` が
+        `retention_days` 日以上前のものを cascade 削除する（Issue #100 / M2.5）。
+
+        findings §4.1: cleanup 後も `workflows` 行が残って DB が肥大化する
+        運用穴への対応。`hokusai cleanup --gc-workflows` から opt-in で
+        呼ばれる前提（自動実行はしない）。
+
+        Cascade 削除対象:
+        - `workflows`（target）
+        - `_WORKFLOW_DEPENDENT_TABLES` に列挙した workflow_id-keyed テーブル
+          （checkpoints / audit_logs / notion_sync_outbox / errors / figma_*
+          / miro_* / design_writeback_idempotency）
+
+        安全性:
+        - `current_phase >= 10` のみ対象。進行中 workflow は絶対に削除しない。
+        - `retention_days < 1` は ValueError（最小 1 日の保持を強制）。
+        - レガシー DB で dependent table が存在しないケースは
+          `sqlite_master` を事前 query して存在テーブルのみ対象とする方式で
+          skip する（PR #101 Copilot Round 1 #1 指摘で try/except 握り潰しを
+          廃止。これにより DB lock / I/O error / SQL typo 等の真の異常は正しく
+          上位に伝播する）。
+        - 単一 transaction 内で実行（依存テーブル削除途中で失敗しても
+          workflows は残し、全体 rollback される）。
+
+        Args:
+            retention_days: 保持期間（日数）。`updated_at` がこの日数以上
+                前の completed workflow が削除対象。既定 90 日。
+
+        Returns:
+            `{"workflows": N, "checkpoints": N, ...}` 形式の per-table 実
+            削除件数辞書（chunk ごとの `cursor.rowcount` を加算した実数で、
+            SELECT 後の race condition でズレないようにする。PR #101 Copilot
+            Round 2 #2 指摘）。dependent table が `sqlite_master` で不在なら
+            0 で含まれる。
+
+        Raises:
+            ValueError: `retention_days < 1`
+        """
+        if retention_days < 1:
+            raise ValueError(
+                f"retention_days must be >= 1, got {retention_days}"
+            )
+
+        from datetime import timedelta
+
+        cutoff = (datetime.now() - timedelta(days=retention_days)).isoformat()
+        counts: dict[str, int] = {"workflows": 0}
+        for table in self._WORKFLOW_DEPENDENT_TABLES:
+            counts[table] = 0
+
+        with self._connect() as conn:
+            # 1. 対象 workflow_id を取得（completed + updated_at 古い）
+            cursor = conn.execute(
+                "SELECT workflow_id FROM workflows "
+                "WHERE current_phase >= 10 AND updated_at < ?",
+                (cutoff,),
+            )
+            target_ids = [row[0] for row in cursor.fetchall()]
+            if not target_ids:
+                return counts
+
+            # 2. SQLite の SQL 変数上限を考慮し、IN クエリは 500 件ずつ分割
+            #    （デフォルト SQLITE_MAX_VARIABLE_NUMBER = 999、安全側で 500）
+            chunk_size = 500
+
+            # 3. PR #101 Copilot Round 1 #1 指摘: dependent table の DELETE で
+            #    sqlite3.OperationalError を無条件に握り潰すと "no such table"
+            #    以外（DB lock / I/O / SQL typo）も黙殺して workflows だけ削除
+            #    された不整合状態になり得る。sqlite_master で実在テーブル一覧
+            #    を事前取得し、存在するものだけ DELETE することで、それ以外の
+            #    エラーは正しく上位に伝播するようにする。
+            existing_tables = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+
+            # 4. 依存テーブルの cascade 削除（実在するもののみ）
+            for table in self._WORKFLOW_DEPENDENT_TABLES:
+                if table not in existing_tables:
+                    # レガシー DB で table 不在 → skip
+                    counts[table] = 0
+                    continue
+                deleted = 0
+                for i in range(0, len(target_ids), chunk_size):
+                    chunk = target_ids[i:i + chunk_size]
+                    placeholders = ",".join("?" * len(chunk))
+                    sub_cursor = conn.execute(
+                        f"DELETE FROM {table} "
+                        f"WHERE workflow_id IN ({placeholders})",
+                        chunk,
+                    )
+                    deleted += sub_cursor.rowcount
+                counts[table] = deleted
+
+            # 5. 最後に workflows 自体を削除（PR #101 Copilot Round 2 #2 指摘:
+            #    len(target_ids) ではなく実際の rowcount を加算し、SELECT 後の
+            #    race condition で別プロセスが消した場合の counts ズレを防ぐ）
+            workflows_deleted = 0
+            for i in range(0, len(target_ids), chunk_size):
+                chunk = target_ids[i:i + chunk_size]
+                placeholders = ",".join("?" * len(chunk))
+                cursor = conn.execute(
+                    f"DELETE FROM workflows "
+                    f"WHERE workflow_id IN ({placeholders})",
+                    chunk,
+                )
+                workflows_deleted += cursor.rowcount
+            counts["workflows"] = workflows_deleted
+
+            conn.commit()
+
+        return counts
