@@ -12,7 +12,7 @@ HOKUSAI のすべての特筆すべき変更をこのファイルに記録する
 
 ## [Unreleased]
 
-LLM Gateway **Phase 2 enforcement ロードマップ** を完成。Phase 1 audit log-only から、profile policy 違反で LLM 実送信を抑止する Phase 2 enforcement までの全配線を入れた（[ロードマップ](https://www.notion.so/LLM-Gateway-Phase-2-Enforcement-36985495565d81949239fd2bdc831e00)、出典: `docs/dogfooding-findings.md` / PR #79）。
+LLM Gateway **Phase 2 enforcement ロードマップ** を完成。Phase 1 audit log-only から、profile policy 違反で LLM 実送信を抑止する Phase 2 enforcement までの全配線を入れた（[ロードマップ](https://www.notion.so/LLM-Gateway-Phase-2-Enforcement-36985495565d81949239fd2bdc831e00)、出典: `docs/dogfooding-findings.md`）。
 
 ロードマップ構成: M0 前提条件（3 PR）→ M1 enforcement 切替（3 PR）→ M2 独立小穴（5 PR）→ 本体配線（1 PR）の 12 PR + README 整合（1 PR）。`LLMGatewayConfig.log_only=False` を opt-in した profile でのみ block が発火し、`log_only=True`（default）では後方互換 100%。
 
@@ -52,7 +52,6 @@ LLM Gateway **Phase 2 enforcement ロードマップ** を完成。Phase 1 audit
 - `LLMGatewayConfig.log_only=True`（default）では Phase 2 enforcement の挙動は一切発動しない（M1.1 仕様で BLOCK 判定が起きない）
 - profile registry を持たない環境では従来通り `claude-workflow.yaml` 探索にフォールバック（M2.3 fail-safe）
 - legacy DB（古いスキーマ）でも `--gc-workflows` は `sqlite_master` existence check で skip（M2.5）
-- 既存テスト 2000+ ケース全 pass（doc 変更含む）
 
 ### バージョン
 
