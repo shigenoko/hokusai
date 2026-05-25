@@ -159,7 +159,7 @@ def test_set_active_profile_none_is_noop():
         assert os.environ.get(ACTIVE_PROFILE_ENV) == "existing"
 
 
-def test_set_active_profile_preserves_existing_value(tmp_path):
+def test_set_active_profile_preserves_existing_value():
     """Round 3 対応: 既に HOKUSAI_ACTIVE_PROFILE が set されていれば
     上書きせず既存値を尊重する（setdefault 動作）.
 
