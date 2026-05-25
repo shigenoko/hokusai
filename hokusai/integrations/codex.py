@@ -176,7 +176,9 @@ class CodexClient:
             try:
                 from ..llm_gateway.dispatch import LLMGatewayBlockedError
                 is_policy_block = isinstance(exc, LLMGatewayBlockedError)
-            except ImportError:
+            except Exception:
+                # PR #103 Copilot Round 2 指摘: ImportError 以外でも fail-open
+                # を維持するため Exception 全捕捉。block 機能なしとみなし続行。
                 pass
 
             if is_policy_block:

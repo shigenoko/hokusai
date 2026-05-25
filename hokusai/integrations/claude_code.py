@@ -299,9 +299,11 @@ class ClaudeCodeClient:
             try:
                 from ..llm_gateway.dispatch import LLMGatewayBlockedError
                 is_policy_block = isinstance(exc, LLMGatewayBlockedError)
-            except ImportError:
-                # 古い環境で LLMGatewayBlockedError が未配置のケースは
-                # 「block 機能なし」とみなし fail-open 経路で続行。
+            except Exception:
+                # PR #103 Copilot Round 2 指摘: ImportError 以外（SyntaxError
+                # / RuntimeError 等で dispatch module が壊れているケース）
+                # でも fail-open を維持するため Exception 全捕捉に拡張。
+                # この経路では「block 機能なし」とみなし従来通り続行する。
                 pass
 
             if is_policy_block:
