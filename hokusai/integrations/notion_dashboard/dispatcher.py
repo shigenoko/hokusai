@@ -1542,6 +1542,42 @@ class NotionSyncDispatcher:
         error: Exception,
     ) -> None:
         message = self._safe_error_message(error)
+
+        # Issue #109 / fail-fast モード:
+        # 同一 workflow の workflow_started が既に永続失敗（errors 入り）の場合、
+        # 子イベントを outbox に乗せず直接 errors テーブルに直送する。
+        # workflow_started 自身は対象外（自分自身を fail-fast 判定する循環を避ける）。
+        # flag default off で既存挙動 100% 後方互換。
+        if (
+            self._config.sync_outbox.fail_fast_on_workflow_started_error
+            and event_type != "workflow_started"
+            and workflow_id
+        ):
+            try:
+                if self._store.has_failed_workflow_started(workflow_id):
+                    self._store.record_permanent_notion_sync_failure(
+                        idempotency_key=idempotency_key,
+                        workflow_id=workflow_id,
+                        event_type=event_type,
+                        payload=payload,
+                        error=(
+                            f"fail-fast: workflow_started for {workflow_id} is in "
+                            f"permanent error; skipping outbox retry. trigger={message}"
+                        ),
+                    )
+                    logger.warning(
+                        f"Notion 同期 fail-fast → errors 直送: event={event_type}, "
+                        f"workflow_id={workflow_id} (workflow_started が永続失敗のため)"
+                    )
+                    return
+            except Exception as check_error:
+                # fail-fast 判定 / errors 直送に失敗しても通常 outbox 経路に
+                # fallback する（fail-open 原則）。
+                logger.debug(
+                    f"fail-fast 判定で例外、通常 outbox にフォールバック: "
+                    f"{type(check_error).__name__}"
+                )
+
         try:
             is_new = self._store.enqueue_notion_sync(
                 idempotency_key=idempotency_key,

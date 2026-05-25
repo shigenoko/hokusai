@@ -989,6 +989,71 @@ class SQLiteStore:
             )
             conn.commit()
 
+    def has_failed_workflow_started(self, workflow_id: str) -> bool:
+        """指定 workflow の `workflow_started` イベントが既に永続失敗（errors 入り）か判定。
+
+        Issue #109 / fail-fast モード用 helper。`notion_sync_errors` テーブルに
+        該当 workflow_id × event_type='workflow_started' の行が 1 件でもあれば True。
+        dispatcher は新規子イベントを enqueue 前にこれを呼び、True なら outbox を
+        skip して errors テーブルに直送する。
+
+        Returns:
+            True: workflow_started が永続失敗で errors に入っている
+            False: 永続失敗していない（成功済み / pending / 未試行）
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT 1 FROM notion_sync_errors
+                WHERE workflow_id = ? AND event_type = 'workflow_started'
+                LIMIT 1
+                """,
+                (workflow_id,),
+            ).fetchone()
+            return row is not None
+
+    def record_permanent_notion_sync_failure(
+        self,
+        *,
+        idempotency_key: str,
+        workflow_id: str,
+        event_type: str,
+        payload: dict[str, Any],
+        error: str,
+    ) -> None:
+        """outbox を経由せず直接 `notion_sync_errors` に行を挿入する。
+
+        Issue #109 / fail-fast モード用。`workflow_started` が既に永続失敗している
+        環境で、子イベント（pr_created / phase_changed 等）を発生時点で
+        errors テーブルに直送する用途。
+
+        `attempts=0` で記録する（retry を一度も試みていないため）。
+        既存の `move_notion_sync_to_error` は outbox 経由のため、新規行を
+        直接入れる別 helper として用意する。
+        """
+        import json
+
+        now = datetime.now().isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO notion_sync_errors (
+                    idempotency_key, workflow_id, event_type, payload_json,
+                    error, attempts, failed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    idempotency_key,
+                    workflow_id,
+                    event_type,
+                    json.dumps(payload, ensure_ascii=False),
+                    error,
+                    0,
+                    now,
+                ),
+            )
+            conn.commit()
+
     def count_notion_sync_pending(self) -> int:
         """outbox の保留件数。"""
         with self._connect() as conn:
