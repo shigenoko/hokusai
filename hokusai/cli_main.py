@@ -2258,12 +2258,16 @@ def _handle_cleanup(args, config):
             bad_flags.append("--dry-run")
         if sync_notion_flag:
             bad_flags.append("--sync-notion")
-        print(
+        base_msg = (
             f"✗ {' / '.join(bad_flags)} は --stale 専用のフラグです "
             "（workflow_id 指定 / --gc-workflows 単独 / 引数なしと併用不可）。"
-            "workflow_id 指定モードで Notion 同期したい場合は --cancel-reason を使ってください。",
-            file=sys.stderr,
         )
+        # workflow_id 指定モードのときだけ --cancel-reason の案内を追加。
+        # `cleanup --gc-workflows --dry-run` や引数なしのケースでは
+        # --cancel-reason が無関係なため案内に含めない（Copilot Round 4 指摘）。
+        if args.workflow_id:
+            base_msg += "workflow_id 指定モードで Notion 同期したい場合は --cancel-reason を使ってください。"
+        print(base_msg, file=sys.stderr)
         sys.exit(1)
 
     if args.workflow_id:

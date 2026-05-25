@@ -342,6 +342,26 @@ def test_sync_notion_without_stale_rejected(tmp_path, capsys):
     assert "--sync-notion" in captured.err
 
 
+def test_reject_message_includes_cancel_reason_only_for_workflow_id_mode(tmp_path, capsys):
+    """workflow_id 指定時のみ --cancel-reason 案内を含む（Copilot Round 4 指摘）"""
+    config = _make_config(tmp_path)
+    SQLiteStore(config.database_path)
+
+    # workflow_id 指定モード: 案内含む
+    args_wf = _make_args(workflow_id="wf-x", dry_run=True)
+    with pytest.raises(SystemExit):
+        cli_main._handle_cleanup(args_wf, config)
+    captured = capsys.readouterr()
+    assert "--cancel-reason" in captured.err
+
+    # 引数なし or --gc-workflows のみ: 案内含まず
+    args_gc = _make_args(gc_workflows=True, dry_run=True)
+    with pytest.raises(SystemExit):
+        cli_main._handle_cleanup(args_gc, config)
+    captured = capsys.readouterr()
+    assert "--cancel-reason" not in captured.err
+
+
 def test_sync_notion_dedups_workflow_id_across_repos(tmp_path, monkeypatch):
     """同一 workflow が複数 repo の worktree を持つとき、Notion 同期は 1 回だけ呼ぶ"""
     config = _make_config(tmp_path)
