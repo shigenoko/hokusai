@@ -1857,10 +1857,15 @@ def test_dispatch_does_not_raise_when_no_policy_hits(monkeypatch):
 
 def test_dispatch_swallows_non_block_exceptions(monkeypatch):
     """interceptor が予期せぬ例外を出した場合は fail-open で握り潰す
-    （M1.3 §4.4: Gateway 内部の不具合は workflow 進行を止めない）."""
+    （M1.3 §4.4: Gateway 内部の不具合は workflow 進行を止めない）.
+
+    PR #103 Copilot Round 1 指摘: dispatch_via_gateway は関数内で都度
+    `from .interceptor import ... LLMGatewayInterceptor` するため、
+    dispatch モジュール側の属性差し替えは効かない。元クラスの `intercept`
+    メソッドを直接差し替えて、確実に例外経路を通すこと."""
     from hokusai.config import set_config
     from hokusai.config.models import WorkflowConfig
-    from hokusai.llm_gateway import dispatch as dispatch_mod
+    from hokusai.llm_gateway import interceptor as interceptor_mod
     from hokusai.llm_gateway.dispatch import dispatch_via_gateway
 
     cfg = WorkflowConfig(
@@ -1870,16 +1875,16 @@ def test_dispatch_swallows_non_block_exceptions(monkeypatch):
     )
     set_config(cfg)
 
-    # LLMGatewayInterceptor.intercept が RuntimeError を投げるよう monkeypatch
-    class _BoomInterceptor:
-        def __init__(self, *a, **kw):
-            pass
+    # interceptor module 側の LLMGatewayInterceptor.intercept を直接差し替え
+    # （dispatch_via_gateway が import する経路で確実に有効になる）
+    boom_called: list[bool] = []
 
-        def intercept(self, *a, **kw):
-            raise RuntimeError("boom")
+    def _boom(self, *a, **kw):
+        boom_called.append(True)
+        raise RuntimeError("boom")
 
     monkeypatch.setattr(
-        dispatch_mod, "LLMGatewayInterceptor", _BoomInterceptor, raising=False,
+        interceptor_mod.LLMGatewayInterceptor, "intercept", _boom,
     )
 
     # RuntimeError は内部で握り潰され、dispatch_via_gateway は例外なく完了
@@ -1888,6 +1893,14 @@ def test_dispatch_swallows_non_block_exceptions(monkeypatch):
         model="",
         purpose="generate",
         prompt="p",
+    )
+    # monkeypatch が effective に経路を通ったことを assert（PR #103
+    # Copilot Round 1 指摘: monkeypatch が無効化されていると fail-open
+    # 経路を通らず偽 green になるため、必ず差し替えた intercept が呼ばれた
+    # ことを確認する）
+    assert boom_called, (
+        "monkeypatched intercept was not invoked; "
+        "dispatch_via_gateway may have bypassed it"
     )
 
 
