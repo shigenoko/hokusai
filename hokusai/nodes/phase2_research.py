@@ -30,6 +30,7 @@ from ..utils.phase_page_templates import (
     build_phase_page_content,
     initialize_phase_page_state,
 )
+from ..utils.skip_notion import is_skip_notion
 
 logger = get_logger("phase2")
 
@@ -208,10 +209,9 @@ def _verify_notion_state(state: WorkflowState) -> None:
         親タスクページへの本文混入チェック（notion-fetch による再取得）は
         追加 LLM 呼び出しコストが高いため後続対応とする。
     """
-    import os
-
-    if os.environ.get("HOKUSAI_SKIP_NOTION") == "1":
-        logger.info("HOKUSAI_SKIP_NOTION=1: Phase 2 Notion 状態検証をスキップ")
+    # Issue #113 follow-up: profile-aware な is_skip_notion() に統一。
+    if is_skip_notion():
+        logger.info("Notion接続スキップモード: Phase 2 Notion 状態検証をスキップ")
         return
 
     subpage_url = state.get("phase_subpages", {}).get(2)
@@ -234,9 +234,8 @@ def _verify_subpage_content(state: WorkflowState, raw_output: str) -> None:
 
     失敗時は RuntimeError を送出し、Phase 2 を失敗扱いにする。
     """
-    import os
-
-    if os.environ.get("HOKUSAI_SKIP_NOTION") == "1":
+    # Issue #113 follow-up: profile-aware な is_skip_notion() に統一。
+    if is_skip_notion():
         return
 
     subpage_url = state.get("phase_subpages", {}).get(2)

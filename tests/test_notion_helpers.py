@@ -126,7 +126,7 @@ class TestSaveToSubpageOrCreateSkipNotion:
         # 副作用なし
         mock_update.assert_not_called()
         mock_create.assert_not_called()
-        # ログに skip メッセージ（PR #114 Round 1 で env 名固定の文言を
+        # ログに skip メッセージ（Issue #113 / PR #114 で env 名固定の文言を
         # 一般化したため、特定 env 名ではなく "スキップ" を含むかで検証）
         log_text = " ".join(r.getMessage() for r in caplog.records)
         assert "スキップ" in log_text

@@ -1983,12 +1983,18 @@ def _warn_if_skip_notion_pre_set(config, profile_label: str | None) -> None:
     のは callsite が多いため、最小スコープで「起動時 pre-set 状態で
     Notion 設定済み profile を実行している」mismatch を警告する。
 
-    判定ルール:
-    - `HOKUSAI_SKIP_NOTION` が "1" でない → 何もしない（既存挙動）
-    - "1" かつ profile の `notion_dashboard.enabled=True` → 強い warning
+    判定ルール (Issue #113 follow-up で profile-aware に拡張):
+    - `is_skip_notion(profile_label)` が False（legacy global
+      `HOKUSAI_SKIP_NOTION=1` / profile suffix env
+      `HOKUSAI_SKIP_NOTION_<SLUG>=1` のどちらも立っていない）→ 何もしない
+    - True かつ profile の `notion_dashboard.enabled=True` → 強い warning
       （別 profile 用に設定された SKIP フラグが残っている可能性）
-    - "1" かつ `notion_dashboard.enabled=False` / 不在 → info notice
+    - True かつ `notion_dashboard.enabled=False` / 不在 → info notice
       （skip は意図通り、profile が Notion 連携 off）
+
+    判定は `profile_label` 引数を明示的に渡す（呼び出し時点では
+    `set_active_profile()` がまだ呼ばれておらず、`HOKUSAI_ACTIVE_PROFILE`
+    context env が未設定のため）。
 
     `check_notion_connection` が後段で SKIP_NOTION を set する経路は対象外
     （`main()` 内で本 helper を呼ぶ位置がそれより前なので、起動時 env と
@@ -2014,11 +2020,19 @@ def _warn_if_skip_notion_pre_set(config, profile_label: str | None) -> None:
     # 効いている env 名を warning 文言に反映（profile suffix を最優先）。
     # active_skip_env_name() も同じ理由で HOKUSAI_ACTIVE_PROFILE 依存のため
     # 使わず、profile_label から直接 suffix 名を組み立てる。
-    skip_env = LEGACY_GLOBAL_ENV
+    # Copilot Round 3 #4 指摘: 両方 set されているケースでは suffix だけ
+    # 表示しても解除案内が不正確になるため、両方検出して両方を列挙する。
+    legacy_set = os.environ.get(LEGACY_GLOBAL_ENV) == "1"
+    suffix_set: tuple[str, ...] = ()
     if profile_label:
         suffix_name = profile_skip_env_name(profile_label)
         if os.environ.get(suffix_name) == "1":
-            skip_env = suffix_name
+            suffix_set = (suffix_name,)
+    set_envs = list(suffix_set) + ([LEGACY_GLOBAL_ENV] if legacy_set else [])
+    # 表示用の代表 env 名（profile suffix を優先、無ければ legacy）
+    skip_env = set_envs[0] if set_envs else LEGACY_GLOBAL_ENV
+    # 解除案内には set されている全 env を列挙
+    unset_targets = " ".join(set_envs) if set_envs else LEGACY_GLOBAL_ENV
 
     notion_cfg = getattr(config, "notion_dashboard", None)
     enabled = notion_cfg is not None and getattr(notion_cfg, "enabled", False)
@@ -2041,7 +2055,7 @@ def _warn_if_skip_notion_pre_set(config, profile_label: str | None) -> None:
             "書き込みや CLI 系の Notion 操作は skip される一方で、dispatcher "
             "経路 (workflow_started / pr_created 等) は notion_dashboard "
             "設定が揃っていれば継続するため、片方だけ動く整合性に注意して "
-            f"ください。別 profile からの持ち越しの場合は `unset {skip_env}` を推奨。"
+            f"ください。別 profile からの持ち越しの場合は `unset {unset_targets}` を推奨。"
         )
         print(message, file=sys.stderr)
     else:
@@ -2162,14 +2176,20 @@ def _sync_workflow_cancel_reason(
     """
     from .integrations.notion_dashboard.client import NotionAPIClient
     from .integrations.notion_dashboard.workflows_db import WorkflowsDBClient
-    from .utils.skip_notion import active_skip_env_name, is_skip_notion
+    from .utils.skip_notion import (
+        LEGACY_GLOBAL_ENV,
+        active_skip_env_name,
+        is_skip_notion,
+    )
 
     # HOKUSAI_SKIP_NOTION=1 はユーザの「Notion なしで続行」選択。docstring と
     # 実装を整合させるため明示的に skip する（Copilot 指摘）。
     # Issue #113 (follow-up): profile-aware な is_skip_notion() に統一し、
     # 警告文言に効いている env 名（suffix / legacy）を反映する。
     if is_skip_notion():
-        skip_env = active_skip_env_name() or "HOKUSAI_SKIP_NOTION"
+        # Copilot Round 3 #5: literal "HOKUSAI_SKIP_NOTION" の重複を避け、
+        # 定数で参照する。
+        skip_env = active_skip_env_name() or LEGACY_GLOBAL_ENV
         print(
             f"⚠ {skip_env}=1 のため Cancel Reason は記録しません "
             "（worktree 削除は完了）",

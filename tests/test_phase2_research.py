@@ -405,8 +405,10 @@ class TestPhase2FailFast:
         with caplog.at_level("INFO", logger="hokusai"):
             _verify_notion_state(state)
 
+        # Issue #113 / PR #114 で env 名固定の文言を一般化したため、
+        # 特定 env 名ではなく "スキップ" を含むかで検証する。
         log_text = " ".join(r.getMessage() for r in caplog.records)
-        assert "HOKUSAI_SKIP_NOTION" in log_text
+        assert "スキップ" in log_text
         assert "Phase 2" in log_text
 
     @patch("hokusai.nodes.phase2_research._validate_research_output")
