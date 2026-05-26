@@ -281,6 +281,32 @@ def test_check_environment_uses_profile_aware_helper():
         assert not any("HOKUSAI_SKIP_NOTION" in w for w in warnings)
 
 
+def test_warn_if_skip_notion_pre_set_uses_profile_suffix_env(capsys):
+    """Issue #113 (follow-up): _warn_if_skip_notion_pre_set の warning 文言が
+    profile suffix env を反映する。
+    """
+    from unittest.mock import MagicMock
+
+    from hokusai.cli_main import _warn_if_skip_notion_pre_set
+
+    cfg = MagicMock()
+    cfg.notion_dashboard = MagicMock()
+    cfg.notion_dashboard.enabled = True
+
+    with patch.dict(
+        os.environ,
+        {
+            ACTIVE_PROFILE_ENV: "hokusai",
+            "HOKUSAI_SKIP_NOTION_HOKUSAI": "1",
+        },
+        clear=True,
+    ):
+        _warn_if_skip_notion_pre_set(cfg, "hokusai")
+        captured = capsys.readouterr()
+        # profile suffix env 名が warning に含まれる（legacy 名のみは含まれない）
+        assert "HOKUSAI_SKIP_NOTION_HOKUSAI=1" in captured.err
+
+
 def test_task_backend_notion_uses_profile_aware_helper():
     """task_backend.notion._is_skip_notion が新 helper を経由"""
     from hokusai.integrations.task_backend.notion import NotionTaskClient

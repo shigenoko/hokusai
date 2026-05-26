@@ -6,7 +6,6 @@ NotionタスクページへのコンテンツMCP経由保存を共通化する�
 
 from __future__ import annotations
 
-import os
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -17,6 +16,7 @@ from .phase_page_templates import (
     PHASE_PAGE_SOURCE_PHASES,
     build_phase_page_content,
 )
+from .skip_notion import is_skip_notion
 
 if TYPE_CHECKING:
     from ..state import WorkflowState
@@ -64,7 +64,7 @@ def save_content_to_notion(
             Noneの場合は既存コンテンツの末尾に追記。
     """
     # Notionスキップフラグをチェック
-    if os.environ.get("HOKUSAI_SKIP_NOTION") == "1":
+    if is_skip_notion():
         logger.info("Notion接続スキップモード: コンテンツの保存をスキップ")
         print("⏭️  Notion接続なし: コンテンツの自動保存をスキップ")
         return
@@ -114,7 +114,7 @@ def create_phase_subpage(
     Returns:
         作成された子ページの URL。失敗時は None。
     """
-    if os.environ.get("HOKUSAI_SKIP_NOTION") == "1":
+    if is_skip_notion():
         logger.info("Notion接続スキップモード: 子ページ作成をスキップ")
         return None
 
@@ -199,7 +199,7 @@ def update_subpage_content(page_url: str, content: str) -> bool:
     Returns:
         成功した場合 True
     """
-    if os.environ.get("HOKUSAI_SKIP_NOTION") == "1":
+    if is_skip_notion():
         logger.info("Notion接続スキップモード: 子ページ更新をスキップ")
         return False
 
@@ -260,7 +260,7 @@ def append_to_subpage(page_url: str, content: str) -> bool:
     Returns:
         成功した場合 True
     """
-    if os.environ.get("HOKUSAI_SKIP_NOTION") == "1":
+    if is_skip_notion():
         logger.info("Notion接続スキップモード: 子ページ追記をスキップ")
         return False
 
@@ -336,7 +336,7 @@ def save_to_subpage_or_create(
         `append_to_subpage`）と同パターン。Notion 接続が無い環境で workflow
         を止めないため（Issue #75）。
     """
-    if os.environ.get("HOKUSAI_SKIP_NOTION") == "1":
+    if is_skip_notion():
         logger.info(
             f"HOKUSAI_SKIP_NOTION=1: Phase {phase} 子ページ保存をスキップ"
         )

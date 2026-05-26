@@ -1994,12 +1994,16 @@ def _warn_if_skip_notion_pre_set(config, profile_label: str | None) -> None:
     （`main()` 内で本 helper を呼ぶ位置がそれより前なので、起動時 env と
     runtime 設定を自然に区別できる）。
     """
-    import os
     import sys
 
-    if os.environ.get("HOKUSAI_SKIP_NOTION") != "1":
+    from .utils.skip_notion import active_skip_env_name, is_skip_notion
+
+    # Issue #113 (follow-up): profile-aware な is_skip_notion() に統一。
+    if not is_skip_notion():
         return
 
+    # 効いている env 名を warning 文言に反映（profile suffix / legacy）
+    skip_env = active_skip_env_name() or "HOKUSAI_SKIP_NOTION"
     notion_cfg = getattr(config, "notion_dashboard", None)
     enabled = notion_cfg is not None and getattr(notion_cfg, "enabled", False)
     profile_text = (
@@ -2016,19 +2020,18 @@ def _warn_if_skip_notion_pre_set(config, profile_label: str | None) -> None:
         # SKIP_NOTION を見て早期 return する。この食い違いが findings §1.3
         # で言う「片方だけ動く」状態。
         message = (
-            f"⚠ HOKUSAI_SKIP_NOTION=1 が設定されていますが {profile_text} は "
+            f"⚠ {skip_env}=1 が設定されていますが {profile_text} は "
             "notion_dashboard.enabled=true です。Phase 2/3 ノードの Notion "
             "書き込みや CLI 系の Notion 操作は skip される一方で、dispatcher "
             "経路 (workflow_started / pr_created 等) は notion_dashboard "
             "設定が揃っていれば継続するため、片方だけ動く整合性に注意して "
-            "ください。別 profile からの持ち越しの場合は `unset "
-            "HOKUSAI_SKIP_NOTION` を推奨。"
+            f"ください。別 profile からの持ち越しの場合は `unset {skip_env}` を推奨。"
         )
         print(message, file=sys.stderr)
     else:
         # 想定どおりの skip（Notion 連携 off な profile）
         print(
-            f"ℹ HOKUSAI_SKIP_NOTION=1: {profile_text} の Notion 連携を "
+            f"ℹ {skip_env}=1: {profile_text} の Notion 連携を "
             "skip して実行します。",
             file=sys.stderr,
         )
@@ -2047,10 +2050,9 @@ def _print_notion_db_share_warnings(config) -> None:
     - `HOKUSAI_SKIP_NOTION=1` が設定されている（他 Notion ヘルパーと同じく
       opt-out signal として尊重する。Issue #82 Copilot Round 1 指摘）
     """
-    import os
-
     try:
-        if os.environ.get("HOKUSAI_SKIP_NOTION") == "1":
+        from .utils.skip_notion import is_skip_notion
+        if is_skip_notion():
             return
         notion_cfg = getattr(config, "notion_dashboard", None)
         if notion_cfg is None or not notion_cfg.enabled:
@@ -2102,10 +2104,11 @@ def _warn_cleanup_without_cancel_reason(config, workflow_id: str) -> None:
     実 sync を未指定時にも走らせる挙動変更（reason 必須化 or デフォルト値注入）は
     user impact が大きいため future iteration（別 PR）に切り出す。
     """
-    import os
     import sys
 
-    if os.environ.get("HOKUSAI_SKIP_NOTION") == "1":
+    from .utils.skip_notion import is_skip_notion
+
+    if is_skip_notion():
         return
     notion_cfg = getattr(config, "notion_dashboard", None)
     if notion_cfg is None or not getattr(notion_cfg, "enabled", False):
@@ -2137,16 +2140,18 @@ def _sync_workflow_cancel_reason(
     `_build_properties` 側で Cancel Reason rich_text + Status=Canceled select
     が書かれる。
     """
-    import os
-
     from .integrations.notion_dashboard.client import NotionAPIClient
     from .integrations.notion_dashboard.workflows_db import WorkflowsDBClient
+    from .utils.skip_notion import active_skip_env_name, is_skip_notion
 
     # HOKUSAI_SKIP_NOTION=1 はユーザの「Notion なしで続行」選択。docstring と
     # 実装を整合させるため明示的に skip する（Copilot 指摘）。
-    if os.environ.get("HOKUSAI_SKIP_NOTION") == "1":
+    # Issue #113 (follow-up): profile-aware な is_skip_notion() に統一し、
+    # 警告文言に効いている env 名（suffix / legacy）を反映する。
+    if is_skip_notion():
+        skip_env = active_skip_env_name() or "HOKUSAI_SKIP_NOTION"
         print(
-            "⚠ HOKUSAI_SKIP_NOTION=1 のため Cancel Reason は記録しません "
+            f"⚠ {skip_env}=1 のため Cancel Reason は記録しません "
             "（worktree 削除は完了）",
             file=sys.stderr,
         )
