@@ -154,7 +154,7 @@ HOKUSAI は、AI を実世界のワークフローに統合する **運用フレ
 - `prompts/` 配下のカスタマイズ可能なプロンプト
 - `hokusai connect <github|gitlab>` / `hokusai connect --status` による CLI 認証導線と接続状態の一括表示
 - Slack 通知（Incoming Webhook 経由）— ワークフロー開始 / Human-in-the-loop 待機 / 失敗 / PR 作成 / 完了をチームへ通知
-- **`hokusai cleanup` ワークフロー生涯管理** — `--cancel-reason "<text>"` で Notion Workflows DB に cancel 理由を記録、`--gc-workflows`（`--retention-days N`、既定 90 日）で保持期間を超えた完了済み workflow を `workflow.db` から削除し、`checkpoints` / `audit_logs` / `notion_sync_*` / `figma_sync_*` / `miro_sync_*` / `design_writeback_idempotency` まで cascade 削除
+- **`hokusai cleanup` ワークフロー生涯管理** — `--cancel-reason "<text>"` で Notion Workflows DB に cancel 理由を記録、`--gc-workflows`（`--retention-days N`、既定 90 日）で保持期間を超えた完了済み workflow を `workflow.db` から削除し、`checkpoints` / `audit_logs` / `notion_sync_*` / `figma_sync_*` / `miro_sync_*` / `design_writeback_idempotency` まで cascade 削除。`cleanup --stale --dry-run` で実削除せず候補のみ列挙（v0.5.0〜）、`cleanup --stale --sync-notion` で削除した workflow を Notion Workflows DB 上で Canceled 化してゴースト残留を防止
 - **LLM Gateway** — 既定で Phase 1 audit log-only。すべての LLM 呼び出しは `dispatch_via_gateway` を経由し、`provider` / `model` / `purpose` / `policy_hits` を SQLite `audit_logs` に記録する（prompt 本文は **保存しない**、hash + length のみ）。`llm_gateway.log_only=false` を profile config で明示すると Phase 2 enforcement が opt-in され、`allowed_providers` / `allowed_models` policy 違反の呼び出しは `LLMGatewayBlockedError` で実送信を中断する。Gateway 内部の予期せぬ失敗（audit 永続化の失敗等）は要件 §4.4 fail-open 原則に従って握り潰し、Gateway バグが workflow を止めないことを保証する（明示的な policy 判断のみ block する）。
 
 ### 実験的機能
