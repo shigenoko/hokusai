@@ -12,6 +12,14 @@ HOKUSAI のすべての特筆すべき変更をこのファイルに記録する
 
 ## [Unreleased]
 
+### 追加 / 変更 / 削除予定
+
+- 未定
+
+---
+
+## [0.5.0] - 2026-05-26
+
 LLM Gateway **Phase 2 enforcement ロードマップ** を完成。Phase 1 audit log-only から、profile policy 違反で LLM 実送信を抑止する Phase 2 enforcement までの全配線を入れた（[ロードマップ](https://www.notion.so/LLM-Gateway-Phase-2-Enforcement-36985495565d81949239fd2bdc831e00)、出典: `docs/dogfooding-findings.md`）。
 
 ロードマップ構成: M0 前提条件（3 PR）→ M1 enforcement 切替（3 PR）→ M2 独立小穴（5 PR）→ 本体配線（1 PR）の 12 PR + README 整合（1 PR）。`LLMGatewayConfig.log_only=False` を opt-in した profile でのみ block が発火し、`log_only=True`（default）では後方互換 100%。
@@ -66,7 +74,7 @@ LLM Gateway **Phase 2 enforcement ロードマップ** を完成。Phase 1 audit
 
 ### バージョン
 
-- `pyproject.toml` / `hokusai/__init__.py`: 0.4.8 のまま（Phase 2 enforcement 公開リリース時に bump 予定。`log_only=True` default で実害なし）
+- `pyproject.toml` / `hokusai/__init__.py`: **0.4.8 → 0.5.0** に bump（minor リリース）。Phase 2 enforcement 完成 + dogfooding-findings 残課題完了の節目として明示。`log_only=True` default は維持されており、既存環境では実害なし。
 
 ---
 
