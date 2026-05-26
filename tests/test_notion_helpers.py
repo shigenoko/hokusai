@@ -126,9 +126,10 @@ class TestSaveToSubpageOrCreateSkipNotion:
         # 副作用なし
         mock_update.assert_not_called()
         mock_create.assert_not_called()
-        # ログに skip メッセージ
+        # ログに skip メッセージ（PR #114 Round 1 で env 名固定の文言を
+        # 一般化したため、特定 env 名ではなく "スキップ" を含むかで検証）
         log_text = " ".join(r.getMessage() for r in caplog.records)
-        assert "HOKUSAI_SKIP_NOTION" in log_text
+        assert "スキップ" in log_text
         assert "Phase 2" in log_text
 
     def test_normal_path_when_env_unset(self, monkeypatch):

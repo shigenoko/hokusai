@@ -2063,8 +2063,10 @@ def _print_notion_db_share_warnings(config) -> None:
 
     以下の場合は何もしない（早期 return）:
     - Notion 機能が無効化されている (`notion_dashboard.enabled=False`)
-    - `HOKUSAI_SKIP_NOTION=1` が設定されている（他 Notion ヘルパーと同じく
-      opt-out signal として尊重する。Issue #82 Copilot Round 1 指摘）
+    - `is_skip_notion()` が True を返す（legacy global `HOKUSAI_SKIP_NOTION=1`
+      または profile suffix env `HOKUSAI_SKIP_NOTION_<SLUG>=1`）。他 Notion
+      ヘルパーと同じく opt-out signal として尊重する
+      （Issue #82 Copilot Round 1 指摘 / Issue #111 で profile-aware に統一）。
     """
     try:
         from .utils.skip_notion import is_skip_notion
@@ -2113,7 +2115,8 @@ def _warn_cleanup_without_cancel_reason(config, workflow_id: str) -> None:
     レコードが残る運用穴。
 
     Notion を意図的に触らないケースでは warning しない（ノイズ防止）:
-    - `HOKUSAI_SKIP_NOTION=1`（ユーザの明示 opt-out）
+    - `is_skip_notion()` が True（legacy global `HOKUSAI_SKIP_NOTION=1` または
+      profile suffix env `HOKUSAI_SKIP_NOTION_<SLUG>=1`、ユーザの明示 opt-out）
     - `notion_dashboard.enabled=False` / `notion_dashboard` 不在（連携 off）
 
     本 helper は警告のみ、cleanup の中断はしない（既存挙動と完全後方互換）。
@@ -2148,8 +2151,9 @@ def _sync_workflow_cancel_reason(
 
     対象 workflow を Workflows DB 上で Status=Canceled に遷移させ、Cancel Reason
     プロパティに `cancel_reason` テキストを記入する。Notion 接続が無い環境
-    （HOKUSAI_SKIP_NOTION=1 / 各種 env 未設定）では warning を出して skip
-    （worktree 削除は既に完了済みなので CLI 全体は止めない）。
+    （`is_skip_notion()` が True（legacy global `HOKUSAI_SKIP_NOTION=1` または
+    profile suffix env `HOKUSAI_SKIP_NOTION_<SLUG>=1`）/ 各種 env 未設定）では
+    warning を出して skip（worktree 削除は既に完了済みなので CLI 全体は止めない）。
 
     既存の `WorkflowsDBClient.apply_event` を `phase_changed` event で呼び出し、
     payload に `status=canceled` + `cancel_reason=<text>` を含める。

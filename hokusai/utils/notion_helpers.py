@@ -53,7 +53,8 @@ def save_content_to_notion(
     """
     コンテンツをNotionタスクページに保存（MCP経由）
 
-    環境変数 HOKUSAI_SKIP_NOTION が設定されている場合は保存をスキップする。
+    `is_skip_notion()` が True を返す場合（legacy global `HOKUSAI_SKIP_NOTION=1`
+    または profile suffix env `HOKUSAI_SKIP_NOTION_<SLUG>=1`）は保存をスキップする。
     コンテンツが空の場合も保存をスキップする。
     保存失敗は致命的ではないため、警告のみを出力する。
 
@@ -330,7 +331,9 @@ def save_to_subpage_or_create(
         更新されたワークフロー状態
 
     Notes:
-        `HOKUSAI_SKIP_NOTION=1` のとき副作用なく state をそのまま返す。
+        `is_skip_notion()` が True を返す場合（legacy global
+        `HOKUSAI_SKIP_NOTION=1` または profile suffix env
+        `HOKUSAI_SKIP_NOTION_<SLUG>=1`）は副作用なく state をそのまま返す。
         他の Notion ヘルパー（`save_content_to_notion` /
         `create_phase_subpage` / `update_subpage_content` /
         `append_to_subpage`）と同パターン。Notion 接続が無い環境で workflow
