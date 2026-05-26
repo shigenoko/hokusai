@@ -16,6 +16,8 @@ LLM Gateway **Phase 2 enforcement ロードマップ** を完成。Phase 1 audit
 
 ロードマップ構成: M0 前提条件（3 PR）→ M1 enforcement 切替（3 PR）→ M2 独立小穴（5 PR）→ 本体配線（1 PR）の 12 PR + README 整合（1 PR）。`LLMGatewayConfig.log_only=False` を opt-in した profile でのみ block が発火し、`log_only=True`（default）では後方互換 100%。
 
+その後、Phase 2 enforcement 公開リリース前の **dogfooding-findings 残課題対応** として、M2.6 (cleanup --stale 改善) + A (fail-fast モード) + C (SKIP_NOTION profile 化、core + follow-up) の 4 PR を追加。これで `docs/dogfooding-findings.md` の独立小穴は全項目完了。
+
 ### Added
 
 #### M0: Phase 2 enforcement の前提条件
@@ -37,6 +39,13 @@ LLM Gateway **Phase 2 enforcement ロードマップ** を完成。Phase 1 audit
 - **M2.3** ([#95](https://github.com/shigenoko/hokusai/pull/95)): `default_profile` を CLI 全体で implicit 解決。`hokusai/config/profiles.py::try_resolve_default_profile_name()` を fail-safe（`is_file()` + 1 バイト read 検証）で実装。`--profile` 未指定 + `-c/--config` 未指定で registry の `default_profile` を自動適用。CLI 表示で `(default_profile)` suffix で明示と区別。
 - **M2.4** ([#93](https://github.com/shigenoko/hokusai/pull/93)): `hokusai prime` 空状態に構成要素別 diagnostics 行を追加（`*Project Memory DB: 未設定 (env XXX)*` 等の原因切り分けライン）。`_build_prime_diagnostics` 純粋関数で実装。
 - **M2.5** ([#101](https://github.com/shigenoko/hokusai/pull/101)): `hokusai cleanup --gc-workflows [--retention-days N]`（default 90 日）。完了済み workflow（`current_phase >= 10`）を 9 dependent table と cascade 削除。`sqlite_master` existence check + argparse `type` で `retention >= 1` 検証。
+- **M2.6** ([#108](https://github.com/shigenoko/hokusai/pull/108) / Issue [#107](https://github.com/shigenoko/hokusai/issues/107)): `hokusai cleanup --stale` に `--dry-run` (誤操作防止) と `--sync-notion` (Notion ゴースト残留防止) を opt-in で追加。`--dry-run` は `shutil.rmtree` / `git worktree prune` / writeback cleanup を全て skip、`--sync-notion` は stale 削除した workflow に `cancel_reason="stale cleanup"` で `_sync_workflow_cancel_reason` を呼ぶ。両フラグ default off で完全後方互換、argparse `dest="cleanup_dry_run"` でトップレベル `--dry-run` との衝突回避。
+
+#### dogfooding-findings 残課題（Phase 2 enforcement リリース前対応）
+
+- **A. fail-fast モード** ([#110](https://github.com/shigenoko/hokusai/pull/110) / Issue [#109](https://github.com/shigenoko/hokusai/issues/109) / findings §3.1): `NotionSyncOutboxConfig.fail_fast_on_workflow_started_error: bool = False` を追加（opt-in）。同一 workflow の `workflow_started` が既に `notion_sync_errors` に永続失敗で入っている場合、後続子イベントを outbox 経由の retry に乗せず errors に直送する。`SQLiteStore.has_failed_workflow_started` / `record_permanent_notion_sync_failure` helper を新設し、`notion_sync_errors` に `(idempotency_key)` と `(workflow_id, event_type)` の専用 index を追加。Workflows DB share 未完了など永続障害環境での outbox 膨張を抑止。
+- **C. SKIP_NOTION profile 化 (core)** ([#112](https://github.com/shigenoko/hokusai/pull/112) / Issue [#111](https://github.com/shigenoko/hokusai/issues/111) / findings §1.3): `HOKUSAI_SKIP_NOTION` がプロセス全体に効く問題を解消。`hokusai/utils/skip_notion.py` に `is_skip_notion(profile_name=None)` / `active_skip_env_name()` / `set_active_profile()` helper を新設。評価順は (1) 明示引数 `HOKUSAI_SKIP_NOTION_<SLUG>` → (2) `HOKUSAI_ACTIVE_PROFILE` 経由の同 key → (3) legacy global `HOKUSAI_SKIP_NOTION`。`main()` で解決済み profile を `HOKUSAI_ACTIVE_PROFILE` に setenv（既存値は上書きしない `setdefault`）。core パス 6 ファイル（`state.py` / `workflow.py` / `integrations/connection_status.py` / `integrations/task_backend/notion.py` / `cli/services/environment.py`）を置換。
+- **C. SKIP_NOTION profile 化 (follow-up)** ([#114](https://github.com/shigenoko/hokusai/pull/114) / Issue [#113](https://github.com/shigenoko/hokusai/issues/113)): 残箇所を helper 経由に統一。`hokusai/utils/notion_helpers.py` 6 箇所 / `hokusai/cli_main.py` 4 箇所 / `hokusai/nodes/phase2_research.py` 2 箇所 / `hokusai/nodes/phase3_design.py` 1 箇所を `is_skip_notion()` / `active_skip_env_name()` に置換。これで `os.environ.get("HOKUSAI_SKIP_NOTION")` 直接参照はコードから完全消滅。`_warn_if_skip_notion_pre_set` の警告文言は `active_skip_env_name()` で動的化（profile suffix env が立っていれば正しい env 名を案内、legacy + suffix の両方 set なら両方を `unset` 列挙）。
 
 #### 本体配線
 
@@ -51,6 +60,9 @@ LLM Gateway **Phase 2 enforcement ロードマップ** を完成。Phase 1 audit
 - `LLMGatewayConfig.log_only=True`（default）では Phase 2 enforcement の挙動は一切発動しない（M1.1 仕様で BLOCK 判定が起きない）
 - profile registry を持たない環境では従来通り `claude-workflow.yaml` 探索にフォールバック（M2.3 fail-safe）
 - legacy DB（古いスキーマ）でも `--gc-workflows` は `sqlite_master` existence check で skip（M2.5）
+- `--stale` の `--dry-run` / `--sync-notion` は default off で従来挙動と完全同一（M2.6）
+- `NotionSyncOutboxConfig.fail_fast_on_workflow_started_error` は default False で従来挙動と完全同一（A. fail-fast）
+- legacy global `HOKUSAI_SKIP_NOTION=1` は引き続き有効、`HOKUSAI_SKIP_NOTION_<SLUG>` opt-in で profile-aware に拡張（C. SKIP_NOTION profile 化）
 
 ### バージョン
 
