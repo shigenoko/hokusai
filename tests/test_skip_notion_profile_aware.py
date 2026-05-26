@@ -282,8 +282,9 @@ def test_check_environment_uses_profile_aware_helper():
 
 
 def test_warn_if_skip_notion_pre_set_uses_profile_suffix_env(capsys):
-    """Issue #113 (follow-up): _warn_if_skip_notion_pre_set の warning 文言が
-    profile suffix env を反映する。
+    """Issue #113 (follow-up) Round 1: main() で set_active_profile() より **前**
+    に呼ばれる関数なので、HOKUSAI_ACTIVE_PROFILE が未設定でも profile_label 引数
+    から suffix env を検知/表示できることを検証する。
     """
     from unittest.mock import MagicMock
 
@@ -293,18 +294,19 @@ def test_warn_if_skip_notion_pre_set_uses_profile_suffix_env(capsys):
     cfg.notion_dashboard = MagicMock()
     cfg.notion_dashboard.enabled = True
 
+    # ACTIVE_PROFILE_ENV は **意図的に未設定**（main() の呼び出し順を反映）
     with patch.dict(
         os.environ,
-        {
-            ACTIVE_PROFILE_ENV: "hokusai",
-            "HOKUSAI_SKIP_NOTION_HOKUSAI": "1",
-        },
+        {"HOKUSAI_SKIP_NOTION_HOKUSAI": "1"},
         clear=True,
     ):
         _warn_if_skip_notion_pre_set(cfg, "hokusai")
         captured = capsys.readouterr()
-        # profile suffix env 名が warning に含まれる（legacy 名のみは含まれない）
+        # profile suffix env 名が warning に含まれる
         assert "HOKUSAI_SKIP_NOTION_HOKUSAI=1" in captured.err
+        # legacy global 名だけの誤表示が起きていないこと（suffix 名の prefix なので
+        # "HOKUSAI_SKIP_NOTION=1" 完全マッチで判定）
+        assert "HOKUSAI_SKIP_NOTION=1" not in captured.err
 
 
 def test_task_backend_notion_uses_profile_aware_helper():

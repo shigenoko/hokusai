@@ -337,8 +337,11 @@ def save_to_subpage_or_create(
         を止めないため（Issue #75）。
     """
     if is_skip_notion():
+        # Issue #113 Round 1 指摘: profile suffix env でも skip されるため、
+        # 文言には特定 env 名を含めず一般的な表現にする
+        # （active_skip_env_name を使わないのは module-level の依存を増やさないため）。
         logger.info(
-            f"HOKUSAI_SKIP_NOTION=1: Phase {phase} 子ページ保存をスキップ"
+            f"Notion接続スキップモード: Phase {phase} 子ページ保存をスキップ"
         )
         return state
 

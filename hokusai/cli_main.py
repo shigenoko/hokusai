@@ -1994,16 +1994,32 @@ def _warn_if_skip_notion_pre_set(config, profile_label: str | None) -> None:
     （`main()` 内で本 helper を呼ぶ位置がそれより前なので、起動時 env と
     runtime 設定を自然に区別できる）。
     """
+    import os
     import sys
 
-    from .utils.skip_notion import active_skip_env_name, is_skip_notion
+    from .utils.skip_notion import (
+        LEGACY_GLOBAL_ENV,
+        is_skip_notion,
+        profile_skip_env_name,
+    )
 
-    # Issue #113 (follow-up): profile-aware な is_skip_notion() に統一。
-    if not is_skip_notion():
+    # Issue #113 (follow-up) Copilot Round 1 指摘:
+    # 本関数は main() で set_active_profile() より **前** に呼ばれるため、
+    # is_skip_notion() を引数なしで呼ぶと HOKUSAI_ACTIVE_PROFILE が未設定で
+    # profile suffix env (HOKUSAI_SKIP_NOTION_<SLUG>) を検知できない。
+    # profile_label が渡されているのでそれを明示的に渡して判定する。
+    if not is_skip_notion(profile_label):
         return
 
-    # 効いている env 名を warning 文言に反映（profile suffix / legacy）
-    skip_env = active_skip_env_name() or "HOKUSAI_SKIP_NOTION"
+    # 効いている env 名を warning 文言に反映（profile suffix を最優先）。
+    # active_skip_env_name() も同じ理由で HOKUSAI_ACTIVE_PROFILE 依存のため
+    # 使わず、profile_label から直接 suffix 名を組み立てる。
+    skip_env = LEGACY_GLOBAL_ENV
+    if profile_label:
+        suffix_name = profile_skip_env_name(profile_label)
+        if os.environ.get(suffix_name) == "1":
+            skip_env = suffix_name
+
     notion_cfg = getattr(config, "notion_dashboard", None)
     enabled = notion_cfg is not None and getattr(notion_cfg, "enabled", False)
     profile_text = (
