@@ -10,7 +10,6 @@ Note:
     Notion 書き込みは --disallowed-tools で遮断。
 """
 
-import os
 
 from ..config import get_config
 from ..integrations.claude_code import ClaudeCodeClient
@@ -29,6 +28,7 @@ from ..utils.phase_page_templates import (
     build_phase_page_content,
     initialize_phase_page_state,
 )
+from ..utils.skip_notion import is_skip_notion
 
 logger = get_logger("phase3")
 
@@ -296,7 +296,8 @@ def _verify_design_subpage_content(state: WorkflowState, raw_output: str) -> Non
 
     失敗時は RuntimeError を送出し、Phase 3 を失敗扱いにする。
     """
-    if os.environ.get("HOKUSAI_SKIP_NOTION") == "1":
+    # Issue #113 follow-up: profile-aware な is_skip_notion() に統一。
+    if is_skip_notion():
         return
 
     subpage_url = state.get("phase_subpages", {}).get(3)

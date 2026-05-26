@@ -281,6 +281,89 @@ def test_check_environment_uses_profile_aware_helper():
         assert not any("HOKUSAI_SKIP_NOTION" in w for w in warnings)
 
 
+def test_warn_if_skip_notion_pre_set_uses_profile_suffix_env(capsys):
+    """Issue #113 (follow-up) Round 1: main() で set_active_profile() より **前**
+    に呼ばれる関数なので、HOKUSAI_ACTIVE_PROFILE が未設定でも profile_label 引数
+    から suffix env を検知/表示できることを検証する。
+    """
+    from unittest.mock import MagicMock
+
+    from hokusai.cli_main import _warn_if_skip_notion_pre_set
+
+    cfg = MagicMock()
+    cfg.notion_dashboard = MagicMock()
+    cfg.notion_dashboard.enabled = True
+
+    # ACTIVE_PROFILE_ENV は **意図的に未設定**（main() の呼び出し順を反映）
+    with patch.dict(
+        os.environ,
+        {"HOKUSAI_SKIP_NOTION_HOKUSAI": "1"},
+        clear=True,
+    ):
+        _warn_if_skip_notion_pre_set(cfg, "hokusai")
+        captured = capsys.readouterr()
+        # profile suffix env 名が warning に含まれる
+        assert "HOKUSAI_SKIP_NOTION_HOKUSAI=1" in captured.err
+        # legacy global 名だけの誤表示が起きていないこと（suffix 名の prefix なので
+        # "HOKUSAI_SKIP_NOTION=1" 完全マッチで判定）
+        assert "HOKUSAI_SKIP_NOTION=1" not in captured.err
+
+
+def test_warn_if_skip_notion_pre_set_falls_back_to_active_profile_env(capsys):
+    """Issue #113 follow-up Round 4: profile_label が None でも、外部から
+    HOKUSAI_ACTIVE_PROFILE と suffix env が set されていれば suffix 名を
+    解除案内に正しく含める。
+    """
+    from unittest.mock import MagicMock
+
+    from hokusai.cli_main import _warn_if_skip_notion_pre_set
+
+    cfg = MagicMock()
+    cfg.notion_dashboard = MagicMock()
+    cfg.notion_dashboard.enabled = True
+
+    with patch.dict(
+        os.environ,
+        {
+            ACTIVE_PROFILE_ENV: "hokusai",
+            "HOKUSAI_SKIP_NOTION_HOKUSAI": "1",
+        },
+        clear=True,
+    ):
+        # profile_label=None でも ACTIVE_PROFILE_ENV から suffix 名を解決
+        _warn_if_skip_notion_pre_set(cfg, None)
+        captured = capsys.readouterr()
+        # suffix env 名が warning に含まれる
+        assert "HOKUSAI_SKIP_NOTION_HOKUSAI=1" in captured.err
+
+
+def test_warn_if_skip_notion_pre_set_lists_both_envs_when_both_set(capsys):
+    """Issue #113 follow-up Round 3 #4: legacy + suffix の両方が set されている
+    ケースでは解除案内に両方の env を列挙する。
+    """
+    from unittest.mock import MagicMock
+
+    from hokusai.cli_main import _warn_if_skip_notion_pre_set
+
+    cfg = MagicMock()
+    cfg.notion_dashboard = MagicMock()
+    cfg.notion_dashboard.enabled = True
+
+    with patch.dict(
+        os.environ,
+        {
+            "HOKUSAI_SKIP_NOTION_HOKUSAI": "1",
+            LEGACY_GLOBAL_ENV: "1",
+        },
+        clear=True,
+    ):
+        _warn_if_skip_notion_pre_set(cfg, "hokusai")
+        captured = capsys.readouterr()
+        # unset 案内に両方の env 名が含まれる
+        assert "HOKUSAI_SKIP_NOTION_HOKUSAI" in captured.err
+        assert "HOKUSAI_SKIP_NOTION " in captured.err or captured.err.rstrip().endswith("HOKUSAI_SKIP_NOTION` を推奨。")
+
+
 def test_task_backend_notion_uses_profile_aware_helper():
     """task_backend.notion._is_skip_notion が新 helper を経由"""
     from hokusai.integrations.task_backend.notion import NotionTaskClient

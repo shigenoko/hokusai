@@ -6,7 +6,6 @@ NotionタスクページへのコンテンツMCP経由保存を共通化する�
 
 from __future__ import annotations
 
-import os
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -17,6 +16,7 @@ from .phase_page_templates import (
     PHASE_PAGE_SOURCE_PHASES,
     build_phase_page_content,
 )
+from .skip_notion import is_skip_notion
 
 if TYPE_CHECKING:
     from ..state import WorkflowState
@@ -53,7 +53,8 @@ def save_content_to_notion(
     """
     コンテンツをNotionタスクページに保存（MCP経由）
 
-    環境変数 HOKUSAI_SKIP_NOTION が設定されている場合は保存をスキップする。
+    `is_skip_notion()` が True を返す場合（legacy global `HOKUSAI_SKIP_NOTION=1`
+    または profile suffix env `HOKUSAI_SKIP_NOTION_<SLUG>=1`）は保存をスキップする。
     コンテンツが空の場合も保存をスキップする。
     保存失敗は致命的ではないため、警告のみを出力する。
 
@@ -64,7 +65,7 @@ def save_content_to_notion(
             Noneの場合は既存コンテンツの末尾に追記。
     """
     # Notionスキップフラグをチェック
-    if os.environ.get("HOKUSAI_SKIP_NOTION") == "1":
+    if is_skip_notion():
         logger.info("Notion接続スキップモード: コンテンツの保存をスキップ")
         print("⏭️  Notion接続なし: コンテンツの自動保存をスキップ")
         return
@@ -114,7 +115,7 @@ def create_phase_subpage(
     Returns:
         作成された子ページの URL。失敗時は None。
     """
-    if os.environ.get("HOKUSAI_SKIP_NOTION") == "1":
+    if is_skip_notion():
         logger.info("Notion接続スキップモード: 子ページ作成をスキップ")
         return None
 
@@ -199,7 +200,7 @@ def update_subpage_content(page_url: str, content: str) -> bool:
     Returns:
         成功した場合 True
     """
-    if os.environ.get("HOKUSAI_SKIP_NOTION") == "1":
+    if is_skip_notion():
         logger.info("Notion接続スキップモード: 子ページ更新をスキップ")
         return False
 
@@ -260,7 +261,7 @@ def append_to_subpage(page_url: str, content: str) -> bool:
     Returns:
         成功した場合 True
     """
-    if os.environ.get("HOKUSAI_SKIP_NOTION") == "1":
+    if is_skip_notion():
         logger.info("Notion接続スキップモード: 子ページ追記をスキップ")
         return False
 
@@ -330,15 +331,20 @@ def save_to_subpage_or_create(
         更新されたワークフロー状態
 
     Notes:
-        `HOKUSAI_SKIP_NOTION=1` のとき副作用なく state をそのまま返す。
+        `is_skip_notion()` が True を返す場合（legacy global
+        `HOKUSAI_SKIP_NOTION=1` または profile suffix env
+        `HOKUSAI_SKIP_NOTION_<SLUG>=1`）は副作用なく state をそのまま返す。
         他の Notion ヘルパー（`save_content_to_notion` /
         `create_phase_subpage` / `update_subpage_content` /
         `append_to_subpage`）と同パターン。Notion 接続が無い環境で workflow
         を止めないため（Issue #75）。
     """
-    if os.environ.get("HOKUSAI_SKIP_NOTION") == "1":
+    if is_skip_notion():
+        # Issue #113 Round 1 指摘: profile suffix env でも skip されるため、
+        # 文言には特定 env 名を含めず一般的な表現にする（log は info 粒度で
+        # phase 識別だけ残せば十分なため、active_skip_env_name の呼び出しは省略）。
         logger.info(
-            f"HOKUSAI_SKIP_NOTION=1: Phase {phase} 子ページ保存をスキップ"
+            f"Notion接続スキップモード: Phase {phase} 子ページ保存をスキップ"
         )
         return state
 

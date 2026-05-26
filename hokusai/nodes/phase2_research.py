@@ -30,6 +30,7 @@ from ..utils.phase_page_templates import (
     build_phase_page_content,
     initialize_phase_page_state,
 )
+from ..utils.skip_notion import is_skip_notion
 
 logger = get_logger("phase2")
 
@@ -199,19 +200,21 @@ def _verify_notion_state(state: WorkflowState) -> None:
     失敗時は RuntimeError を送出。
 
     Note:
-        `HOKUSAI_SKIP_NOTION=1` のときは検証スキップ（早期 return）。
+        `is_skip_notion()` が True を返す場合（legacy global
+        `HOKUSAI_SKIP_NOTION=1` または profile suffix env
+        `HOKUSAI_SKIP_NOTION_<SLUG>=1`、Issue #113 follow-up で統一）は
+        検証スキップ（早期 return）。
         SKIP_NOTION 経路では save_to_subpage_or_create も noop で
         state["phase_subpages"] が空のままになるため、検証すると常に
         RuntimeError になり phase 2 が完走しない（Issue #77、PR #76 連鎖）。
-        `_verify_subpage_content` も同様に SKIP_NOTION で早期 return する。
+        `_verify_subpage_content` も同様に skip で早期 return する。
         現在は state ベースの検証のみ。実ページの存在確認や
         親タスクページへの本文混入チェック（notion-fetch による再取得）は
         追加 LLM 呼び出しコストが高いため後続対応とする。
     """
-    import os
-
-    if os.environ.get("HOKUSAI_SKIP_NOTION") == "1":
-        logger.info("HOKUSAI_SKIP_NOTION=1: Phase 2 Notion 状態検証をスキップ")
+    # Issue #113 follow-up: profile-aware な is_skip_notion() に統一。
+    if is_skip_notion():
+        logger.info("Notion接続スキップモード: Phase 2 Notion 状態検証をスキップ")
         return
 
     subpage_url = state.get("phase_subpages", {}).get(2)
@@ -234,9 +237,8 @@ def _verify_subpage_content(state: WorkflowState, raw_output: str) -> None:
 
     失敗時は RuntimeError を送出し、Phase 2 を失敗扱いにする。
     """
-    import os
-
-    if os.environ.get("HOKUSAI_SKIP_NOTION") == "1":
+    # Issue #113 follow-up: profile-aware な is_skip_notion() に統一。
+    if is_skip_notion():
         return
 
     subpage_url = state.get("phase_subpages", {}).get(2)
