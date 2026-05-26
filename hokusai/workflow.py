@@ -16,6 +16,7 @@ from .integrations.notion_dashboard import NotionSyncDispatcher
 from .integrations.notion_dashboard.operator import resolve_operator_name
 from .logging_config import get_logger
 from .state import PhaseStatus, add_audit_log, create_initial_state, update_phase_status
+from .utils.skip_notion import is_skip_notion
 
 logger = get_logger("workflow")
 
@@ -691,9 +692,12 @@ class WorkflowRunner:
         """workflow_id → Notion Workflows DB の page_id を解決する
         （Issue #56 / 要件 §9.3.2: start --supersedes で旧 workflow の page_id
         が必要なため）。Notion 同期が未設定 / page miss / API 失敗は None を
-        返して呼び出し側で graceful skip させる。`HOKUSAI_SKIP_NOTION=1` も
-        明示的に尊重する（`_sync_workflow_cancel_reason` と同じ責務統一、
-        Copilot 指摘）。
+        返して呼び出し側で graceful skip させる。
+
+        Issue #111 / C. SKIP_NOTION profile 化: `is_skip_notion()` を経由するため、
+        legacy global `HOKUSAI_SKIP_NOTION=1` だけでなく、active profile context
+        の `HOKUSAI_SKIP_NOTION_<SLUG>=1` も同様に尊重する
+        （`_sync_workflow_cancel_reason` と同じ責務統一、Copilot 指摘）。
         """
         if not workflow_id or not self.notion_dispatcher.is_configured():
             return None
@@ -703,7 +707,12 @@ class WorkflowRunner:
             # ユーザが「Notion なしで続行」を選択している場合は早期 return
             # （is_configured() は env が揃っていれば True になり得るが、
             # SKIP_NOTION=1 はそれより上位のオプトアウトシグナル）。
-            if os.environ.get("HOKUSAI_SKIP_NOTION") == "1":
+            # Issue #111: profile-aware な is_skip_notion() に統一。
+            # WorkflowRunner は self.profile_name を保持しているので明示的に渡し、
+            # HOKUSAI_ACTIVE_PROFILE が未 setenv（CLI main() を経由しない
+            # テスト/ライブラリ利用）でも profile suffix env を評価可能にする
+            # （Copilot Round 3 指摘）。
+            if is_skip_notion(self.profile_name):
                 return None
 
             from .integrations.notion_dashboard.client import NotionAPIClient
@@ -900,7 +909,9 @@ class WorkflowRunner:
 
             workflow_id = existing["workflow_id"]
             current_phase = existing["current_phase"]
-            notion_connected_env = os.environ.get("HOKUSAI_SKIP_NOTION") != "1"
+            # Issue #111 / Round 3: self.profile_name を明示的に渡して
+            # env 依存を減らす。
+            notion_connected_env = not is_skip_notion(self.profile_name)
             # Notion リトライで True に復元済みなら上書きしない
             if notion_connected_env or existing.get("notion_connected") is not True:
                 if existing.get("notion_connected") != notion_connected_env:
@@ -918,7 +929,8 @@ class WorkflowRunner:
             run_mode=("step" if self.step_mode else "auto"),
         )
         # Notion接続状態を実行時点の環境に合わせて明示的に反映
-        state["notion_connected"] = os.environ.get("HOKUSAI_SKIP_NOTION") != "1"
+        # Issue #111 / Round 3: self.profile_name を明示的に渡して env 依存を減らす。
+        state["notion_connected"] = not is_skip_notion(self.profile_name)
         # profile_name を state に注入（Phase E、workflows.profile_name 永続化用）
         # None の場合は state に入れず、save_workflow 側の COALESCE で既存値を保持
         if self.profile_name is not None:
@@ -1038,7 +1050,8 @@ class WorkflowRunner:
         # 実行時点の Notion 接続状態を state に反映し、ダッシュボードで即時可視化する
         # ただし、ダッシュボードからの Notion リトライで True に復元済みの場合は
         # 上書きしない（非対話モードの接続チェック失敗で False に戻るのを防止）
-        notion_connected_env = os.environ.get("HOKUSAI_SKIP_NOTION") != "1"
+        # Issue #111 / Round 3: self.profile_name を明示的に渡して env 依存を減らす。
+        notion_connected_env = not is_skip_notion(self.profile_name)
         if notion_connected_env or state.get("notion_connected") is not True:
             state["notion_connected"] = notion_connected_env
         self.store.save_workflow(workflow_id, state)

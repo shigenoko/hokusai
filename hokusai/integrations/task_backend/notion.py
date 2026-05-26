@@ -4,7 +4,6 @@ Notion Task Client
 Claude Code経由でMCP Notion Serverを使用してNotionタスクページを操作する。
 """
 
-import os
 import re
 from dataclasses import dataclass
 from enum import Enum
@@ -52,12 +51,20 @@ class NotionTaskClient(TaskBackendClient):
 
     @staticmethod
     def _is_skip_notion() -> bool:
-        """HOKUSAI_SKIP_NOTION 環境変数が設定されているか確認"""
-        return os.environ.get("HOKUSAI_SKIP_NOTION") == "1"
+        """profile-aware な Notion skip 判定（Issue #111）.
+
+        `HOKUSAI_ACTIVE_PROFILE` が main() で setenv されていれば
+        `HOKUSAI_SKIP_NOTION_<SLUG>` を最優先で評価し、未指定なら legacy
+        global `HOKUSAI_SKIP_NOTION` を見る。
+        """
+        from ...utils.skip_notion import is_skip_notion
+        return is_skip_notion()
 
     def _skip_result(self, operation: str) -> NotionOperationResult:
-        """スキップ結果を生成しログ出力"""
-        reason = "Notion未接続のためスキップ（HOKUSAI_SKIP_NOTION=1）"
+        """スキップ結果を生成しログ出力（Copilot Round 1 指摘: 効いている env 名を明示）"""
+        from ...utils.skip_notion import active_skip_env_name
+        skip_env = active_skip_env_name() or "HOKUSAI_SKIP_NOTION"
+        reason = f"Notion未接続のためスキップ（{skip_env}=1）"
         logger.info(f"Notion操作スキップ: {operation} — {reason}")
         print(f"⏭️  Notion操作スキップ: {operation}")
         return NotionOperationResult(

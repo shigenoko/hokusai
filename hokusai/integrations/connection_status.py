@@ -622,13 +622,18 @@ def _check_notion_mcp(mode: str) -> dict[str, Any]:
     label = "Notion MCP"
     required_for = ["notion_sync", "task_backend"]
 
-    if os.environ.get("HOKUSAI_SKIP_NOTION") == "1":
+    # Issue #111: profile-aware な is_skip_notion() に統一。HOKUSAI_ACTIVE_PROFILE
+    # が set されていれば profile suffix env (`HOKUSAI_SKIP_NOTION_<SLUG>`) も評価。
+    # summary には実際に効いている env 名を入れる（Copilot Round 1 指摘）。
+    from ..utils.skip_notion import active_skip_env_name
+    skip_env = active_skip_env_name()
+    if skip_env is not None:
         return _build_result(
             service_id=service_id,
             label=label,
             category=CategoryMCP,
             status=STATUS_DISABLED,
-            summary="HOKUSAI_SKIP_NOTION=1 により無効化されています",
+            summary=f"{skip_env}=1 により無効化されています",
             detail=None,
             required_for=required_for,
             message_key="connection.notion_mcp.disabled",
