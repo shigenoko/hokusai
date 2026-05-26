@@ -2004,6 +2004,7 @@ def _warn_if_skip_notion_pre_set(config, profile_label: str | None) -> None:
     import sys
 
     from .utils.skip_notion import (
+        ACTIVE_PROFILE_ENV,
         LEGACY_GLOBAL_ENV,
         is_skip_notion,
         profile_skip_env_name,
@@ -2018,14 +2019,15 @@ def _warn_if_skip_notion_pre_set(config, profile_label: str | None) -> None:
         return
 
     # 効いている env 名を warning 文言に反映（profile suffix を最優先）。
-    # active_skip_env_name() も同じ理由で HOKUSAI_ACTIVE_PROFILE 依存のため
-    # 使わず、profile_label から直接 suffix 名を組み立てる。
-    # Copilot Round 3 #4 指摘: 両方 set されているケースでは suffix だけ
-    # 表示しても解除案内が不正確になるため、両方検出して両方を列挙する。
+    # Copilot Round 3 #4 / Round 4: 両方 set されているケースや profile_label
+    # が None かつ外部から HOKUSAI_ACTIVE_PROFILE が設定されているケースにも
+    # 対応する。suffix の解決順序は (1) profile_label → (2) ACTIVE_PROFILE_ENV
+    # のフォールバック。検出した全 env を列挙して解除案内に含める。
     legacy_set = os.environ.get(LEGACY_GLOBAL_ENV) == "1"
     suffix_set: tuple[str, ...] = ()
-    if profile_label:
-        suffix_name = profile_skip_env_name(profile_label)
+    suffix_profile = profile_label or os.environ.get(ACTIVE_PROFILE_ENV, "").strip()
+    if suffix_profile:
+        suffix_name = profile_skip_env_name(suffix_profile)
         if os.environ.get(suffix_name) == "1":
             suffix_set = (suffix_name,)
     set_envs = list(suffix_set) + ([LEGACY_GLOBAL_ENV] if legacy_set else [])
