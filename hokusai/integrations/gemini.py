@@ -99,6 +99,8 @@ class GeminiClient:
         review_prompt: str,
         schema_path: str | None = None,
         timeout: int | None = None,
+        workflow_id: str | None = None,
+        phase: int | None = None,
     ) -> dict[str, Any]:
         """ドキュメントをレビューする。
 
@@ -107,6 +109,10 @@ class GeminiClient:
             review_prompt: レビュー用のプロンプト
             schema_path: 構造化出力用の JSON スキーマファイルパス（任意）
             timeout: タイムアウト秒数（省略時はデフォルト値）
+            workflow_id: 呼び出し元 HOKUSAI workflow_id。指定されていれば LLM Gateway
+                interceptor 経由で SQLite `audit_logs` への永続化に渡される
+                （Issue #80 / M0.1）。phase node から渡してもらう想定。
+            phase: 呼び出し元 phase 番号。workflow_id とセットで audit 永続化に使う。
 
         Returns:
             レビュー結果の辞書（schemas/review_schema.json と互換）
@@ -145,6 +151,8 @@ class GeminiClient:
             full_prompt,
             purpose="cross_review",
             metadata={"has_schema": bool(schema_path)},
+            workflow_id=workflow_id,
+            phase=phase,
         )
 
         # 安全性メモ:
@@ -184,6 +192,8 @@ class GeminiClient:
         prompt: str,
         files: list[Path] | None = None,
         timeout: int | None = None,
+        workflow_id: str | None = None,
+        phase: int | None = None,
     ) -> str:
         """任意プロンプトに対する Gemini のテキスト出力を返す。
 
@@ -195,6 +205,10 @@ class GeminiClient:
             files: コンテキストとして渡すファイルパスのリスト（任意）。
                 内容を読み込んでプロンプト末尾に追記する。
             timeout: タイムアウト秒数（省略時はデフォルト値）
+            workflow_id: 呼び出し元 HOKUSAI workflow_id。指定されていれば LLM Gateway
+                interceptor 経由で SQLite `audit_logs` への永続化に渡される
+                （Issue #80 / M0.1）。phase node から渡してもらう想定。
+            phase: 呼び出し元 phase 番号。workflow_id とセットで audit 永続化に使う。
 
         Returns:
             Gemini の生のテキスト出力
@@ -219,6 +233,8 @@ class GeminiClient:
             full_prompt,
             purpose="generate",
             metadata={"file_count": len(files) if files else 0},
+            workflow_id=workflow_id,
+            phase=phase,
         )
 
         # 安全性メモ: review_document() と同じく argv には whitelist 済みの値
