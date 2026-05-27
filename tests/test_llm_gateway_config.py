@@ -175,6 +175,72 @@ def test_loader_returns_defaults_when_section_not_dict():
     assert cfg.enabled is False
 
 
+# ---------------------------------------------------------------------------
+# env override: HOKUSAI_LLM_GATEWAY_ENABLED（PR #122 / F1）
+# ---------------------------------------------------------------------------
+
+
+def test_env_override_enables_when_no_yaml_section(monkeypatch):
+    """yaml セクションなしでも env=true なら enabled=True に上書きされる"""
+    monkeypatch.setenv("HOKUSAI_LLM_GATEWAY_ENABLED", "true")
+    cfg = _parse_llm_gateway_config({})
+    assert cfg.enabled is True
+    # 他フィールドは default のまま
+    assert cfg.log_only is True
+    assert cfg.audit_log_enabled is True
+
+
+def test_env_override_disables_when_yaml_says_true(monkeypatch):
+    """yaml で enabled=True でも env=false で disabled に上書きされる"""
+    monkeypatch.setenv("HOKUSAI_LLM_GATEWAY_ENABLED", "false")
+    cfg = _parse_llm_gateway_config({"llm_gateway": {"enabled": True}})
+    assert cfg.enabled is False
+
+
+def test_env_override_enables_when_yaml_says_false(monkeypatch):
+    """yaml で enabled=False でも env=1 で enabled に上書きされる"""
+    monkeypatch.setenv("HOKUSAI_LLM_GATEWAY_ENABLED", "1")
+    cfg = _parse_llm_gateway_config({"llm_gateway": {"enabled": False}})
+    assert cfg.enabled is True
+
+
+def test_env_override_recognises_truthy_synonyms(monkeypatch):
+    """truthy synonym (yes / on / TRUE / case-insensitive) が enabled=True になる"""
+    for value in ["yes", "ON", "TRUE", "1"]:
+        monkeypatch.setenv("HOKUSAI_LLM_GATEWAY_ENABLED", value)
+        cfg = _parse_llm_gateway_config({})
+        assert cfg.enabled is True, f"value={value!r} should be truthy"
+
+
+def test_env_override_recognises_falsy_synonyms(monkeypatch):
+    """falsy synonym (no / off / FALSE / 0) が enabled=False になる"""
+    for value in ["no", "OFF", "FALSE", "0"]:
+        monkeypatch.setenv("HOKUSAI_LLM_GATEWAY_ENABLED", value)
+        cfg = _parse_llm_gateway_config({"llm_gateway": {"enabled": True}})
+        assert cfg.enabled is False, f"value={value!r} should be falsy"
+
+
+def test_env_override_unrecognised_value_keeps_yaml(monkeypatch):
+    """空文字 / 認識外の文字列は env override を無視して yaml/default 値を維持する"""
+    for value in ["", "  ", "maybe", "enabled"]:
+        monkeypatch.setenv("HOKUSAI_LLM_GATEWAY_ENABLED", value)
+        # yaml で True を指定 → そのまま True 維持
+        cfg = _parse_llm_gateway_config({"llm_gateway": {"enabled": True}})
+        assert cfg.enabled is True, f"value={value!r}: yaml true should remain"
+        # yaml なし → default False 維持
+        cfg = _parse_llm_gateway_config({})
+        assert cfg.enabled is False, f"value={value!r}: default false should remain"
+
+
+def test_env_override_unset_keeps_yaml(monkeypatch):
+    """env 未設定なら yaml 値（or default）が完全に保たれる"""
+    monkeypatch.delenv("HOKUSAI_LLM_GATEWAY_ENABLED", raising=False)
+    cfg = _parse_llm_gateway_config({"llm_gateway": {"enabled": True}})
+    assert cfg.enabled is True
+    cfg = _parse_llm_gateway_config({})
+    assert cfg.enabled is False
+
+
 def test_loader_parses_full_schema():
     """要件 §4.1 のフル schema YAML が正しく解析される"""
     raw = {

@@ -5,6 +5,7 @@ File loading and parsing functions for workflow configuration.
 """
 
 import logging
+import os
 from pathlib import Path
 
 import yaml
@@ -335,6 +336,28 @@ def _parse_notion_dashboard_config(config_dict: dict) -> NotionDashboardConfig:
     )
 
 
+def _llm_gateway_enabled_env_override() -> bool | None:
+    """`HOKUSAI_LLM_GATEWAY_ENABLED` env を boolean に解釈する。
+
+    dogfooding-findings.md §7 F1 で記録した「yaml 編集なしの一時 enable 経路が
+    無い」運用穴を埋めるための env override（PR #122）。truthy/falsy/未設定 を
+    `True / False / None` に正規化し、None なら yaml 値（or default）を尊重する。
+
+    truthy: "1" / "true" / "yes" / "on"（case-insensitive）
+    falsy:  "0" / "false" / "no" / "off"（case-insensitive）
+    その他（空文字 / 認識外の文字列）: `None`（override しない、yaml/default 維持）
+    """
+    raw = os.environ.get("HOKUSAI_LLM_GATEWAY_ENABLED")
+    if raw is None:
+        return None
+    lowered = raw.strip().lower()
+    if lowered in {"1", "true", "yes", "on"}:
+        return True
+    if lowered in {"0", "false", "no", "off"}:
+        return False
+    return None
+
+
 def _parse_llm_gateway_config(config_dict: dict) -> LLMGatewayConfig:
     """llm_gateway 設定をパース（#39 / v0.6.0〜、Issue #58 でフル schema 拡張）。
 
@@ -374,19 +397,35 @@ def _parse_llm_gateway_config(config_dict: dict) -> LLMGatewayConfig:
       は将来的に追加検討、現状は静かに既定値）
     - allowed_providers / detector rules / model リストは「str 要素のみ」を
       抽出（dict / int 混入時に安全に str のみ採用）
+
+    env override（PR #122 / F1）:
+    - `HOKUSAI_LLM_GATEWAY_ENABLED` が truthy/falsy で指定されていれば
+      `enabled` 値を yaml/default に対して上書きする。dogfooding 観察時に
+      yaml 編集なしで一時 enable / disable できる経路（既存 yaml は維持）。
+    - env が未設定 or 認識外文字列なら yaml/default を維持。
     """
     raw = config_dict.get("llm_gateway")
-    if not isinstance(raw, dict):
-        return LLMGatewayConfig()
-
     defaults = LLMGatewayConfig()
+    enabled_env = _llm_gateway_enabled_env_override()
+
+    if not isinstance(raw, dict):
+        # yaml セクションなし: env override があれば enabled だけ上書きする
+        # （他フィールドは default のまま）。
+        if enabled_env is not None:
+            return LLMGatewayConfig(enabled=enabled_env)
+        return LLMGatewayConfig()
 
     def _bool_or_default(key: str, default: bool) -> bool:
         value = raw.get(key, default)
         return value if isinstance(value, bool) else default
 
+    enabled = _bool_or_default("enabled", defaults.enabled)
+    if enabled_env is not None:
+        # env が yaml を上書き（dogfooding 一時 enable 用途）
+        enabled = enabled_env
+
     return LLMGatewayConfig(
-        enabled=_bool_or_default("enabled", defaults.enabled),
+        enabled=enabled,
         dry_run=_bool_or_default("dry_run", defaults.dry_run),
         log_only=_bool_or_default("log_only", defaults.log_only),
         audit_log_enabled=_bool_or_default(
