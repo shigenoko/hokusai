@@ -16,18 +16,6 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from hokusai.config.loaders import _parse_llm_gateway_config
-
-
-@pytest.fixture(autouse=True)
-def _clear_llm_gateway_env(monkeypatch):
-    """PR #122 で導入した `HOKUSAI_LLM_GATEWAY_ENABLED` env override が
-    開発者環境にセットされていると、env 未設定前提の既存テスト群が非決定的に
-    失敗する。本モジュール全テストの実行前に env を必ず未設定状態にする。
-    env override 自体を検証する `test_env_override_*` テストでは個別に
-    `monkeypatch.setenv(...)` で値をセットすることで意図された動作を再現する
-    （autouse fixture より後に評価されるので問題なく上書きできる）。
-    """
-    monkeypatch.delenv("HOKUSAI_LLM_GATEWAY_ENABLED", raising=False)
 from hokusai.config.models import (
     LLMGatewayAllowedModelsConfig,
     LLMGatewayApprovalsConfig,
@@ -56,6 +44,18 @@ from hokusai.llm_gateway import (
     is_valid_fail_mode,
     is_valid_redaction_action,
 )
+
+
+@pytest.fixture(autouse=True)
+def _clear_llm_gateway_env(monkeypatch):
+    """PR #122 で導入した `HOKUSAI_LLM_GATEWAY_ENABLED` env override が
+    開発者環境にセットされていると、env 未設定前提の既存テスト群が非決定的に
+    失敗する。本モジュール全テストの実行前に env を必ず未設定状態にする。
+    env override 自体を検証する `test_env_override_*` テストでは個別に
+    `monkeypatch.setenv(...)` で値をセットすることで意図された動作を再現する
+    （autouse fixture より後に評価されるので問題なく上書きできる）。
+    """
+    monkeypatch.delenv("HOKUSAI_LLM_GATEWAY_ENABLED", raising=False)
 
 
 # ---------------------------------------------------------------------------
