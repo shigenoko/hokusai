@@ -97,7 +97,7 @@ def test_phase8_auto_fix_review_comments_passes_workflow_id(monkeypatch, tmp_pat
     mock_claude.execute_prompt.return_value = "fixed"
 
     mock_git = MagicMock()
-    mock_git.has_uncommitted_changes.return_value = False  # 早期 return さ せる
+    mock_git.has_uncommitted_changes.return_value = False  # 早期 return させる
 
     monkeypatch.setattr(review_fix, "ClaudeCodeClient",
                         lambda working_dir=None: mock_claude)
@@ -241,11 +241,15 @@ def test_cross_review_passes_workflow_id_to_review_document(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# 共通: state.workflow_id が空 / 未設定なら None が helper まで届く（後方互換）
+# 共通: workflow_id / phase が未指定（default None）なら helper まで None が
+# 届く（後方互換）。helper 自体は空文字 ("") → None の正規化は行わない。
+# 「空 → None」の正規化は phase node 内の `state.get("workflow_id") or None`
+# 側でのみ起きる（dispatch_via_gateway 仕様: None / "" どちらでも SQLite
+# 永続化を skip するので機能上は等価）。
 # ---------------------------------------------------------------------------
 
-def test_phase7_single_repo_empty_workflow_id_becomes_none(tmp_path):
-    """workflow_id 引数が None でも helper まで None が届く（既存挙動維持）"""
+def test_phase7_single_repo_unset_workflow_id_remains_none(tmp_path):
+    """workflow_id / phase 引数を未指定で呼ぶと helper まで None が届く（後方互換）"""
     from hokusai.nodes import phase7_review
 
     mock_claude = MagicMock()
