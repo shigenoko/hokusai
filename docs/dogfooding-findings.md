@@ -357,16 +357,34 @@ sqlite3 ~/.hokusai/profiles/hokusai/workflow.db "SELECT COUNT(*) FROM audit_logs
 $EDITOR ~/.hokusai/configs/hokusai.yaml
 
 # dispatch_via_gateway を Python から直接呼んで interceptor 経路を観察
+# Step 1 (log_only=true): provider='claude_code' を 1 回 → audit decision=log を確認
+# Step 2 (log_only=false + allowed_providers=['codex']):
+#   (a) provider='claude_code' → LLMGatewayBlockedError raise + audit decision=block
+#   (b) provider='codex'       → 例外なし透過 + audit decision=log
 HOKUSAI_ACTIVE_PROFILE=hokusai uv run python -c "
 from hokusai.llm_gateway.dispatch import dispatch_via_gateway, LLMGatewayBlockedError
+
+# Test A: 非許可 provider → block 期待（Step 2 のみ、Step 1 では log になる）
 try:
     dispatch_via_gateway(
         provider='claude_code', model='claude-sonnet-4',
         purpose='dogfood_observation_step1', prompt='...',
         workflow_id='wf-dbe7b6cd', phase=7,
     )
+    print('A: no exception (Step 1 では正常、Step 2 では UNEXPECTED)')
 except LLMGatewayBlockedError as e:
-    print(f'blocked: hits={e.policy_hits} reason={e.reason}')
+    print(f'A: blocked hits={e.policy_hits} reason={e.reason}')
+
+# Test B: 許可 provider → 透過期待（Step 2 のみ意味あり）
+try:
+    dispatch_via_gateway(
+        provider='codex', model='gpt-4',
+        purpose='dogfood_observation_step2_pass', prompt='...',
+        workflow_id='wf-dbe7b6cd', phase=7,
+    )
+    print('B: passed through (Step 2 で期待動作)')
+except LLMGatewayBlockedError as e:
+    print(f'B: UNEXPECTED block hits={e.policy_hits}')
 "
 
 # audit_logs を観察
