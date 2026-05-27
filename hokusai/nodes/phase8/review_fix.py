@@ -113,6 +113,8 @@ def _auto_fix_review_comments(
             prompt=prompt,
             timeout=config.skill_timeout,
             allow_file_operations=True,
+            workflow_id=state.get("workflow_id") or None,
+            phase=8,
         )
         logger.info(f"Claude Code実行完了: {len(result)}文字")
 

@@ -335,6 +335,9 @@ class TestPhase2DirectPrompt:
         call_kwargs = mock_client.execute_prompt.call_args
         assert call_kwargs.kwargs.get("disallowed_tools") is not None
         assert "mcp__notion__notion-update-page" in call_kwargs.kwargs["disallowed_tools"]
+        # F4 案 A2: workflow_id / phase=2 が helper まで届くこと（PR #121）
+        assert call_kwargs.kwargs.get("workflow_id") == "test-wf-001"
+        assert call_kwargs.kwargs.get("phase") == 2
 
 
 # ---------------------------------------------------------------------------
@@ -1058,6 +1061,11 @@ class TestPhase2OutputRetry:
         ]
         assert len(retry_logs) == 1
         assert retry_logs[0]["details"]["attempt"] == 2
+        # F4 案 A2: 初回 / retry 両方の execute_prompt 呼び出しに
+        # workflow_id="test-wf-001" / phase=2 が helper まで届くこと（PR #121）
+        for call in mock_client.execute_prompt.call_args_list:
+            assert call.kwargs.get("workflow_id") == "test-wf-001"
+            assert call.kwargs.get("phase") == 2
 
     @patch("hokusai.nodes.phase2_research._verify_subpage_content")
     @patch("hokusai.nodes.phase2_research.execute_cross_review", side_effect=lambda s, *a, **kw: s)

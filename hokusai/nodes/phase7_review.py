@@ -248,6 +248,8 @@ def _review_single_repo(
     repo_path: Path,
     review_prompt: str,
     timeout: int,
+    workflow_id: str | None = None,
+    phase: int | None = None,
 ) -> dict:
     """単一リポジトリのレビューを実行
 
@@ -256,12 +258,20 @@ def _review_single_repo(
         repo_path: リポジトリのパス
         review_prompt: レビュープロンプト
         timeout: タイムアウト秒数
+        workflow_id: LLM Gateway audit 永続化用の workflow_id（呼び出し元 phase node
+            から state 経由で伝播される、F4 案 A2）。
+        phase: 呼び出し元 phase 番号（phase7_review なら 7）。
 
     Returns:
         レビュー結果の辞書
     """
     claude = ClaudeCodeClient(working_dir=repo_path)
-    output = claude.execute_prompt(review_prompt, timeout=timeout)
+    output = claude.execute_prompt(
+        review_prompt,
+        timeout=timeout,
+        workflow_id=workflow_id,
+        phase=phase,
+    )
     result = _parse_review_result(output)
     return result
 
@@ -270,8 +280,19 @@ def _review_all_repositories(
     repositories: list,
     review_prompt: str,
     timeout: int,
+    workflow_id: str | None = None,
+    phase: int | None = None,
 ) -> dict[str, dict]:
-    """全リポジトリのレビューを実行し、リポジトリ名をキーとした結果辞書を返す"""
+    """全リポジトリのレビューを実行し、リポジトリ名をキーとした結果辞書を返す
+
+    Args:
+        repositories: レビュー対象のリポジトリリスト
+        review_prompt: レビュープロンプト
+        timeout: タイムアウト秒数
+        workflow_id: LLM Gateway audit 永続化用の workflow_id（呼び出し元 phase node
+            から state 経由で伝播される、F4 案 A2）。
+        phase: 呼び出し元 phase 番号（phase7_review なら 7）。
+    """
     review_by_repo: dict[str, dict] = {}
     for repo in repositories:
         repo_name = repo.name
@@ -295,6 +316,8 @@ def _review_all_repositories(
                 repo_path=repo_path,
                 review_prompt=review_prompt,
                 timeout=timeout,
+                workflow_id=workflow_id,
+                phase=phase,
             )
 
             review_by_repo[repo_name] = {
@@ -460,6 +483,8 @@ def phase7_review_node(state: WorkflowState) -> WorkflowState:
         # 全リポジトリのレビュー実行
         review_by_repo = _review_all_repositories(
             repositories, review_prompt, config.skill_timeout,
+            workflow_id=state.get("workflow_id") or None,
+            phase=7,
         )
 
         # 必須ルール完全性チェック (C2: 欠落検知)

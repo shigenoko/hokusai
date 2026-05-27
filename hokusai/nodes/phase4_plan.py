@@ -174,6 +174,8 @@ def phase4_plan_node(state: WorkflowState) -> WorkflowState:
             timeout=config.skill_timeout,
             disallowed_tools=NOTION_WRITE_TOOLS,
             append_system_prompt=read_prompt_file("phase4.append_system_prompt"),
+            workflow_id=state.get("workflow_id") or None,
+            phase=4,
         )
 
         # dev-planの出力を保存（開発計画部分のみを抽出）
@@ -214,6 +216,8 @@ def phase4_plan_node(state: WorkflowState) -> WorkflowState:
                 allow_mcp_tools=True,
                 allow_file_operations=True,
                 disallowed_tools=NOTION_WRITE_TOOLS,
+                workflow_id=state.get("workflow_id") or None,
+                phase=4,
             )
             output_text = _extract_dev_plan_content(raw_output)
             extraction_succeeded = (

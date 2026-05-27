@@ -157,6 +157,8 @@ def execute_cross_review(
                 document=document,
                 review_prompt=review_prompt,
                 schema_path=schema_path,
+                workflow_id=state.get("workflow_id") or None,
+                phase=phase,
             )
             break
         except (TimeoutError, RuntimeError) as e:

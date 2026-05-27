@@ -521,6 +521,8 @@ def _execute_implementation(
                 prompt=implementation_prompt,
                 timeout=config.skill_timeout,
                 allow_file_operations=True,
+                workflow_id=state.get("workflow_id") or None,
+                phase=5,
             )
 
             all_results.append(f"# Repository: {repo.name}\n{result}")
