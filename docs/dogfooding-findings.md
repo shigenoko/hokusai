@@ -247,7 +247,7 @@ v0.5.0 リリース後の再観察。前回 (§1-6) で挙げた enforcement 前
 |---|---|---|
 | 1 | `~/.hokusai/configs/hokusai.yaml` に `llm_gateway: { enabled: true, log_only: true, audit_log_enabled: true }` を一時追加 | audit log 永続化が機能するか |
 | 1 | `dispatch_via_gateway(workflow_id="wf-dbe7b6cd", phase=7, provider="claude_code", ...)` を 1 回 Python から呼ぶ | interceptor 経路を確実に通す |
-| 1 | `sqlite3 workflow.db "SELECT * FROM audit_logs"` で行確認 | SQLite 永続化の裏取り |
+| 1 | `sqlite3 ~/.hokusai/profiles/hokusai/workflow.db "SELECT * FROM audit_logs"` で行確認（実際の DB は profile の `config.database_path` を参照、カレント `workflow.db` 誤参照を避けるためフルパスで書く） | SQLite 永続化の裏取り |
 | 2 | yaml を `log_only: false`, `allowed_providers: ["codex"]` に変更 | enforcement on の状態を作る |
 | 2 | `provider="claude_code"` (allowlist 非含) で dispatch | `LLMGatewayBlockedError` raise を確認 |
 | 2 | `provider="codex"` (allowlist 含) で dispatch | 透過動作（例外なし、audit `decision=log`）を確認 |
