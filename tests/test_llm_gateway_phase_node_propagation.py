@@ -16,41 +16,14 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 # ---------------------------------------------------------------------------
-# phase2_research: execute_prompt → workflow_id/phase=2
+# 注記: phase2_research / phase3_design / phase4_plan / phase5_implement /
+# phase8/review_fix の entry point ノードは Notion / config / git client 等の
+# 依存が深く、軽量 mock で「execute_prompt が呼ばれた」だけを assert する
+# テストを書くと依存が崩れて何も検証されない（PR #121 Copilot Round 1 指摘）。
+# それらの phase node については本ファイルでは個別 unit テストを置かず、
+# 配線は (1) phase7_review の helper unit テスト + (2) cross_review の unit
+# テストで代表させ、phase2-5/8 はコードレビューで担保する方針とする。
 # ---------------------------------------------------------------------------
-
-def test_phase2_research_passes_workflow_id_to_execute_prompt():
-    """phase2 の execute_prompt 呼び出しに workflow_id / phase=2 が渡る"""
-    from hokusai.nodes import phase2_research
-
-    mock_claude = MagicMock()
-    mock_claude.execute_prompt.return_value = (
-        "## Task Research Report\n"
-        "task_url: https://example.com/issue/1\n"
-        "## TL;DR\nSummary\n## 概要\nDetail\n"
-    )
-
-    with patch("hokusai.nodes.phase2_research.ClaudeCodeClient",
-               return_value=mock_claude), \
-         patch("hokusai.nodes.phase2_research._validate_research_output"), \
-         patch("hokusai.nodes.phase2_research._extract_research_report",
-               return_value="report"):
-        state = {
-            "workflow_id": "wf-phase2-test",
-            "task_url": "https://example.com/issue/1",
-            "audit_logs": [],
-        }
-        try:
-            phase2_research.run_research(state)
-        except Exception:
-            # phase2_research の他の依存（config etc）で失敗してもこのテストでは
-            # execute_prompt 呼び出しが起きていれば assertion 通る
-            pass
-
-    if mock_claude.execute_prompt.called:
-        kwargs = mock_claude.execute_prompt.call_args.kwargs
-        assert kwargs.get("workflow_id") == "wf-phase2-test"
-        assert kwargs.get("phase") == 2
 
 
 # ---------------------------------------------------------------------------
