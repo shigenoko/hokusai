@@ -126,6 +126,9 @@ class TestPhase3DirectPrompt:
         call_kwargs = mock_client.execute_prompt.call_args
         assert call_kwargs.kwargs.get("disallowed_tools") is not None
         assert "mcp__notion__notion-update-page" in call_kwargs.kwargs["disallowed_tools"]
+        # F4 案 A2: workflow_id / phase=3 が helper まで届くこと（PR #121）
+        assert call_kwargs.kwargs.get("workflow_id") == "test-wf-001"
+        assert call_kwargs.kwargs.get("phase") == 3
 
     @patch("hokusai.nodes.phase3_design._validate_design_output")
     @patch("hokusai.nodes.phase3_design._verify_design_subpage_content")

@@ -16,14 +16,121 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 # ---------------------------------------------------------------------------
-# 注記: phase2_research / phase3_design / phase4_plan / phase5_implement /
-# phase8/review_fix の entry point ノードは Notion / config / git client 等の
-# 依存が深く、軽量 mock で「execute_prompt が呼ばれた」だけを assert する
-# テストを書くと依存が崩れて何も検証されない（PR #121 Copilot Round 1 指摘）。
-# それらの phase node については本ファイルでは個別 unit テストを置かず、
-# 配線は (1) phase7_review の helper unit テスト + (2) cross_review の unit
-# テストで代表させ、phase2-5/8 はコードレビューで担保する方針とする。
+# 配線テストの分布（PR #121 Copilot Round 2 指摘を受けて再構成）:
+# - phase2/3/4: 既存 entry-point テスト (`tests/test_phase{2,3,4}_*.py`) が
+#   `ClaudeCodeClient.execute_prompt/execute_skill` を mock 済みなので、
+#   そちらの既存テストに workflow_id/phase の kwargs assert を追記して担保。
+# - phase5/8: 既存テストが薄いため、本ファイルで `_execute_implementation` /
+#   `_auto_fix_review_comments` を直接呼ぶ unit テストを追加して担保。
+# - phase7: 既に helper (`_review_single_repo` / `_review_all_repositories`)
+#   が切り出されているので本ファイルで直接 unit テスト。
+# - cross_review: 内部依存を mock した unit テスト。
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# phase5_implement: _execute_implementation → execute_prompt に
+#                   workflow_id/phase=5 が届く
+# ---------------------------------------------------------------------------
+
+def test_phase5_execute_implementation_passes_workflow_id(monkeypatch, tmp_path):
+    """`_execute_implementation` 内の execute_prompt 呼び出しに workflow_id/phase=5 が届く"""
+    from hokusai.nodes import phase5_implement
+
+    mock_claude = MagicMock()
+    mock_claude.execute_prompt.return_value = "implementation result"
+
+    # ClaudeCodeClient と各依存を mock
+    monkeypatch.setattr(phase5_implement, "ClaudeCodeClient",
+                        lambda working_dir=None: mock_claude)
+    monkeypatch.setattr(phase5_implement, "_build_implementation_prompt",
+                        lambda *a, **kw: "implementation prompt")
+    monkeypatch.setattr(phase5_implement, "_build_retry_prompt",
+                        lambda *a, **kw: "retry prompt")
+
+    repo = type("Repo", (), {"name": "Backend", "path": tmp_path})()
+    monkeypatch.setattr(phase5_implement, "resolve_runtime_repositories",
+                        lambda state, config: [repo])
+
+    # `_commit_and_push` などコミット系を no-op に
+    monkeypatch.setattr(phase5_implement, "_commit_and_push",
+                        lambda *a, **kw: None)
+
+    class _Cfg:
+        skill_timeout = 300
+        project_root = tmp_path
+
+    monkeypatch.setattr(phase5_implement, "get_config", lambda: _Cfg())
+
+    state = {
+        "workflow_id": "wf-phase5-test",
+        "audit_log": [],
+        "branch_name": "",  # _commit_and_push を skip させる
+        "repositories": [],
+    }
+    try:
+        phase5_implement._execute_implementation(
+            state, is_retry=False, phase7_retry_count=0, phase6_retry_count=0,
+        )
+    except Exception:
+        # 周辺依存（state 操作 / git 検証）で失敗してもこのテストの目的
+        # （execute_prompt の kwargs 検証）は execute_prompt 呼び出しが
+        # 発火していれば達せる
+        pass
+
+    assert mock_claude.execute_prompt.called
+    kwargs = mock_claude.execute_prompt.call_args.kwargs
+    assert kwargs.get("workflow_id") == "wf-phase5-test"
+    assert kwargs.get("phase") == 5
+
+
+# ---------------------------------------------------------------------------
+# phase8/review_fix: _auto_fix_review_comments → execute_prompt に
+#                   workflow_id/phase=8 が届く
+# ---------------------------------------------------------------------------
+
+def test_phase8_auto_fix_review_comments_passes_workflow_id(monkeypatch, tmp_path):
+    """`_auto_fix_review_comments` 内の execute_prompt に workflow_id/phase=8 が届く"""
+    from hokusai.nodes.phase8 import review_fix
+
+    mock_claude = MagicMock()
+    mock_claude.execute_prompt.return_value = "fixed"
+
+    mock_git = MagicMock()
+    mock_git.has_uncommitted_changes.return_value = False  # 早期 return さ せる
+
+    monkeypatch.setattr(review_fix, "ClaudeCodeClient",
+                        lambda working_dir=None: mock_claude)
+    monkeypatch.setattr(review_fix, "GitClient", lambda path: mock_git)
+    monkeypatch.setattr(review_fix, "_build_review_fix_prompt",
+                        lambda comments, pr_number, repo_name: "fix prompt")
+
+    class _Repo:
+        path = tmp_path
+        name = "Backend"
+
+    class _Cfg:
+        skill_timeout = 300
+        project_root = tmp_path
+
+    monkeypatch.setattr(review_fix, "get_config", lambda: _Cfg())
+    monkeypatch.setattr(review_fix, "get_runtime_repository",
+                        lambda state, config, repo_name: _Repo())
+
+    state = {
+        "workflow_id": "wf-phase8-test",
+        "branch_name": "feature/test",
+        "audit_log": [],
+    }
+    current_pr = {"number": 1, "repo_name": "Backend"}
+    comments = [{"id": 1, "body": "test", "path": "x.py", "line": 1}]
+
+    review_fix._auto_fix_review_comments(state, current_pr, comments)
+
+    assert mock_claude.execute_prompt.called
+    kwargs = mock_claude.execute_prompt.call_args.kwargs
+    assert kwargs.get("workflow_id") == "wf-phase8-test"
+    assert kwargs.get("phase") == 8
 
 
 # ---------------------------------------------------------------------------

@@ -274,6 +274,14 @@ class TestPhase4PlanNodeIntegration:
         # Notion 保存やクロスレビューは実行されない
         mock_save.assert_not_called()
         mock_cross_review.assert_not_called()
+        # F4 案 A2: execute_skill 初回 / execute_prompt retry 両方で workflow_id / phase=4 が
+        # helper まで届くこと（PR #121）
+        skill_kwargs = mock_claude.execute_skill.call_args.kwargs
+        assert skill_kwargs.get("workflow_id") == "wf-test0001"
+        assert skill_kwargs.get("phase") == 4
+        retry_kwargs = mock_claude.execute_prompt.call_args.kwargs
+        assert retry_kwargs.get("workflow_id") == "wf-test0001"
+        assert retry_kwargs.get("phase") == 4
 
     @patch("hokusai.nodes.phase4_plan.execute_cross_review", side_effect=lambda s, *a, **kw: s)
     @patch("hokusai.nodes.phase4_plan.save_to_subpage_or_create", side_effect=lambda s, *a, **kw: s)
