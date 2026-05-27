@@ -54,6 +54,8 @@ class ClaudeCodeClient:
         allow_all_permissions: bool = True,
         disallowed_tools: list[str] | None = None,
         append_system_prompt: str | None = None,
+        workflow_id: str | None = None,
+        phase: int | None = None,
     ) -> dict[str, Any]:
         """
         Claude Codeのスキルを実行
@@ -67,6 +69,10 @@ class ClaudeCodeClient:
             disallowed_tools: 使用を禁止するツール名のリスト
             append_system_prompt: システムプロンプトに追記する制約文
                 --append-system-prompt フラグとして渡される
+            workflow_id: 呼び出し元 HOKUSAI workflow_id。指定されていれば LLM Gateway
+                interceptor 経由で SQLite `audit_logs` への永続化に渡される
+                （Issue #80 / M0.1）。phase node から渡してもらう想定。
+            phase: 呼び出し元 phase 番号。workflow_id とセットで audit 永続化に使う。
 
         Returns:
             スキルの実行結果
@@ -86,6 +92,8 @@ class ClaudeCodeClient:
                 disallowed_tools=disallowed_tools,
                 append_system_prompt=append_system_prompt,
                 gateway_purpose=f"skill_execution:{skill}",
+                workflow_id=workflow_id,
+                phase=phase,
             )
             return self._parse_skill_result(skill, result)
         except subprocess.TimeoutExpired:
@@ -100,6 +108,8 @@ class ClaudeCodeClient:
         allow_mcp_tools: bool = False,
         allow_file_operations: bool = False,
         disallowed_tools: list[str] | None = None,
+        workflow_id: str | None = None,
+        phase: int | None = None,
     ) -> str:
         """
         任意のプロンプトをClaude Codeに実行させる
@@ -110,6 +120,10 @@ class ClaudeCodeClient:
             allow_mcp_tools: MCPツールへのアクセスを許可する場合True
             allow_file_operations: ファイル操作（Edit, Write, Bash等）を許可する場合True
             disallowed_tools: 使用を禁止するツール名のリスト
+            workflow_id: 呼び出し元 HOKUSAI workflow_id。指定されていれば LLM Gateway
+                interceptor 経由で SQLite `audit_logs` への永続化に渡される
+                （Issue #80 / M0.1）。phase node から渡してもらう想定。
+            phase: 呼び出し元 phase 番号。workflow_id とセットで audit 永続化に使う。
 
         Returns:
             実行結果のテキスト
@@ -125,6 +139,8 @@ class ClaudeCodeClient:
                 permission_mode=permission_mode,
                 disallowed_tools=disallowed_tools,
                 gateway_purpose="execute_prompt",
+                workflow_id=workflow_id,
+                phase=phase,
             )
         except subprocess.TimeoutExpired:
             raise TimeoutError("プロンプトの実行がタイムアウトしました")
@@ -173,6 +189,8 @@ class ClaudeCodeClient:
         disallowed_tools: list[str] | None = None,
         append_system_prompt: str | None = None,
         gateway_purpose: str = "claude_code_invoke",
+        workflow_id: str | None = None,
+        phase: int | None = None,
     ) -> str:
         """
         Claude Codeをサブプロセスとして実行
@@ -185,6 +203,10 @@ class ClaudeCodeClient:
             append_system_prompt: システムプロンプトに追記するテキスト
             gateway_purpose: LLM Gateway interceptor に渡す purpose 識別子
                 （"skill_execution" / "execute_prompt" 等）。Phase 1 は log のみ
+            workflow_id: LLM Gateway interceptor に転送する workflow_id（audit
+                永続化用、Issue #80 / M0.1）。`execute_*` 経由で phase node から
+                渡される想定。
+            phase: 同じく interceptor に転送する phase 番号。
 
         Returns:
             実行結果の標準出力
@@ -193,7 +215,11 @@ class ClaudeCodeClient:
         # Gateway が無効化されている、または例外が出た場合でも既存フローには
         # 一切影響を与えないため、ここで try/except する。
         self._invoke_llm_gateway_interceptor(
-            prompt, gateway_purpose, append_system_prompt=append_system_prompt
+            prompt,
+            gateway_purpose,
+            append_system_prompt=append_system_prompt,
+            workflow_id=workflow_id,
+            phase=phase,
         )
 
         cmd = [

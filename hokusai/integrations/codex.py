@@ -65,6 +65,8 @@ class CodexClient:
         review_prompt: str,
         schema_path: str | None = None,
         timeout: int | None = None,
+        workflow_id: str | None = None,
+        phase: int | None = None,
     ) -> dict[str, Any]:
         """
         ドキュメントをレビューする
@@ -74,6 +76,10 @@ class CodexClient:
             review_prompt: レビュー用のプロンプト
             schema_path: 構造化出力用のJSONスキーマファイルパス
             timeout: タイムアウト秒数（省略時はデフォルト値）
+            workflow_id: 呼び出し元 HOKUSAI workflow_id。指定されていれば LLM Gateway
+                interceptor 経由で SQLite `audit_logs` への永続化に渡される
+                （Issue #80 / M0.1）。phase node から渡してもらう想定。
+            phase: 呼び出し元 phase 番号。workflow_id とセットで audit 永続化に使う。
 
         Returns:
             レビュー結果の辞書
@@ -99,7 +105,10 @@ class CodexClient:
         # 同等に扱い、audit metadata と実 invocation の意味を一致させる
         # （PR #63 Copilot Round 3 指摘）。
         self._invoke_llm_gateway_interceptor(
-            full_prompt, has_schema=bool(schema_path)
+            full_prompt,
+            has_schema=bool(schema_path),
+            workflow_id=workflow_id,
+            phase=phase,
         )
 
         cmd = [
