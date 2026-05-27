@@ -283,15 +283,17 @@ v0.5.0 リリース後の再観察。前回 (§1-6) で挙げた enforcement 前
 
 #### Step 2: enforcement 配線（block raise + 透過の両方）
 
+audit_logs の SQLite 列 / details_json 対応関係: テーブル列 `status` に decision 値が入り、`details_json` 内にも同値が `decision` フィールドとして格納される（SELECT 例: `status='block'` ＝ `json_extract(details_json, '$.decision')='block'`）。以下は SQLite 列名で記載。
+
 - ✅ Test A (`provider="claude_code"`, allowlist=`["codex"]`):
   - `LLMGatewayBlockedError` が raise された
   - `policy_hits=('unknown_provider',)`, `reason="phase2_policy_block"`
-  - audit_logs に `decision="block"` 行が記録される
+  - audit_logs に `status='block'`（= `details_json.decision='block'`）行が記録される
   - 例外メッセージは `provider` / `purpose` / `policy_hits` / `reason` のみで prompt 本文を含まない（§14 受け入れ基準どおり）
 - ✅ Test B (`provider="codex"`, allowlist=`["codex"]`):
   - 例外なし、透過動作
-  - audit_logs に `decision="log"`, `policy_hits=[]` 行が記録される
-  - `config_snapshot.log_only=False` が記録される（後追いで「enforce 環境下の log だった」と分かる）
+  - audit_logs に `status='log'`（= `details_json.decision='log'`）, `policy_hits=[]` 行が記録される
+  - `config_snapshot.log_only=False` が `details_json` に記録される（後追いで「enforce 環境下の log だった」と分かる）
 
 ### v0.5.0 で確認できたこと
 
