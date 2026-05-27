@@ -14,6 +14,26 @@ from hokusai.state import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _clear_llm_gateway_env(monkeypatch):
+    """各テスト実行前に `HOKUSAI_LLM_GATEWAY_ENABLED` env を未設定状態にする。
+
+    PR #122 で導入した env override（`_parse_llm_gateway_config` 内で
+    yaml/default を上書き）が、開発者環境で外部から設定されていると
+    env 未設定前提の既存テスト群（例: `tests/test_llm_gateway.py` の
+    defaults を期待するテスト、`tests/test_llm_gateway_config.py` の
+    loader テスト等）が非決定的に失敗する。本 conftest の autouse
+    fixture でテストスイート全体を環境から隔離する。
+
+    env override 自体を検証する `tests/test_llm_gateway_config.py::
+    test_env_override_*` 系では、本 fixture が delenv した後に個別の
+    `monkeypatch.setenv(...)` で値をセットすることで意図された動作を
+    再現する（同 monkeypatch インスタンスを共有するので teardown 順も
+    安全）。
+    """
+    monkeypatch.delenv("HOKUSAI_LLM_GATEWAY_ENABLED", raising=False)
+
+
 @pytest.fixture
 def minimal_state() -> WorkflowState:
     """最小限のワークフロー状態"""
