@@ -299,7 +299,7 @@ v0.5.0 リリース後の再観察。前回 (§1-6) で挙げた enforcement 前
 |---|---|---|
 | `_emit_audit` → SQLite `audit_logs` INSERT | ✅ 機能 | `hokusai/llm_gateway/interceptor.py:209-` (Issue #80 / M0.1) |
 | `decision="block"` → `LLMGatewayBlockedError` 上位伝播 | ✅ 機能 | `hokusai/llm_gateway/dispatch.py:181-187` (Issue #102) |
-| 許可 provider 透過 + audit 残存 | ✅ 機能 | `hokusai/llm_gateway/interceptor.py:138-148` (M1.1 / #86) |
+| 許可 provider 透過 + audit 残存 | ✅ 機能 | `hokusai/llm_gateway/interceptor.py:138-153`（decision 判定 138-148 + `_emit_audit` 呼び出し 150-153）(M1.1 / #86) |
 | fail-open（gateway 内部例外を握り潰す） | ✅ コード上明示 | `hokusai/llm_gateway/dispatch.py:193-198` (要件 §4.4) |
 
 ### 残る運用穴（新規 finding、v0.5.0 では未解消）
@@ -362,7 +362,7 @@ from hokusai.llm_gateway.dispatch import dispatch_via_gateway, LLMGatewayBlocked
 try:
     dispatch_via_gateway(
         provider='claude_code', model='claude-sonnet-4',
-        purpose='dogfood_observation', prompt='...',
+        purpose='dogfood_observation_step1', prompt='...',
         workflow_id='wf-dbe7b6cd', phase=7,
     )
 except LLMGatewayBlockedError as e:
