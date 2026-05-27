@@ -304,24 +304,24 @@ audit_logs の SQLite 列 / details_json 対応関係: テーブル列 `status` 
 | 許可 provider 透過 + audit 残存 | ✅ 機能 | `hokusai/llm_gateway/interceptor.py:138-153`（decision 判定 138-148 + `_emit_audit` 呼び出し 150-153）(M1.1 / #86) |
 | fail-open（gateway 内部例外を握り潰す） | ✅ コード上明示 | `hokusai/llm_gateway/dispatch.py:193-198` (要件 §4.4) |
 
-### 残る運用穴（新規 finding、v0.5.0 では未解消）
+### 残る運用穴
 
-- **F1: LLM Gateway を env で一時 enable できない**（**PR #122 で解消済み**）。`HOKUSAI_LLM_GATEWAY_ENABLED` を truthy/falsy で指定すると yaml/default を上書きする env override を `_parse_llm_gateway_config` に追加した（truthy: `1` / `true` / `yes` / `on`、falsy: `0` / `false` / `no` / `off`、case-insensitive）。dogfooding 観察時に yaml 編集なしで一時 enable / disable できる。
+§7 観察時点（v0.5.0）で確認した F1–F4 のうち、F1 / F4 は後続 PR で解消済み。
+未解消で残るのは F2 / F3 の 2 件のみ。
+
 - **F2: `allowed_providers=None` / `allowed_models.default=None` 既定で policy_hits が常時空**。`log_only=False` に切り替えても policy が未設定だと `decision="log"` のままで enforcement が事実上 no-op になる。`hokusai notion-setup` 相当の「LLM Gateway 設定 wizard」(`hokusai llm-gateway-setup` のような対話 helper) で「最低限 allowed_providers を埋めるよう促す」誘導があると、夜間に enable した profile が翌朝に何も block していないという事故を防げる。**優先度: 中**。
 - **F3: audit_logs を CLI から覗く経路が無い**。`hokusai status` / `hokusai pr-status` のような既存 CLI に「audit_logs 件数サマリ」や「直近 N 件の decision 一覧」を出すサブコマンドが欲しい。dogfooding 観察も含めて `sqlite3` 直叩きでしか確認できず、運用調査・自動化テストの両方で導線が無い。`hokusai audit list --workflow-id wf-... --limit 10` のような CLI helper が現実的。**優先度: 中**。
-- **F4 (確認のみ)**: `dispatch_via_gateway` 自体は `workflow_id` / `phase` 引数を受け取って permanent 化までの配線が完成している。一方で **3 client (claude_code / codex / gemini) の `execute_*` / `review_*` から `workflow_id` を helper に伝播する配線は未完成**（`hokusai/llm_gateway/dispatch.py:148-154` のコメントに「後続 PR の課題」と明記）。本観察では Python から `workflow_id="wf-dbe7b6cd"` を手で渡したが、**実 phase node 経由では現状 `workflow_id=None` で audit_logs に行が落ちない可能性が高い**。次の dogfooding で `hokusai start` 実走させて audit_logs 行に workflow_id が埋まるかを確認する必要がある。**優先度: 高**（enforcement on を本格運用する前の前提条件）。
 
-  **PR #120 / #121 で解消済み**: PR #120 (案 A) で 3 client (claude_code / codex / gemini) の `execute_skill` / `execute_prompt` / `review_document` / `generate` メソッドに `workflow_id: str | None = None` / `phase: int | None = None` 引数を追加し、`_invoke_llm_gateway_interceptor` 経由で `dispatch_via_gateway` まで伝播する経路を整備。PR #121 (案 A2) で各 phase node (`phase2_research` / `phase3_design` / `phase4_plan` / `phase5_implement` / `phase7_review` / `phase8/review_fix` / `utils/cross_review`) から `state["workflow_id"]` と該当 phase 番号を client に渡す配線を完成。これにより実 phase node 経由の LLM 呼び出しでも `audit_logs.workflow_id` が SQLite に書き込まれる状態に到達した（dispatch.py docstring の「後続 PR の課題」は両 PR で閉じた）。
+### 解消済み（後続 PR）
+
+- **F1: LLM Gateway を env で一時 enable できない** → **PR #122 で解消**。`HOKUSAI_LLM_GATEWAY_ENABLED` を truthy/falsy で指定すると yaml/default を上書きする env override を `_parse_llm_gateway_config` に追加（truthy: `1` / `true` / `yes` / `on`、falsy: `0` / `false` / `no` / `off`、case-insensitive）。dogfooding 観察時に yaml 編集なしで一時 enable / disable できる。
+- **F4: 3 client の workflow_id 伝播未配線** → **PR #120 / #121 で解消**。PR #120 (案 A) で 3 client (claude_code / codex / gemini) の `execute_skill` / `execute_prompt` / `review_document` / `generate` メソッドに `workflow_id: str | None = None` / `phase: int | None = None` 引数を追加し、`_invoke_llm_gateway_interceptor` 経由で `dispatch_via_gateway` まで伝播する経路を整備。PR #121 (案 A2) で各 phase node (`phase2_research` / `phase3_design` / `phase4_plan` / `phase5_implement` / `phase7_review` / `phase8/review_fix` / `utils/cross_review`) から `state["workflow_id"]` と該当 phase 番号を client に渡す配線を完成。これにより実 phase node 経由の LLM 呼び出しでも `audit_logs.workflow_id` が SQLite に書き込まれる状態に到達した（dispatch.py docstring の「後続 PR の課題」は両 PR で閉じた）。
 
 ### 次のアクション候補（優先順）
 
 1. **F3 の CLI helper**: `hokusai audit list/show` 系のサブコマンド追加。`sqlite3` 直叩きから解放、運用調査体験改善。**優先度: 中**。
 2. **F2 の wizard**: 必要性が見えてから着手。policy 未設定で enforce on にすると no-op になる事故 1 回が踏まれてからでも遅くない。**優先度: 中**。
-3. **F4 解消後の再観察 dogfooding**: F4 配線完了 (PR #120 / #121) の効果を実走で確認。`HOKUSAI_LLM_GATEWAY_ENABLED=1` (F1 解消で env 経由) で `hokusai start` を 1 phase 回し、`audit_logs.workflow_id` が `wf-...` で埋まるかを観察する。
-
-**完了 (v0.5.0 以降):**
-- ~~F1 (env override)~~ → **PR #122 で解消**。`HOKUSAI_LLM_GATEWAY_ENABLED` で yaml 編集なしの一時 enable / disable が可能に。
-- ~~F4 (3 client の workflow_id 伝播)~~ → **PR #120 / #121 で解消**。実 phase node 経由でも `audit_logs.workflow_id` が SQLite に書き込まれる。
+3. **F1 / F4 解消後の再観察 dogfooding**: F1 (env override) + F4 (workflow_id 伝播) が揃ったので、`HOKUSAI_LLM_GATEWAY_ENABLED=1` で `hokusai start` を 1 phase 回し、`audit_logs.workflow_id` が `wf-...` で埋まることを実走で確認する。
 
 ### Phase 2 enforcement の v0.5.0 評価
 
