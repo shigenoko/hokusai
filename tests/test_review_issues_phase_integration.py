@@ -195,7 +195,7 @@ def test_phase7_node_appends_payloads_to_pending_review_issues(monkeypatch, tmp_
     monkeypatch.setattr(
         phase7_review,
         "_review_all_repositories",
-        lambda repos, prompt, timeout: {
+        lambda repos, prompt, timeout, **kwargs: {
             "Backend": {
                 "passed": False,
                 "issues": ["NG: P01 missing csrf"],

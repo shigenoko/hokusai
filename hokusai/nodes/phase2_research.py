@@ -94,6 +94,8 @@ def phase2_research_node(state: WorkflowState) -> WorkflowState:
             allow_mcp_tools=True,
             allow_file_operations=True,
             disallowed_tools=NOTION_WRITE_TOOLS,
+            workflow_id=state.get("workflow_id") or None,
+            phase=2,
         )
 
         # raw_output がフルレポートであることを検証（サマリー出力を正本として保存しない）
@@ -122,6 +124,8 @@ def phase2_research_node(state: WorkflowState) -> WorkflowState:
                 allow_mcp_tools=True,
                 allow_file_operations=True,
                 disallowed_tools=NOTION_WRITE_TOOLS,
+                workflow_id=state.get("workflow_id") or None,
+                phase=2,
             )
             # 2回目も失敗した場合は fail-fast
             _validate_research_output(raw_output)

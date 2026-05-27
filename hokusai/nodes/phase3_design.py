@@ -116,6 +116,8 @@ def phase3_design_node(state: WorkflowState) -> WorkflowState:
             allow_mcp_tools=True,
             allow_file_operations=True,
             disallowed_tools=NOTION_WRITE_TOOLS,
+            workflow_id=state.get("workflow_id") or None,
+            phase=3,
         )
 
         # 設計チェック出力を抽出
@@ -150,6 +152,8 @@ def phase3_design_node(state: WorkflowState) -> WorkflowState:
                 allow_mcp_tools=True,
                 allow_file_operations=True,
                 disallowed_tools=NOTION_WRITE_TOOLS,
+                workflow_id=state.get("workflow_id") or None,
+                phase=3,
             )
             output_text = _extract_design_check_content(raw_output)
             logger.debug(f"design-check再生成出力: {len(raw_output)}文字 → 抽出後: {len(output_text)}文字")
