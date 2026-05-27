@@ -351,47 +351,80 @@ sqlite3 ~/.hokusai/profiles/hokusai/workflow.db "SELECT COUNT(*) FROM audit_logs
 
 ### Appendix A.2: §7 再観察で叩いたコマンド (2026-05-27)
 
+Step 1 と Step 2 で `~/.hokusai/configs/hokusai.yaml` の設定を切り替えてから Python を実行する。`purpose` 文字列を Step 別に変えておくと audit_logs から後で `purpose` でフィルタして確認できる。
+
+#### Step 1: log_only=true で audit 永続化を確認
+
 ```bash
-# yaml に一時的に llm_gateway セクション追加 (Step 1: log_only=true)
-# その後 log_only=false + allowed_providers=["codex"] に変更 (Step 2)
+# yaml: llm_gateway: { enabled: true, log_only: true, audit_log_enabled: true }
 $EDITOR ~/.hokusai/configs/hokusai.yaml
 
-# dispatch_via_gateway を Python から直接呼んで interceptor 経路を観察
-# Step 1 (log_only=true): provider='claude_code' を 1 回 → audit decision=log を確認
-# Step 2 (log_only=false + allowed_providers=['codex']):
-#   (a) provider='claude_code' → LLMGatewayBlockedError raise + audit decision=block
-#   (b) provider='codex'       → 例外なし透過 + audit decision=log
+# 非許可 provider を 1 回呼ぶが log_only=true のため block されず audit decision=log になる
+HOKUSAI_ACTIVE_PROFILE=hokusai uv run python -c "
+from hokusai.llm_gateway.dispatch import dispatch_via_gateway
+dispatch_via_gateway(
+    provider='claude_code', model='claude-sonnet-4',
+    purpose='dogfood_observation_step1', prompt='...',
+    workflow_id='wf-dbe7b6cd', phase=7,
+)
+print('Step 1 dispatch returned (expected decision=log)')
+"
+
+# 期待: 1 行追加 / status='log' / config_snapshot.log_only=true
+sqlite3 ~/.hokusai/profiles/hokusai/workflow.db \
+  "SELECT id, workflow_id, phase, status, json_extract(details_json, '\$.context.purpose') AS purpose
+   FROM audit_logs
+   WHERE json_extract(details_json, '\$.context.purpose')='dogfood_observation_step1'
+   ORDER BY id DESC LIMIT 5;"
+```
+
+#### Step 2: log_only=false + allowed_providers で enforcement 経路を確認
+
+```bash
+# yaml: llm_gateway: { enabled: true, log_only: false, audit_log_enabled: true, allowed_providers: ["codex"] }
+$EDITOR ~/.hokusai/configs/hokusai.yaml
+
+# Test A (block) / Test B (pass) を 1 shot で実行
 HOKUSAI_ACTIVE_PROFILE=hokusai uv run python -c "
 from hokusai.llm_gateway.dispatch import dispatch_via_gateway, LLMGatewayBlockedError
 
-# Test A: 非許可 provider → block 期待（Step 2 のみ、Step 1 では log になる）
+# Test A: 非許可 provider → block 期待
 try:
     dispatch_via_gateway(
         provider='claude_code', model='claude-sonnet-4',
-        purpose='dogfood_observation_step1', prompt='...',
+        purpose='dogfood_observation_step2_block', prompt='...',
         workflow_id='wf-dbe7b6cd', phase=7,
     )
-    print('A: no exception (Step 1 では正常、Step 2 では UNEXPECTED)')
+    print('A: UNEXPECTED no exception')
 except LLMGatewayBlockedError as e:
     print(f'A: blocked hits={e.policy_hits} reason={e.reason}')
 
-# Test B: 許可 provider → 透過期待（Step 2 のみ意味あり）
+# Test B: 許可 provider → 透過期待
 try:
     dispatch_via_gateway(
         provider='codex', model='gpt-4',
         purpose='dogfood_observation_step2_pass', prompt='...',
         workflow_id='wf-dbe7b6cd', phase=7,
     )
-    print('B: passed through (Step 2 で期待動作)')
+    print('B: passed through (expected)')
 except LLMGatewayBlockedError as e:
     print(f'B: UNEXPECTED block hits={e.policy_hits}')
 "
 
-# audit_logs を観察
+# 期待: Test A 側 status='block' / Test B 側 status='log' を purpose で絞って個別に確認
 sqlite3 ~/.hokusai/profiles/hokusai/workflow.db \
-  "SELECT id, workflow_id, phase, action, status FROM audit_logs ORDER BY id DESC LIMIT 5;"
+  "SELECT id, status, json_extract(details_json, '\$.policy_hits') AS policy_hits,
+          json_extract(details_json, '\$.context.purpose') AS purpose
+   FROM audit_logs
+   WHERE json_extract(details_json, '\$.context.purpose')
+         IN ('dogfood_observation_step2_block', 'dogfood_observation_step2_pass')
+   ORDER BY id DESC LIMIT 10;"
+
+# 詳細 JSON を Test A 側に絞って確認（block decision の中身を観察）
 sqlite3 ~/.hokusai/profiles/hokusai/workflow.db \
-  "SELECT details_json FROM audit_logs ORDER BY id DESC LIMIT 1;" | python3 -m json.tool
+  "SELECT details_json FROM audit_logs
+   WHERE json_extract(details_json, '\$.context.purpose')='dogfood_observation_step2_block'
+   ORDER BY id DESC LIMIT 1;" | python3 -m json.tool
 ```
 
 ## Appendix B: 参照したコード位置
