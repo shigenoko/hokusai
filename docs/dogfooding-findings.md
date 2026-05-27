@@ -237,6 +237,93 @@ Issue #72 の本来の目的は「観察結果から Phase 2 enforcement の優�
 
 ---
 
+## 7. Phase 2 enforcement 再観察 (2026-05-27, v0.5.0)
+
+v0.5.0 リリース後の再観察。前回 (§1-6) で挙げた enforcement 前提条件のうち、audit log 永続化 / `HOKUSAI_SKIP_NOTION` profile 化 / cleanup `--stale --dry-run` / fail-fast モードは v0.5.0 までに解消済み（PR #80 / #108 / #110 / #112 / #114）。残る穴を「enforcement 経路を実際に通して確認する」観点で観察した。
+
+### 観察手順
+
+| Step | 操作 | 目的 |
+|---|---|---|
+| 1 | `~/.hokusai/configs/hokusai.yaml` に `llm_gateway: { enabled: true, log_only: true, audit_log_enabled: true }` を一時追加 | audit log 永続化が機能するか |
+| 1 | `dispatch_via_gateway(workflow_id="wf-dbe7b6cd", phase=7, provider="claude_code", ...)` を 1 回 Python から呼ぶ | interceptor 経路を確実に通す |
+| 1 | `sqlite3 workflow.db "SELECT * FROM audit_logs"` で行確認 | SQLite 永続化の裏取り |
+| 2 | yaml を `log_only: false`, `allowed_providers: ["codex"]` に変更 | enforcement on の状態を作る |
+| 2 | `provider="claude_code"` (allowlist 非含) で dispatch | `LLMGatewayBlockedError` raise を確認 |
+| 2 | `provider="codex"` (allowlist 含) で dispatch | 透過動作（例外なし、audit `decision=log`）を確認 |
+
+### 実観察
+
+#### Step 1: audit log SQLite 永続化
+
+- ✅ `audit_logs` テーブルに 1 行記録された:
+
+  ```json
+  {
+    "event": "llm_gateway_decision",
+    "decision": "log",
+    "reason": "phase1_log_only",
+    "context": {
+      "provider": "claude_code",
+      "model": "claude-sonnet-4",
+      "purpose": "dogfood_observation_step1",
+      "workflow_id": "wf-dbe7b6cd",
+      "phase": 7,
+      "metadata": {"observation_id": "step1", "source": "dogfood-findings reobservation"}
+    },
+    "prompt_length": 48,
+    "prompt_hash": "f80dce72c7aa3519",
+    "policy_hits": [],
+    "config_snapshot": {"enabled": true, "log_only": true, "dry_run": false, "audit_log_enabled": true}
+  }
+  ```
+
+- ✅ prompt 本文は保存されず、`prompt_length` + 16桁 hex hash のみ（§5 の PII 防御方針どおり）
+- ✅ `workflow_id` / `phase` が context に正しく載る → 後追い分析の単位として利用可能
+
+#### Step 2: enforcement 配線（block raise + 透過の両方）
+
+- ✅ Test A (`provider="claude_code"`, allowlist=`["codex"]`):
+  - `LLMGatewayBlockedError` が raise された
+  - `policy_hits=('unknown_provider',)`, `reason="phase2_policy_block"`
+  - audit_logs に `decision="block"` 行が記録される
+  - 例外メッセージは `provider` / `purpose` / `policy_hits` / `reason` のみで prompt 本文を含まない（§14 受け入れ基準どおり）
+- ✅ Test B (`provider="codex"`, allowlist=`["codex"]`):
+  - 例外なし、透過動作
+  - audit_logs に `decision="log"`, `policy_hits=[]` 行が記録される
+  - `config_snapshot.log_only=False` が記録される（後追いで「enforce 環境下の log だった」と分かる）
+
+### v0.5.0 で確認できたこと
+
+| 項目 | 状態 | コード位置 |
+|---|---|---|
+| `_emit_audit` → SQLite `audit_logs` INSERT | ✅ 機能 | `hokusai/llm_gateway/interceptor.py:209-` (Issue #80 / M0.1) |
+| `decision="block"` → `LLMGatewayBlockedError` 上位伝播 | ✅ 機能 | `hokusai/llm_gateway/dispatch.py:181-187` (Issue #102) |
+| 許可 provider 透過 + audit 残存 | ✅ 機能 | `hokusai/llm_gateway/interceptor.py:138-148` (M1.1 / #86) |
+| fail-open（gateway 内部例外を握り潰す） | ✅ コード上明示 | `hokusai/llm_gateway/dispatch.py:193-198` (要件 §4.4) |
+
+### 残る運用穴（新規 finding、v0.5.0 では未解消）
+
+- **F1: LLM Gateway を env で一時 enable できない**。`hokusai/config/loaders.py:338-` の `_parse_llm_gateway_config` は yaml セクションのみ参照。`HOKUSAI_LLM_GATEWAY_ENABLED` 相当の env override が無いため、dogfooding 観察するたびに profile yaml 編集が必要。Phase 2 enforcement を段階的に on にする運用では「特定 profile だけ enforce」が現実解と書いたが (§6)、その前段として「`hokusai start` の `--enforce-llm` 一時 flag」or 「env 経由 enable」を入れたほうが運用が軽い。**優先度: 中**。
+- **F2: `allowed_providers=None` / `allowed_models.default=None` 既定で policy_hits が常時空**。`log_only=False` に切り替えても policy が未設定だと `decision="log"` のままで enforcement が事実上 no-op になる。`hokusai notion-setup` 相当の「LLM Gateway 設定 wizard」(`hokusai llm-gateway-setup` のような対話 helper) で「最低限 allowed_providers を埋めるよう促す」誘導があると、夜間に enable した profile が翌朝に何も block していないという事故を防げる。**優先度: 中**。
+- **F3: audit_logs を CLI から覗く経路が無い**。`hokusai status` / `hokusai pr-status` のような既存 CLI に「audit_logs 件数サマリ」や「直近 N 件の decision 一覧」を出すサブコマンドが欲しい。dogfooding 観察も含めて `sqlite3` 直叩きでしか確認できず、運用調査・自動化テストの両方で導線が無い。`hokusai audit list --workflow-id wf-... --limit 10` のような CLI helper が現実的。**優先度: 中**。
+- **F4 (確認のみ)**: `dispatch_via_gateway` 自体は `workflow_id` / `phase` 引数を受け取って permanent 化までの配線が完成している。一方で **3 client (claude_code / codex / gemini) の `execute_*` / `review_*` から `workflow_id` を helper に伝播する配線は未完成**（`hokusai/llm_gateway/dispatch.py:148-154` のコメントに「後続 PR の課題」と明記）。本観察では Python から `workflow_id="wf-dbe7b6cd"` を手で渡したが、**実 phase node 経由では現状 `workflow_id=None` で audit_logs に行が落ちない可能性が高い**。次の dogfooding で `hokusai start` 実走させて audit_logs 行に workflow_id が埋まるかを確認する必要がある。**優先度: 高**（enforcement on を本格運用する前の前提条件）。
+
+### 次のアクション候補（優先順）
+
+1. **F4 の検証 dogfooding**: 実 `hokusai start` を 1 phase 回して、`audit_logs.workflow_id` が NULL か wf-... か観察。NULL ならば 3 client → dispatch_via_gateway の workflow_id 伝播配線を補う PR を切る。
+2. **F3 の CLI helper**: `hokusai audit list/show` 系のサブコマンド追加。優先度は中だが、F1/F2 の体感運用しやすさを劇的に上げる。
+3. **F2 の wizard**: 必要性が見えてから着手。policy 未設定で enforce on にすると no-op になる事故 1 回が踏まれてからでも遅くない。
+4. **F1 の env override**: `HOKUSAI_LLM_GATEWAY_ENABLED` 1 個 env 追加するだけなら軽い。dogfooding 効率化として早期に入れても無害。
+
+### Phase 2 enforcement の v0.5.0 評価
+
+- **コード上は完成**: audit 永続化 / block raise / fail-open / 許可透過の 4 経路は全て期待通り動作
+- **運用は未完成**: F1-F4 が揃って初めて「safely enforce on にできる profile」が成立する
+- **段階導入の妥当性**: profile 単位での切り替え方針 (§6) は引き続き正しい。次は `hokusai-enforce` のような専用 profile で 1 workflow 実走させる dogfooding が次マイルストーン。
+
+---
+
 ## Appendix A: 観察用に叩いたコマンド
 
 ```bash
@@ -260,6 +347,33 @@ sqlite3 ~/.hokusai/profiles/hokusai/workflow.db \
 sqlite3 ~/.hokusai/profiles/hokusai/workflow.db \
   "SELECT id, event_type, attempts, last_error FROM notion_sync_outbox WHERE workflow_id='wf-dbe7b6cd';"
 sqlite3 ~/.hokusai/profiles/hokusai/workflow.db "SELECT COUNT(*) FROM audit_logs;"
+```
+
+### Appendix A.2: §7 再観察で叩いたコマンド (2026-05-27)
+
+```bash
+# yaml に一時的に llm_gateway セクション追加 (Step 1: log_only=true)
+# その後 log_only=false + allowed_providers=["codex"] に変更 (Step 2)
+$EDITOR ~/.hokusai/configs/hokusai.yaml
+
+# dispatch_via_gateway を Python から直接呼んで interceptor 経路を観察
+HOKUSAI_ACTIVE_PROFILE=hokusai uv run python -c "
+from hokusai.llm_gateway.dispatch import dispatch_via_gateway, LLMGatewayBlockedError
+try:
+    dispatch_via_gateway(
+        provider='claude_code', model='claude-sonnet-4',
+        purpose='dogfood_observation', prompt='...',
+        workflow_id='wf-dbe7b6cd', phase=7,
+    )
+except LLMGatewayBlockedError as e:
+    print(f'blocked: hits={e.policy_hits} reason={e.reason}')
+"
+
+# audit_logs を観察
+sqlite3 ~/.hokusai/profiles/hokusai/workflow.db \
+  "SELECT id, workflow_id, phase, action, status FROM audit_logs ORDER BY id DESC LIMIT 5;"
+sqlite3 ~/.hokusai/profiles/hokusai/workflow.db \
+  "SELECT details_json FROM audit_logs ORDER BY id DESC LIMIT 1;" | python3 -m json.tool
 ```
 
 ## Appendix B: 参照したコード位置
