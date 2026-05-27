@@ -370,9 +370,11 @@ dispatch_via_gateway(
 print('Step 1 dispatch returned (expected decision=log)')
 "
 
-# 期待: 1 行追加 / status='log' / config_snapshot.log_only=true
+# 期待: 1 行追加 / status='log' / log_only=1 (SQLite は bool を 1/0 で返す)
 sqlite3 ~/.hokusai/profiles/hokusai/workflow.db \
-  "SELECT id, workflow_id, phase, status, json_extract(details_json, '\$.context.purpose') AS purpose
+  "SELECT id, workflow_id, phase, status,
+          json_extract(details_json, '\$.context.purpose') AS purpose,
+          json_extract(details_json, '\$.config_snapshot.log_only') AS log_only
    FROM audit_logs
    WHERE json_extract(details_json, '\$.context.purpose')='dogfood_observation_step1'
    ORDER BY id DESC LIMIT 5;"
@@ -411,10 +413,11 @@ except LLMGatewayBlockedError as e:
     print(f'B: UNEXPECTED block hits={e.policy_hits}')
 "
 
-# 期待: Test A 側 status='block' / Test B 側 status='log' を purpose で絞って個別に確認
+# 期待: Test A 側 status='block' / Test B 側 status='log' / log_only=0 を purpose で絞って個別に確認
 sqlite3 ~/.hokusai/profiles/hokusai/workflow.db \
   "SELECT id, status, json_extract(details_json, '\$.policy_hits') AS policy_hits,
-          json_extract(details_json, '\$.context.purpose') AS purpose
+          json_extract(details_json, '\$.context.purpose') AS purpose,
+          json_extract(details_json, '\$.config_snapshot.log_only') AS log_only
    FROM audit_logs
    WHERE json_extract(details_json, '\$.context.purpose')
          IN ('dogfood_observation_step2_block', 'dogfood_observation_step2_pass')
