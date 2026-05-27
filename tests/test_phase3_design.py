@@ -130,6 +130,38 @@ class TestPhase3DirectPrompt:
         assert call_kwargs.kwargs.get("workflow_id") == "test-wf-001"
         assert call_kwargs.kwargs.get("phase") == 3
 
+    @patch("hokusai.nodes.phase3_design._verify_design_subpage_content")
+    @patch("hokusai.nodes.phase3_design.execute_cross_review", side_effect=lambda s, *a, **kw: s)
+    @patch("hokusai.nodes.phase3_design.save_to_subpage_or_create")
+    @patch("hokusai.nodes.phase3_design.get_config")
+    @patch("hokusai.nodes.phase3_design.ClaudeCodeClient")
+    @patch("hokusai.nodes.phase3_design._validate_design_output")
+    def test_retry_passes_workflow_id_to_both_execute_prompt_calls(
+        self, mock_validate, mock_claude_cls, mock_config, mock_save, mock_cross_review,
+        mock_verify_content,
+    ):
+        """初回検証失敗 → retry 発火。F4 案 A2 で 初回 / retry 両方の execute_prompt に
+        workflow_id / phase=3 が helper まで届くこと（PR #121 Copilot Round 4）"""
+        mock_config.return_value.skill_timeout = 300
+        # 初回は検証失敗、2 回目は成功
+        mock_validate.side_effect = [RuntimeError("初回検証失敗"), None]
+        mock_client = MagicMock()
+        mock_client.execute_prompt.return_value = "## 設計チェック\n\nテスト内容"
+        mock_claude_cls.return_value = mock_client
+
+        state = self._build_state()
+        mock_save.side_effect = lambda s, *a, **kw: s
+
+        from hokusai.nodes.phase3_design import phase3_design_node
+        phase3_design_node(state)
+
+        # 2 回 execute_prompt が呼ばれる（初回 + retry）
+        assert mock_client.execute_prompt.call_count == 2
+        # 両方の呼び出しに workflow_id="test-wf-001" / phase=3 が届いていること
+        for call in mock_client.execute_prompt.call_args_list:
+            assert call.kwargs.get("workflow_id") == "test-wf-001"
+            assert call.kwargs.get("phase") == 3
+
     @patch("hokusai.nodes.phase3_design._validate_design_output")
     @patch("hokusai.nodes.phase3_design._verify_design_subpage_content")
     @patch("hokusai.nodes.phase3_design.execute_cross_review", side_effect=lambda s, *a, **kw: s)
