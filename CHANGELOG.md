@@ -18,6 +18,33 @@ HOKUSAI のすべての特筆すべき変更をこのファイルに記録する
 
 ---
 
+## [0.5.1] - 2026-05-28
+
+v0.5.0 リリース後の **dogfooding-findings §7 再観察サイクル** で記録した運用穴 F1–F4 を全て解消した patch リリース。`docs/dogfooding-findings.md` §7 / §8 と合わせて、Phase 2 enforcement の運用前提条件が揃った状態に到達。
+
+7 PR 構成: F4 配線 (#120 / #121) → F1 env override (#122) → F3 audit CLI (#123) → §8 end-to-end 再観察 (#124) → F2 policy wizard (#125)。
+
+### Added
+
+- **F4 解消 (1/2)** ([#120](https://github.com/shigenoko/hokusai/pull/120)): 3 client (`ClaudeCodeClient` / `CodexClient` / `GeminiClient`) の `execute_skill` / `execute_prompt` / `review_document` / `generate` メソッドに `workflow_id: str | None = None` / `phase: int | None = None` 引数を追加し、`_invoke_llm_gateway_interceptor` → `dispatch_via_gateway` まで伝播する経路を整備。default `None` で後方互換 100%。回帰防止テスト 6 件。
+- **F4 解消 (2/2)** ([#121](https://github.com/shigenoko/hokusai/pull/121)): 各 phase node (`phase2_research` / `phase3_design` / `phase4_plan` / `phase5_implement` / `phase7_review` / `phase8/review_fix` / `utils/cross_review`) から `state["workflow_id"]` と該当 phase 番号を client に渡す配線を完成。これで実 phase node 経由の LLM 呼び出しでも `audit_logs.workflow_id` が SQLite に書き込まれる。回帰防止テスト 5 件 + 既存 phase テスト 3 件への kwargs assert 追加。
+- **F1 解消** ([#122](https://github.com/shigenoko/hokusai/pull/122)): `HOKUSAI_LLM_GATEWAY_ENABLED` env override を `_parse_llm_gateway_config` に追加。truthy (`1` / `true` / `yes` / `on`) / falsy (`0` / `false` / `no` / `off`) 認識（case-insensitive）で yaml/default を上書き。yaml 編集なしの dogfooding 一時 enable / disable が可能に。env 隔離 fixture を `tests/conftest.py` に集約してテストスイート全体の非決定性を排除。
+- **F3 解消** ([#123](https://github.com/shigenoko/hokusai/pull/123)): `hokusai audit list [--workflow-id wf-...] [--phase N] [--action ...] [--status block|log|skipped] [--limit N] [--output table|json]` と `hokusai audit show <id>` サブコマンドを追加。`SQLiteStore.list_audit_logs()` / `get_audit_log()` 新規 helper を実装。`sqlite3` 直叩きから解放、運用調査・自動化テスト両方の導線が整った。`limit < 1` を early reject（SQLite negative LIMIT = 全件返却の事故防止）。回帰防止テスト 17 件。
+- **F2 解消** ([#125](https://github.com/shigenoko/hokusai/pull/125)): `hokusai llm-gateway-setup` 診断 wizard を追加。`interceptor._evaluate_policy_hits` の真の policy 経路（`allowed_providers` が `None` なら model 系も skip される仕様）に従い、`allowed_providers is None` なら必ず no-op 警告 + 推奨設定例を提示。`[]`（明示空 = deny-all 意図）は別カテゴリ警告。`enabled=true, log_only=false` で即座 no-op になる状態ならより強い文言。yaml 直接書き込みは安全のため避け、stdout 案内 + `hokusai profile show <name>` で実パス確認を促す設計。warning ありは `exit 1` で CI フックにも組み込み可能。回帰防止テスト 13 件。
+
+### Documentation
+
+- **§7 dogfooding 再観察** ([#119](https://github.com/shigenoko/hokusai/pull/119)): `docs/dogfooding-findings.md` に v0.5.0 後の Phase 2 enforcement 再観察セクション §7 を追加。F1–F4 を新規 finding として記録、Phase 2 enforcement 配線 4 経路（audit 永続化 / block raise / fail-open / 許可透過）が実環境で期待通り動作することを実証。
+- **§8 end-to-end 再観察** ([#124](https://github.com/shigenoko/hokusai/pull/124)): F1 + F4 解消後の end-to-end 検証を §8 として追加。`HOKUSAI_LLM_GATEWAY_ENABLED=1` + `ClaudeCodeClient.execute_prompt(workflow_id, phase)` で `audit_logs` に行が落ち、`hokusai audit list` で CLI から確認できることを実機で実証（実観察結果: `id=4 / workflow_id="wf-reobservation-001" / phase=2 / config_snapshot.enabled=true`）。
+
+### 統計
+
+- 計 7 PR、24 commit、追加: ~1500 行（コード + テスト + docs）
+- Copilot review 計 40+ 件の指摘を全 resolve
+- 全 7 PR で CI 全 pass 維持
+
+---
+
 ## [0.5.0] - 2026-05-26
 
 LLM Gateway **Phase 2 enforcement ロードマップ** を完成。Phase 1 audit log-only から、profile policy 違反で LLM 実送信を抑止する Phase 2 enforcement までの全配線を入れた（[ロードマップ](https://www.notion.so/LLM-Gateway-Phase-2-Enforcement-36985495565d81949239fd2bdc831e00)、出典: `docs/dogfooding-findings.md`）。
