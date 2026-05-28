@@ -656,6 +656,38 @@ def test_handle_prime_type_filter_preserves_other_memory_types(
     # これは設計上の trade-off（次回 --type なしで全 memory が refresh される）。
 
 
+def test_handle_prime_type_filter_skips_memory_upsert_too(
+    tmp_path, monkeypatch
+):
+    """--type 指定時、memory は clear からも upsert からも除外されること
+    (PR #135 Copilot Round 5 指摘): clear/upsert の対称性が崩れると、
+    fetched memory rows が新規追加されつつ古い行が残って stale 化する。
+    """
+    cfg, store = _setup_prime_env(
+        tmp_path, monkeypatch,
+        memories_factory=lambda: [
+            _memory_page(
+                "page-new", "freshly fetched", summary="fresh body fetched",
+                memory_type="avoidance",
+            )
+        ],
+    )
+    # 過去 backfill された memory entries (両方とも残るべき)
+    store.upsert_prime_index(
+        workflow_id="wf-1", source_type="memory", source_id="page-old-rule",
+        title="old", body="historical kept rule",
+    )
+
+    # --type avoidance だけ指定: clear/upsert どちらからも memory が除外される
+    rc, _, _ = _run_handle_prime(cfg, memory_types=["avoidance"])
+    assert rc == 0
+
+    # 過去 backfill は残る
+    assert len(store.search_prime_index('"historical kept rule"')) == 1
+    # 新規 fetched memory は upsert されない (filter view の不対称性回避)
+    assert store.search_prime_index('"fresh body fetched"') == []
+
+
 def test_clear_prime_index_source_types_filter(tmp_path):
     """SQLiteStore.clear_prime_index_for_workflow に source_types を渡すと、
     指定 source_type のみ削除される（その他は保護される）。"""

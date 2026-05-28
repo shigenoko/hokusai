@@ -1817,7 +1817,17 @@ def _handle_prime(args, config) -> int:
             store.clear_prime_index_for_workflow(
                 workflow_id, source_types=fetched_source_types
             )
+            # PR #135 Copilot Round 5 指摘: clear が fetched_source_types に
+            # 絞られているのに対し、upsert は extract の全結果を入れていた
+            # ため対称性が崩れていた。例えば `--type avoidance` + workgraph DBs
+            # 配線済みの場合、clear は work_item/review_issue/gate のみだが
+            # upsert は memory entries も流すので、古い memory 行が clear
+            # されないまま新規 memory が追加される（filter サブセットの古い
+            # memory が stale で残る）。clear と upsert を同じ source_types
+            # で filter することで対称性を確保。
             for entry in index_entries:
+                if entry["source_type"] not in fetched_source_types:
+                    continue
                 store.upsert_prime_index(
                     workflow_id=workflow_id,
                     source_type=entry["source_type"],
