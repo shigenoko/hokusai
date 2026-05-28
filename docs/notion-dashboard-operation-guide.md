@@ -132,18 +132,23 @@ env 変数を設定し終わったら share 健全性を確認する。**専用 
 
 ```bash
 # 新規 workflow を立てると share health check が冒頭で自動実行される
-HOKUSAI_ACTIVE_PROFILE=<name> hokusai start <task_url>
+hokusai --profile <name> start <task_url>
 # → ⚠️  Notion DB share check で N 件の問題が見つかりました: ... が出れば share 漏れ
 ```
+
+> **`HOKUSAI_ACTIVE_PROFILE` との違い**: `HOKUSAI_ACTIVE_PROFILE` 環境変数は内部的に SKIP_NOTION の profile-aware lookup 用（`hokusai/utils/skip_notion.py`）で、`hokusai start` が読み込む config の選択には使えません。実行する profile を選択するには CLI フラグ `--profile <name>` を使うこと（`hokusai --profile a start ...` または `hokusai start --profile a ...`）。
 
 明示的に手動チェックしたい場合（実 workflow を立てたくない場合）は Python から直接呼べる:
 
 ```python
-from hokusai.config import get_config
+from hokusai.config.manager import create_config_from_env_and_file
 from hokusai.integrations.notion_dashboard.dispatcher import NotionSyncDispatcher
 from hokusai.persistence.sqlite_store import SQLiteStore
 
-cfg = get_config()
+# profile を明示してロードする（get_config() は global singleton で
+# cwd/home の claude-workflow.yaml or default_profile に依存するため
+# multi-profile 環境では意図した profile が選ばれない可能性がある）
+cfg = create_config_from_env_and_file(profile_name="<name>")
 store = SQLiteStore(cfg.database_path)
 dispatcher = NotionSyncDispatcher(store, cfg.notion_dashboard)
 results = dispatcher.check_db_share_health()
