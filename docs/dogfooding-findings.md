@@ -390,9 +390,11 @@ PR #122 (F1: env override) + PR #123 (F3: audit CLI) + PR #120 / #121 (F4: workf
 
 ---
 
-## 9. 重い dogfooding: 真の subprocess 経路観察 (2026-05-28, v0.5.1)
+## 9. 重い dogfooding: 実 phase node entry point からの audit 配線観察 (2026-05-28, v0.5.1)
 
-§8 で「ClaudeCodeClient.execute_prompt() の subprocess (ShellRunner) のみ mock した end-to-end 検証」を完了したのに対し、本 §9 では **subprocess を本物の Claude Code CLI で起動する真の重い dogfooding** を実施した。F4 配線 (PR #120 / #121) が **本物の subprocess (claude CLI が走る経路)** でも end-to-end で機能することを実証する位置付け。
+§8 で「`ClaudeCodeClient.execute_prompt()` を **Python から直接** 呼んだ end-to-end（`ShellRunner` のみ mock）」を完了したのに対し、本 §9 では `hokusai start` から **実 phase node (`phase2_research_node`) entry point 経由** で audit_logs まで届くことを観察した。F4 配線 (PR #120 / #121) が **実 phase node の呼び出しチェーン** で end-to-end 動作することを実証する位置付け。
+
+**厳密な範囲** (PR #128 Copilot Round 1 指摘): `_run_claude_code()` は `_invoke_llm_gateway_interceptor()` を `ShellRunner.run()` の **前** に呼ぶ（`hokusai/integrations/claude_code.py:217-237`）。したがって audit 行の存在だけからは「Claude CLI subprocess が実際に起動した」とは厳密には言えない。本 §9 で実証したのは **「phase node → client → helper → SQLite まで配線が通過した」** ことで、subprocess 起動は別途間接的な観察（worktree 作成 / 90 秒間 background が継続実行 / Phase 2 完走しなかった）で蓋然性が高いと評価する。
 
 ### 観察手順
 
@@ -450,8 +452,9 @@ PR #122 (F1: env override) + PR #123 (F3: audit CLI) + PR #120 / #121 (F4: workf
 
 ### 確認できたこと（§8 との差分）
 
-- ✅ **真の subprocess 経路**: `prompt_length=806` / `prompt_hash="0451be88c0b573d6"` は実 research prompt（task_url + 構成テンプレート）の SHA256 16 桁。§8 は subprocess を mock していたため prompt は固定文字列 (`"end-to-end reobservation"`, length=70) だったが、§9 では **phase2_research_node が組み立てた本物の research prompt** が hash 化されている → ClaudeCodeClient.execute_prompt が **subprocess を mock せず claude CLI 起動経路で走った** ことを示す。
-- ✅ **phase node → client → helper → SQLite の完全 e2e**: `phase2_research_node` が `state["workflow_id"] = "wf-f373fac6"` を `claude.execute_prompt(workflow_id=..., phase=2)` で渡し、`_invoke_llm_gateway_interceptor` → `dispatch_via_gateway` → `LLMGatewayInterceptor.intercept()` → `_emit_audit()` → SQLite `audit_logs` INSERT までの全配線が **3 段階で検証完了**（unit test / 軽量 e2e / 重い e2e）。
+- ✅ **実 phase node entry point からの prompt 組み立て**: `prompt_length=806` / `prompt_hash="0451be88c0b573d6"` は **phase2_research_node が組み立てた本物の research prompt**（task_url + 構成テンプレート）の SHA256 16 桁。§8 は `ClaudeCodeClient.execute_prompt` を Python から直接呼んでいたため prompt は固定文字列 (`"end-to-end reobservation..."`, length=70) だったが、§9 では実 phase node から実 prompt が helper まで届いていることが分かる。
+- ✅ **phase node → client → helper → SQLite の完全 e2e（subprocess 起動「前」まで）**: `phase2_research_node` が `state["workflow_id"] = "wf-f373fac6"` を `claude.execute_prompt(workflow_id=..., phase=2)` で渡し、`_invoke_llm_gateway_interceptor` → `dispatch_via_gateway` → `LLMGatewayInterceptor.intercept()` → `_emit_audit()` → SQLite `audit_logs` INSERT までの全配線が **3 段階で検証完了**（unit test / 軽量 e2e / 実 phase node e2e）。
+- ⚠ **subprocess 起動証明は間接的**: 上記の通り audit 行は subprocess 起動 **前** に書かれる仕様 (`hokusai/integrations/claude_code.py:217-237`) なので、audit log の存在だけからは Claude CLI が実起動したとは厳密に言えない。間接的証拠としては (a) Phase 1 完了で `~/.hokusai/profiles/hokusai/worktrees/Default_wf-f373fac6` が作成された、(b) 90 秒間 background プロセスが継続実行された（audit INSERT のみなら数秒で完了するはず）、(c) Phase 2 が完走しなかった = LLM 呼び出しを待っていた蓋然性が高い、の 3 点。完全証明には `Claude Code実行完了:` ログ確認が必要だが、本 §9 では 90 秒で kill したため未確認。
 - ✅ **F1 env override も同時動作**: `config_snapshot.enabled=true` だが `hokusai.yaml` には `llm_gateway` セクションなし → `HOKUSAI_LLM_GATEWAY_ENABLED=1` env override (PR #122) が yaml/default を上書きして enable した結果。
 - ✅ **F3 CLI helper も同時動作**: `hokusai audit list/show` (PR #123) で sqlite3 直叩きなしに観察完了。
 
@@ -463,9 +466,14 @@ PR #122 (F1: env override) + PR #123 (F3: audit CLI) + PR #120 / #121 (F4: workf
 
 cleanup 時に Notion 404 警告（`Could not find database with ID: 36085495-565d-8187-ba56-f5bf5a8d3abd`）が出た。これは §1 で記録した「Workflows DB が integration "HOKUSAI" に share されていない」という運用穴で、本 dogfooding とは無関係。F1-F4 の解消対象外で、別途 Notion 側の手作業（DB share）が必要。
 
-### v0.5.1 dogfooding サイクルの真の完結
+### v0.5.1 dogfooding サイクルの完結 (F1-F4 範囲)
 
-§7 で記録した F1-F4 が後続 PR (#120-#125) で全て解消され、§8 で軽量 e2e、§9 で真の重い e2e を実証。**「Phase 2 enforcement のコード配線 + 運用配線 + 真の subprocess 経路」が 3 段階で全て検証完了**した。これで v0.5.1 dogfooding サイクルが本当の意味で一段落。残る運用穴なし。
+§7 で記録した **F1-F4 は後続 PR (#120-#125) で全て解消**され、§8 で軽量 e2e、§9 で実 phase node entry point からの audit 配線通過を実証。**「Phase 2 enforcement のコード配線 + 運用配線 + 実 phase node からの audit 配線」が 3 段階で全て検証完了**した。これで v0.5.1 dogfooding サイクルが一段落。
+
+**F1-F4 に関する残る運用穴なし**（PR #128 Copilot Round 1 指摘で narrow）。ただし以下は別管轄で未解消:
+
+- §1 で記録した **Notion DB share 未完了**: `Workflows DB ID` が integration "HOKUSAI" に share されていないため、`hokusai cleanup` 時等で 404 警告が発生する。本 dogfooding §9 でも cleanup 時に再現（[#127](https://github.com/shigenoko/hokusai/issues/127) close 前の cleanup ログ参照）。これは Notion 側の手作業（DB share 設定）が必要で、F1-F4 の解消対象外。
+- Claude CLI subprocess 起動の完全証明: 本 §9 では時間切り (90 秒) のため `Claude Code実行完了:` ログを観察せず終了。完全証明には完走 dogfooding（数十分〜数時間）が必要だが、3 段階検証で配線品質は十分。
 
 ---
 
