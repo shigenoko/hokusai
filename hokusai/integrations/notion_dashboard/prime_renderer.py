@@ -51,6 +51,139 @@ _UNTITLED = "(untitled)"
 _UNKNOWN_STATUS = "(unknown)"
 
 
+def extract_prime_index_entries(
+    *,
+    memories: list[dict],
+    work_items: list[dict] | None = None,
+    review_issues: list[dict] | None = None,
+    gates: list[dict] | None = None,
+) -> list[dict[str, Any]]:
+    """Prime v2 MVP-2 (docs/design-prime-v2.md §8.1): Notion から取得した
+    active context (memories / work_items / review_issues / gates) を
+    `SQLiteStore.upsert_prime_index` に渡せる形に変換する純関数。
+
+    各 entry は以下の dict を返す:
+      - source_type: 'memory' / 'work_item' / 'review_issue' / 'gate'
+      - source_id: Notion page ID
+      - title: 検索対象タイトル
+      - body: 検索対象本文
+      - phase: 関連 phase（あれば、整数）
+      - notion_page_id: 引用元アドレス
+      - file_path: review_issue で File Path があれば
+    title / body が両方空の entry は skip する（FTS5 index に空 token を
+    入れない）。Notion page ID が無い entry も skip（citation 元として
+    使えないため）。
+    """
+    entries: list[dict[str, Any]] = []
+    work_items = work_items or []
+    review_issues = review_issues or []
+    gates = gates or []
+
+    for page in memories:
+        page_id = page.get("id") or ""
+        if not page_id:
+            continue
+        title = _extract_title(page, "Name") or ""
+        # Summary 優先、空なら Content にフォールバック（renderer と同じロジック）
+        body = (
+            _extract_rich_text(page, "Summary").strip()
+            or _extract_rich_text(page, "Content").strip()
+        )
+        if not title and not body:
+            continue
+        # Applies To の最初の phase から phase 番号を抜く（複数なら最初を採用）
+        phase_num = _parse_first_phase_int(_extract_multi_select(page, "Applies To"))
+        entries.append({
+            "source_type": "memory",
+            "source_id": page_id,
+            "title": title,
+            "body": body,
+            "phase": phase_num,
+            "notion_page_id": page_id,
+        })
+
+    for page in work_items:
+        page_id = page.get("id") or ""
+        if not page_id:
+            continue
+        title = _extract_title(page, "Title") or ""
+        body = _extract_rich_text(page, "Description").strip()
+        if not title and not body:
+            continue
+        phase_num = _parse_first_phase_int(
+            [_extract_select_name(page, "Phase")] if _extract_select_name(page, "Phase") else []
+        )
+        entries.append({
+            "source_type": "work_item",
+            "source_id": page_id,
+            "title": title,
+            "body": body,
+            "phase": phase_num,
+            "notion_page_id": page_id,
+        })
+
+    for page in review_issues:
+        page_id = page.get("id") or ""
+        if not page_id:
+            continue
+        title = _extract_title(page, "Title") or ""
+        body = _extract_rich_text(page, "Message").strip()
+        if not title and not body:
+            continue
+        file_path = _extract_rich_text(page, "File Path").strip() or None
+        entries.append({
+            "source_type": "review_issue",
+            "source_id": page_id,
+            "title": title,
+            "body": body,
+            "phase": None,
+            "notion_page_id": page_id,
+            "file_path": file_path,
+        })
+
+    for page in gates:
+        page_id = page.get("id") or ""
+        if not page_id:
+            continue
+        title = _extract_title(page, "Name") or ""
+        body = _extract_rich_text(page, "Description").strip()
+        if not title and not body:
+            continue
+        required_phase = _extract_number(page, "Required By Phase")
+        phase_num = (
+            required_phase
+            if isinstance(required_phase, int) and 1 <= required_phase <= 10
+            else None
+        )
+        entries.append({
+            "source_type": "gate",
+            "source_id": page_id,
+            "title": title,
+            "body": body,
+            "phase": phase_num,
+            "notion_page_id": page_id,
+        })
+
+    return entries
+
+
+def _parse_first_phase_int(values: list[str] | None) -> int | None:
+    """`["phase4", "phase7"]` のような list から最初の `phase{N}` を整数 N に
+    変換する。値が無いか変換できなければ None。
+    """
+    if not values:
+        return None
+    for v in values:
+        if not isinstance(v, str):
+            continue
+        s = v.strip().lower()
+        if s.startswith("phase") and s[5:].isdigit():
+            n = int(s[5:])
+            if 1 <= n <= 10:
+                return n
+    return None
+
+
 def render_prime_markdown(
     *,
     workflow_id: str,
@@ -61,6 +194,9 @@ def render_prime_markdown(
     review_issues: list[dict] | None = None,
     gates: list[dict] | None = None,
     diagnostics: list[str] | None = None,
+    query: str | None = None,
+    query_results: list[dict[str, Any]] | None = None,
+    prime_index_error: str | None = None,
 ) -> str:
     """active Memory + workgraph context のリストを Agent prompt 向け
     Markdown へ整形する（Workgraph 完成 / Issue #54）。
@@ -120,6 +256,13 @@ def render_prime_markdown(
                 # （Issue #92 / M2.4 Copilot Round 1 指摘）。
                 lines.append(f"- *{diag}*")
         lines.append("")
+        # Prime v2 MVP-2: active context が空でも `--query` 指定時は
+        # 検索結果セクションを出力する（過去 workflow のみヒットするケース）
+        if query is not None:
+            lines.extend(
+                _render_query_section(query, query_results, prime_index_error)
+            )
+            return "\n".join(lines).rstrip() + "\n"
         return "\n".join(lines)
 
     # Memory セクション
@@ -174,7 +317,93 @@ def render_prime_markdown(
             lines.extend(_render_gate_entry(gate))
             lines.append("")
 
+    # Prime v2 MVP-2: query 検索結果（`--query "..."` 指定時のみ）
+    if query is not None:
+        lines.extend(
+            _render_query_section(query, query_results, prime_index_error)
+        )
+
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _render_query_section(
+    query: str,
+    query_results: list[dict[str, Any]] | None,
+    prime_index_error: str | None = None,
+) -> list[str]:
+    """`--query` 指定時の検索結果セクションを生成する（共通 helper）。
+
+    PR #135 Copilot Round 2 #2 指摘: `query_results=None` (backfill/search の
+    try block で例外 catch) と `[]` (検索成功で 0 件) は別の意味。`None` なら
+    検索インデックス自体が利用できなかった旨を明示する。
+
+    PR #135 Copilot Round 3 #2 指摘: active context が non-empty の場合
+    `render_prime_markdown` は `diagnostics` を抑制するため、"diagnostics 参照"
+    と書いても Markdown 出力に diagnostics は無い。失敗詳細を query セクション
+    内に直接 embed することで、stdout redirect 時にも失敗が見えるようにする。
+    """
+    out: list[str] = []
+    out.append(f"## 検索結果（query: `{query}`）")
+    out.append("")
+    if query_results is None:
+        if prime_index_error:
+            out.append(
+                f"_検索インデックスが利用不可のため検索できませんでした: "
+                f"{prime_index_error}_"
+            )
+        else:
+            out.append(
+                "_検索インデックスが利用不可のため検索できませんでした_"
+            )
+        out.append("")
+    elif query_results:
+        for r in query_results:
+            out.extend(_render_query_result_entry(r))
+            out.append("")
+    else:
+        out.append("_該当する記録はありません_")
+        out.append("")
+    return out
+
+
+def _render_query_result_entry(result: dict[str, Any]) -> list[str]:
+    """`SQLiteStore.search_prime_index()` の 1 件を Markdown 化する。
+
+    形式（Prime v2 MVP-2 の最小フォーマット。詳細な引用整形は MVP-3 で
+    citation セクションを設計する想定）:
+
+        ### {title or (untitled)}
+        **Source:** `{source_type}` / **Workflow:** `{workflow_id}`
+        / **Phase:** `phase{N}` （あれば）
+        / **Page:** `{notion_page_id}` （あれば）
+        / **PR:** {pr_url} （あれば）
+        / **File:** `{file_path}` （あれば）
+        > body 各行
+    """
+    title = (result.get("title") or "").strip() or _UNTITLED
+    out: list[str] = [f"### {title}"]
+    meta: list[str] = [
+        f"**Source:** `{result.get('source_type', '?')}`",
+        f"**Workflow:** `{result.get('workflow_id', '?')}`",
+    ]
+    phase = result.get("phase")
+    if isinstance(phase, int) and 1 <= phase <= 10:
+        meta.append(f"**Phase:** `phase{phase}`")
+    notion_page_id = result.get("notion_page_id")
+    if notion_page_id:
+        meta.append(f"**Page:** `{notion_page_id}`")
+    pr_url = result.get("pr_url")
+    if pr_url:
+        meta.append(f"**PR:** {pr_url}")
+    file_path = result.get("file_path")
+    if file_path:
+        meta.append(f"**File:** `{file_path}`")
+    out.append(" / ".join(meta))
+    body = (result.get("body") or "").strip()
+    if body:
+        for ln in body.splitlines() or [""]:
+            out.append(f"> {ln}" if ln else ">")
+    return out
 
 
 def render_prime_json(
@@ -187,6 +416,8 @@ def render_prime_json(
     review_issues: list[dict] | None = None,
     gates: list[dict] | None = None,
     diagnostics: list[str] | None = None,
+    query: str | None = None,
+    query_results: list[dict[str, Any]] | None = None,
 ) -> str:
     """active Memory + workgraph context を Agent / 自動処理向け JSON へ整形
     する（Workgraph 完成 / Issue #54）。
@@ -225,6 +456,10 @@ def render_prime_json(
             else None
         ),
         "diagnostics": diagnostics,
+        # Prime v2 MVP-2: query 検索結果。v1 互換のため `--query` が未指定
+        # なら query/query_results 両方 null。
+        "query": query,
+        "query_results": query_results,
     }
     return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
 

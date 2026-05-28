@@ -498,6 +498,22 @@ def _build_parser():
         default="markdown",
         help="出力形式（既定 markdown）",
     )
+    # Prime v2 MVP-2 (docs/design-prime-v2.md §8.1): query 検索
+    prime_parser.add_argument(
+        "--query",
+        default=None,
+        help=(
+            "Notion active context を FTS5 検索する（Prime v2 MVP-2）。"
+            "指定時は active context を SQLite `prime_index` に backfill した上で "
+            "FTS5 MATCH 検索した上位 N 件を引用付き表示する。"
+        ),
+    )
+    prime_parser.add_argument(
+        "--query-limit",
+        type=_positive_int,
+        default=10,
+        help="--query 指定時の最大返却件数（>=1、既定 10）",
+    )
 
     # audit コマンド: SQLite `audit_logs` を CLI から覗く（F3 / PR #123）
     audit_parser = subparsers.add_parser(
@@ -1481,6 +1497,46 @@ def _handle_audit(args, config) -> int:
     return 1
 
 
+def _positive_int(s: str) -> int:
+    """argparse type validator: 正の整数（>= 1）のみ受け付ける。
+
+    PR #135 Copilot Round 1 #3 指摘: `--query-limit 0` のような値は
+    `search_prime_index` 側で ValueError になり、best-effort 経路で握りつぶ
+    されて空結果のみ表示されるという silent degrade を起こす。argparse
+    の parse 時点で reject することで明確にユーザーへ返す。
+    """
+    try:
+        n = int(s)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(
+            f"正の整数を指定してください: '{s}'"
+        ) from e
+    if n < 1:
+        raise argparse.ArgumentTypeError(
+            f"1 以上の整数を指定してください: {n}"
+        )
+    return n
+
+
+def _sanitize_fts5_query(q: str) -> str:
+    """ユーザー入力を FTS5 MATCH 安全な phrase 検索式に変換する。
+
+    PR #135 Copilot Round 1 #2 指摘: `--query` の raw 文字列をそのまま
+    FTS5 MATCH に渡すと、`:` / 括弧 / 未対応引用符 / 先頭 `-` 等で
+    `sqlite3.OperationalError` を起こして検索が壊れる。phrase 検索
+    (`"..."`) でラップすれば AND/OR/NOT/コロン等の予約構文を回避できる。
+    含まれる `"` は `""` に escape (FTS5 仕様)。
+
+    AND/OR/NOT などの論理演算は意図的にサポートしない（誤入力防止 +
+    ユーザー向け free-text search としては phrase 一致で十分）。
+    後続 PR で詳細演算が必要になれば opt-in フラグで再導入する。
+    """
+    if not q or not q.strip():
+        return q
+    escaped = q.replace('"', '""')
+    return f'"{escaped}"'
+
+
 def _handle_prime(args, config) -> int:
     """`hokusai prime <workflow-id>` のハンドラ（Workgraph Phase 6 / Issue #48）。
 
@@ -1503,6 +1559,7 @@ def _handle_prime(args, config) -> int:
 
     from .integrations.notion_dashboard.client import NotionAPIClient
     from .integrations.notion_dashboard.prime_renderer import (
+        extract_prime_index_entries,
         render_prime_json,
         render_prime_markdown,
     )
@@ -1516,6 +1573,9 @@ def _handle_prime(args, config) -> int:
     memory_types = getattr(args, "memory_types", None)
     output_format: str = getattr(args, "output", "markdown")
     profile_arg = getattr(args, "profile", None)
+    # Prime v2 MVP-2 (docs/design-prime-v2.md §8.1): query 検索 + backfill
+    query: str | None = getattr(args, "query", None)
+    query_limit: int = getattr(args, "query_limit", 10)
 
     # workflow state を SQLite から取得（profile / current_phase の解決源）
     store = SQLiteStore(config.database_path)
@@ -1710,6 +1770,112 @@ def _handle_prime(args, config) -> int:
                 file=sys.stderr,
             )
 
+    # Prime v2 MVP-2 (docs/design-prime-v2.md §8.1): 取得した active context
+    # を SQLite `prime_index` に backfill する。失敗しても表示は壊さない
+    # best-effort（FTS5 index は補助的な検索基盤で、prime 本来の出力経路を
+    # 阻害してはならない）。
+    query_results: list[dict] | None = None
+    # PR #135 Copilot Round 1 #5 指摘: stderr-only warning は
+    # `hokusai prime ... > prime.md` 経路では見えないため、エラー文字列を
+    # diagnostics 経路にも渡して stdout (Markdown 出力) で確認できるようにする。
+    prime_index_error: str | None = None
+    # PR #135 Copilot Round 2 #1 / Round 3 #1 指摘: Notion fetch を実際に
+    # 試行したかを source_type 毎に track する。memory は api_token + db_id
+    # で試行判定、その他は fetch 結果が None でないことで試行判定（既存
+    # コードの設計と整合: None=未試行、list=試行）。「試行した source_type
+    # のみ」clear することで、部分 fetch ケース（例: Workflows DB ID 未設定
+    # で work_item/review_issue/gate=None だが Project Memory は成功）でも
+    # 試行していない source_type の過去 backfill 行を保護する。
+    fetched_source_types: list[str] = []
+    # PR #135 Copilot Round 4 #1 指摘: `--type` フィルタが指定されている場合、
+    # `list_active_memories(types=memory_types)` は指定 type のサブセットしか
+    # fetch しないため、memory 全体を clear すると過去 backfill された他 type
+    # (project_rule / handover_note 等) が消える。--type 指定時は memory を
+    # fetched_source_types に含めず、過去 backfill 行を保護する（次回 --type
+    # なしの起動で全 memory が refresh される）。
+    if api_token and db_id and memory_types is None:
+        fetched_source_types.append("memory")
+    if work_items is not None:
+        fetched_source_types.append("work_item")
+    if review_issues is not None:
+        fetched_source_types.append("review_issue")
+    if gates is not None:
+        fetched_source_types.append("gate")
+    # PR #135 Copilot Round 7 指摘: トップレベル `--dry-run` 時は SQLite を
+    # mutate しない (shared_options 経由で prime にも継承される)。
+    # clear + upsert で `prime_index` を書き換えるのは副作用なので dry-run
+    # の契約に反する。dry-run なら backfill と search 両方を skip し、
+    # query_results は None のままにする (search は backfill 後の状態に
+    # 依存するため、stale な index 状態で走らせると誤誘導する)。
+    dry_run = getattr(args, "dry_run", False)
+    try:
+        index_entries = extract_prime_index_entries(
+            memories=memories,
+            work_items=work_items,
+            review_issues=review_issues,
+            gates=gates,
+        )
+        # 試行 + 成功 (0 件含む) の source_type のみ clear → upsert。
+        # - 試行 + 成功: stale 行を消して現在の active 状態を反映
+        # - 試行 + 失敗 (notion_fetch_error != None): stale 行を残す
+        # - 未試行 (該当 source_type が fetched_source_types に無い):
+        #   stale 行を残す（過去の backfill が依然有効）
+        if fetched_source_types and notion_fetch_error is None and not dry_run:
+            store.clear_prime_index_for_workflow(
+                workflow_id, source_types=fetched_source_types
+            )
+            # PR #135 Copilot Round 5 指摘: clear が fetched_source_types に
+            # 絞られているのに対し、upsert は extract の全結果を入れていた
+            # ため対称性が崩れていた。例えば `--type avoidance` + workgraph DBs
+            # 配線済みの場合、clear は work_item/review_issue/gate のみだが
+            # upsert は memory entries も流すので、古い memory 行が clear
+            # されないまま新規 memory が追加される（filter サブセットの古い
+            # memory が stale で残る）。clear と upsert を同じ source_types
+            # で filter することで対称性を確保。
+            for entry in index_entries:
+                if entry["source_type"] not in fetched_source_types:
+                    continue
+                store.upsert_prime_index(
+                    workflow_id=workflow_id,
+                    source_type=entry["source_type"],
+                    source_id=entry["source_id"],
+                    title=entry["title"],
+                    body=entry["body"],
+                    phase=entry.get("phase"),
+                    notion_page_id=entry.get("notion_page_id"),
+                    file_path=entry.get("file_path"),
+                )
+        # --query 指定時のみ実検索を実行（v1 互換: 未指定なら何もしない）。
+        # PR #135 Copilot Round 1 #2 指摘: raw 文字列を直接 MATCH に渡すと
+        # `:` / 括弧 / 引用符 / 先頭 `-` 等で OperationalError を起こすため、
+        # phrase 検索 (`"..."`) でラップして safe にする。
+        # PR #135 Copilot Round 7 指摘: dry-run 時は backfill を skip した
+        # ため、index が stale (古い backfill 行 or 完全に空) の状態で
+        # search すると誤誘導するので search も skip する。
+        if query is not None and not dry_run:
+            safe_query = _sanitize_fts5_query(query)
+            query_results = store.search_prime_index(
+                safe_query, workflow_id=workflow_id, limit=query_limit
+            )
+        elif dry_run and (fetched_source_types or query is not None):
+            # dry-run で backfill / search を skip した場合、user に通知する。
+            # `--dry-run` 自体は cli_main main() で先に print_dry_run_mode()
+            # が呼ばれているので「dry-run 中である」ことは既に明示されているが、
+            # prime 経路は副作用と検索の両方が抑止される旨を明示しておく。
+            print(
+                "ℹ --dry-run のため prime_index backfill / search を skip しました",
+                file=sys.stderr,
+            )
+    except Exception as e:
+        # backfill / search の失敗は表示を壊さず graceful degrade。
+        # stderr (terminal で見える) + diagnostics (stdout で見える) の
+        # 両方に出して、`> prime.md` リダイレクト時にも気付けるようにする。
+        prime_index_error = f"{type(e).__name__}: {e}"
+        print(
+            f"⚠ prime_index backfill / search で失敗（active context のみ表示）: {e}",
+            file=sys.stderr,
+        )
+
     # M2.4 (#92): 空状態の prime 出力で「なぜ空か」（DB share 未完了 / env
     # 未設定 / 取得済 0 件 / Notion 障害）を原因切り分けできるよう、構成
     # 要素ごとの状態を診断行リストに組み立てる（findings §2.1）。Markdown
@@ -1727,6 +1893,7 @@ def _handle_prime(args, config) -> int:
         workflow_gates_db_id=workflow_gates_db_id,
         gates=gates,
         notion_fetch_error=notion_fetch_error,
+        prime_index_error=prime_index_error,
     )
 
     if output_format == "json":
@@ -1740,6 +1907,8 @@ def _handle_prime(args, config) -> int:
                 review_issues=review_issues,
                 gates=gates,
                 diagnostics=diagnostics,
+                query=query,
+                query_results=query_results,
             )
         )
     else:
@@ -1753,6 +1922,9 @@ def _handle_prime(args, config) -> int:
                 review_issues=review_issues,
                 gates=gates,
                 diagnostics=diagnostics,
+                query=query,
+                query_results=query_results,
+                prime_index_error=prime_index_error,
             )
         )
     return 0
@@ -1772,6 +1944,7 @@ def _build_prime_diagnostics(
     workflow_gates_db_id: str,
     gates: list[dict] | None,
     notion_fetch_error: str | None = None,
+    prime_index_error: str | None = None,
 ) -> list[str]:
     """`hokusai prime` 出力用の診断行リストを組み立てる（M2.4 / #92）。
 
@@ -1802,6 +1975,11 @@ def _build_prime_diagnostics(
     # Notion fetch 例外があった場合は最初に明示（0 件と区別、stdout 経路で見える）
     if notion_fetch_error:
         diagnostics.append(f"Notion: 取得失敗 ({notion_fetch_error})")
+    # Prime v2 MVP-2 / PR #135 Copilot Round 1 #5: prime_index backfill /
+    # search の失敗を stdout 経路にも出す（`> prime.md` リダイレクト時にも
+    # 気付けるようにする）。
+    if prime_index_error:
+        diagnostics.append(f"prime_index: 失敗 ({prime_index_error})")
 
     # API token 単独で判定（token が無いと _handle_prime はそもそも Notion
     # 呼び出しを走らせず memories=[] / 他=None になるので、その前に出す）
