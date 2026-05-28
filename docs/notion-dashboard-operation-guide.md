@@ -159,7 +159,7 @@ for env, (ok, msg) in results.items():
 | 症状 | 原因 | 対処 |
 |---|---|---|
 | `NotionAPIError: 404 Could not find database with ID: XXX` | 該当 DB が integration に share されていない | 上記手順 1-4 を該当 DB に対して実施 |
-| `notion_sync_outbox` に同じ `last_error: 404` の行が大量に残る | 同上、複数 DB で share 漏れ | 3 DB すべて share 後、`hokusai status` で outbox を空にする |
+| `notion_sync_outbox` に同じ `last_error: 404` の行が大量に残る | 同上、複数 DB で share 漏れ | 3 DB すべて share 後、Operations Console (`hokusai dashboard`) の Notion 同期パネルから「同期再送」ボタン (`POST /api/notion-dashboard/retry-pending`) を押して pending 行を drain する。`hokusai status` は件数/エラー**表示のみ**で drain しないため要注意 |
 | `Could not find page` (DB ではなくページ) | scaffold ページ親に integration が share されていない | 親ページに対しても 2.2 手順 2 の **Add connections** を実施 |
 
 #### 手動で作成する場合
