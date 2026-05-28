@@ -258,15 +258,7 @@ def render_prime_markdown(
         # Prime v2 MVP-2: active context が空でも `--query` 指定時は
         # 検索結果セクションを出力する（過去 workflow のみヒットするケース）
         if query is not None:
-            lines.append(f"## 検索結果（query: `{query}`）")
-            lines.append("")
-            if query_results:
-                for r in query_results:
-                    lines.extend(_render_query_result_entry(r))
-                    lines.append("")
-            else:
-                lines.append("_該当する記録はありません_")
-                lines.append("")
+            lines.extend(_render_query_section(query, query_results))
             return "\n".join(lines).rstrip() + "\n"
         return "\n".join(lines)
 
@@ -324,17 +316,35 @@ def render_prime_markdown(
 
     # Prime v2 MVP-2: query 検索結果（`--query "..."` 指定時のみ）
     if query is not None:
-        lines.append(f"## 検索結果（query: `{query}`）")
-        lines.append("")
-        if query_results:
-            for r in query_results:
-                lines.extend(_render_query_result_entry(r))
-                lines.append("")
-        else:
-            lines.append("_該当する記録はありません_")
-            lines.append("")
+        lines.extend(_render_query_section(query, query_results))
 
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _render_query_section(
+    query: str, query_results: list[dict[str, Any]] | None
+) -> list[str]:
+    """`--query` 指定時の検索結果セクションを生成する（共通 helper）。
+
+    PR #135 Copilot Round 2 #2 指摘: `query_results=None` (backfill/search の
+    try block で例外 catch) と `[]` (検索成功で 0 件) は別の意味。`None` なら
+    検索インデックス自体が利用できなかった旨を明示し、diagnostics を参照
+    させる（stdout redirect でも気付ける経路）。
+    """
+    out: list[str] = []
+    out.append(f"## 検索結果（query: `{query}`）")
+    out.append("")
+    if query_results is None:
+        out.append("_検索インデックスが利用不可のため検索できませんでした (diagnostics 参照)_")
+        out.append("")
+    elif query_results:
+        for r in query_results:
+            out.extend(_render_query_result_entry(r))
+            out.append("")
+    else:
+        out.append("_該当する記録はありません_")
+        out.append("")
+    return out
 
 
 def _render_query_result_entry(result: dict[str, Any]) -> list[str]:

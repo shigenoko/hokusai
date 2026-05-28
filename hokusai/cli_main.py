@@ -1779,6 +1779,12 @@ def _handle_prime(args, config) -> int:
     # `hokusai prime ... > prime.md` 経路では見えないため、エラー文字列を
     # diagnostics 経路にも渡して stdout (Markdown 出力) で確認できるようにする。
     prime_index_error: str | None = None
+    # PR #135 Copilot Round 2 #1 指摘: Notion fetch を「試行したか」は
+    # `notion_fetch_error is None` だけでは判定できない（api_token 未設定 /
+    # DB ID 未設定で fetch を skip したケースも `None` のため）。fetch を
+    # 実際に試行したかどうかを別フラグで track して、未試行のときは index
+    # を clear しない（過去の backfill 行を保護する）。
+    notion_fetch_attempted = bool(api_token and db_id)
     try:
         index_entries = extract_prime_index_entries(
             memories=memories,
@@ -1786,14 +1792,13 @@ def _handle_prime(args, config) -> int:
             review_issues=review_issues,
             gates=gates,
         )
-        # PR #135 Copilot Round 1 #1 指摘: Notion fetch が成功している場合は、
-        # 取得結果が 0 件でも「現在の active context が空である」という真実を
-        # 反映するため、必ず stale 行を clear する。clear をガード内 (entries
-        # > 0) に置くと、過去に backfill された行が古いまま残って検索を汚す。
-        # 一方、Notion fetch エラー時 (notion_fetch_error is not None) は
-        # 部分結果でも stale な index より価値があるかもしれないので clear
-        # しない（fetch 障害復旧後の次回 prime 起動で正しく更新される）。
-        if notion_fetch_error is None:
+        # PR #135 Copilot Round 1 #1 + Round 2 #1 指摘: Notion fetch を
+        # 「試行して」かつ「成功した」場合のみ index を clear する。
+        # - 試行 + 成功 (0 件含む): stale 行を消して空状態を反映
+        # - 試行 + 失敗: stale 行を残す（障害復旧後の次回で更新）
+        # - 未試行 (token / DB ID 未設定): stale 行を残す（Notion 設定が
+        #   一時的に外れただけかもしれず、過去の backfill 結果は依然有効）
+        if notion_fetch_attempted and notion_fetch_error is None:
             store.clear_prime_index_for_workflow(workflow_id)
             for entry in index_entries:
                 store.upsert_prime_index(
