@@ -217,6 +217,8 @@ GBrainのschema packsは、知識の型をagentが進化させる仕組み。HOK
 - `hokusai prime --query` を追加
 - 出力にcitations / gapsを入れる
 
+詳細な設計議論は [docs/design-prime-v2.md](design-prime-v2.md) を参照。検索バックエンド選定 (SQLite FTS5 推奨)、引用データモデル、決定的な gap analysis 7 種、MVP 4 ステップ分割、未解決の設計問題 7 件を整理。
+
 ### Step 2: Doctor / Status統合
 
 - outbox/error/gate/review issue/LLM Gateway auditをstatusに出す
