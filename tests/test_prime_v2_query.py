@@ -1,9 +1,17 @@
-"""Prime v2 MVP-2: extract_prime_index_entries() と --query 出力の単体テスト
+"""Prime v2 MVP-2: extract_prime_index_entries() / --query / CLI handler の単体テスト
 
-docs/design-prime-v2.md §8.1 MVP-2 (CLI フラグ + backfill) の純関数部分
-(renderer / extractor) を検証する。CLI handler の e2e は別途 cli テストで
-カバーする想定で、ここでは Notion data → index entries の変換と、
-renderer の query セクション出力に絞る。
+docs/design-prime-v2.md §8.1 MVP-2 (CLI フラグ + backfill) の以下 3 層を
+1 ファイルで集約検証する:
+
+- 純関数: `extract_prime_index_entries()` の Notion data → index entries 変換
+- renderer: `render_prime_markdown()` / `render_prime_json()` の query
+  セクション出力 (v1 互換 / None vs [] 区別 / error embed 含む)
+- CLI handler 経路: `_handle_prime()` を直接呼ぶ e2e (backfill clear/upsert、
+  --query / --query-limit / --type フィルタ、stale 保護、graceful degrade)
+  + `_positive_int()` / `_sanitize_fts5_query()` 等のヘルパ
+
+PR #135 Copilot Round 1 #4 指摘で CLI handler 経路の e2e を本ファイルに
+追加し、Round 6 でその拡張範囲を明示するため docstring を更新済み。
 """
 from __future__ import annotations
 
@@ -654,6 +662,31 @@ def test_handle_prime_type_filter_preserves_other_memory_types(
     # 新しい avoidance entry は (--type フィルタ無しの将来 fetch で) 入る経路。
     # 本テストでは fetched_source_types から memory が外れるので未 backfill。
     # これは設計上の trade-off（次回 --type なしで全 memory が refresh される）。
+
+
+def test_handle_prime_query_limit_caps_result_count(tmp_path, monkeypatch):
+    """--query-limit が search_prime_index に伝播し、検索結果数が cap される
+    ことを e2e で検証 (PR #135 Copilot Round 6 #2 指摘)。"""
+    # 5 件の memory を fetch する fixture（全件が body=`shared phrase` を含む）
+    cfg, store = _setup_prime_env(
+        tmp_path, monkeypatch,
+        memories_factory=lambda: [
+            _memory_page(f"page-{i}", f"rule {i}", summary=f"shared phrase {i}")
+            for i in range(5)
+        ],
+    )
+
+    # default limit (10) なら 5 件全部返る
+    rc, body, _ = _run_handle_prime(cfg, query="shared")
+    assert rc == 0
+    assert body.count("**Source:** `memory`") == 5
+
+    # --query-limit 2 で結果が 2 件に cap される
+    rc, body, _ = _run_handle_prime(cfg, query="shared", query_limit=2)
+    assert rc == 0
+    assert body.count("**Source:** `memory`") == 2
+    # backfill された entries は 5 件全部 SQLite 上に残る
+    assert len(store.search_prime_index('"shared"')) == 5
 
 
 def test_handle_prime_type_filter_skips_memory_upsert_too(
