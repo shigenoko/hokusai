@@ -117,21 +117,25 @@ def test_no_warning_when_provider_allowlist_set():
     assert "✅ 診断" in output
 
 
-def test_no_warning_when_models_allowlist_set():
-    """allowed_models.default が設定されていれば警告なし"""
+def test_warns_when_only_models_allowlist_set_without_providers():
+    """allowed_models.default だけ設定でも allowed_providers が None なら警告
+    （PR #125 Copilot Round 6 指摘: interceptor は context.model='' で
+    allowed_models 評価を skip するため、ClaudeCodeClient (model='') 経由の
+    呼び出しは policy_hits 常時空で no-op になり得る）"""
     cfg = _make_config(
         enabled=False, log_only=True,
+        allowed_providers=None,
         allowed_models_default=["claude-sonnet-4"],
     )
     rc, output = _run_setup([], cfg)
-    assert rc == 0
-    assert "警告" not in output
+    assert rc == 1
+    assert "allowed_providers" in output
+    assert "no-op" in output or "ClaudeCodeClient" in output
 
 
-def test_no_warning_when_high_cost_gate_set():
-    """allowed_models.high_cost_requires_gate が非空なら警告なし（PR #125
-    Copilot Round 2 指摘: high_cost_requires_gate も policy_hits 生成経路の
-    1 つで、設定済みなら no-op にならない）"""
+def test_warns_when_only_high_cost_gate_set_without_providers():
+    """allowed_models.high_cost_requires_gate のみ非空でも allowed_providers
+    が None なら警告（同じく interceptor の model='' skip 仕様）"""
     cfg = _make_config(
         enabled=False, log_only=True,
         allowed_providers=None,
@@ -139,26 +143,36 @@ def test_no_warning_when_high_cost_gate_set():
         high_cost_requires_gate=["gpt-5", "claude-opus-4"],
     )
     rc, output = _run_setup([], cfg)
-    assert rc == 0
-    assert "⚠️  警告:" not in output  # 警告ブロックが出ていない
-    # 現設定表示には反映される
-    assert "high_cost_requires_gate" in output
-    assert "gpt-5" in output
+    assert rc == 1
+    assert "allowed_providers" in output
 
 
-def test_warns_when_all_three_policy_paths_empty():
-    """allowed_providers=None かつ allowed_models.default=None かつ
-    high_cost_requires_gate=[] のときのみ no-op 警告（3 経路全て無効）"""
+def test_no_warning_when_providers_allowlist_set():
+    """allowed_providers が allowlist として設定されていれば警告なし
+    （interceptor の provider 評価は model に関わらず動作する真の経路）"""
     cfg = _make_config(
         enabled=False, log_only=True,
-        allowed_providers=None,
+        allowed_providers=["claude_code", "codex"],
+    )
+    rc, output = _run_setup([], cfg)
+    assert rc == 0
+    assert "⚠️  警告:" not in output  # 警告ブロックなし
+
+
+def test_info_when_providers_set_but_models_empty():
+    """allowed_providers 設定済みで allowed_models.* 両方空なら ℹ️ info 注記
+    （warning は出さない、provider allowlist のみで動作）"""
+    cfg = _make_config(
+        enabled=False, log_only=True,
+        allowed_providers=["claude_code"],
         allowed_models_default=None,
         high_cost_requires_gate=[],
     )
     rc, output = _run_setup([], cfg)
-    assert rc == 1
-    assert "no-op" in output
-    assert "high_cost_requires_gate" in output  # 3 経路言及
+    assert rc == 0
+    # info 注記が出る（warning ではない）
+    assert "ℹ️" in output
+    assert "provider allowlist のみで動作" in output
 
 
 # ---------------------------------------------------------------------------

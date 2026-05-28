@@ -1291,18 +1291,20 @@ def _handle_llm_gateway_setup(args, config) -> int:
     print()
 
     # 診断ロジック: interceptor._evaluate_policy_hits の仕様に従って判定
-    # （PR #125 Copilot Round 1/2 指摘）:
+    # （PR #125 Copilot Round 1/2/6 指摘）:
     # - None (未指定) → policy 評価 skip = no-op リスク
     # - [] (明示空 = deny-all 意図) → 全 provider が hit、全 LLM 呼び出し block
     # - [...] (非空) → 含まれない provider が hit、適切な allowlist
-    # `None` と `[]` を区別せず len() で「未設定」とみなすと、deny-all 意図の
-    # `[]` まで誤って「no-op」と警告してしまうため、必ず is None で判定する。
     #
-    # policy_hits 生成経路は 3 つあり、いずれかが設定されていれば no-op に
-    # ならない（Round 2 指摘）:
-    #   1. allowed_providers != None → unknown_provider 評価
-    #   2. allowed_models.default != None → unknown_model 評価
-    #   3. allowed_models.high_cost_requires_gate が非空 → high_cost_model 評価
+    # **重要な仕様** (Round 6 指摘 / interceptor.py:194-205):
+    # `context.model` が空文字 ("") のとき、`allowed_models.*` 系の evaluation
+    # が **丸ごと skip される**。ClaudeCodeClient は現状 model="" を渡すため、
+    # `allowed_providers=None` の状態で `allowed_models.*` だけ設定しても
+    # claude_code 経由の呼び出しは policy_hits が常時空になり、事実上 no-op。
+    #
+    # この仕様を踏まえ、**真の policy_hits 生成経路は `allowed_providers` のみ**
+    # と扱う。`allowed_models.*` は補助的（model 取得可能な provider 限定）で、
+    # `allowed_providers` が設定されていない状態では no-op 警告対象に含める。
     no_provider_policy = gw.allowed_providers is None
     no_model_policy = allowed_default is None
     no_high_cost_gate = not high_cost_gate  # 空 list / None / falsy
@@ -1316,30 +1318,43 @@ def _handle_llm_gateway_setup(args, config) -> int:
               " (PR #122 / F1)")
         print()
 
-    # no-op リスク（policy_hits 生成経路 3 つ全て無効）: 現在の log_only /
-    # enabled 値に関わらず、将来切替時の事故防止のため必ず警告する。
-    # 3 経路: allowed_providers / allowed_models.default / high_cost_requires_gate
-    # （Round 2 指摘: high_cost_requires_gate 非空も policy_hits 生成可能）
-    if no_provider_policy and no_model_policy and no_high_cost_gate:
+    # no-op リスク判定（Round 6 指摘で修正）:
+    # `allowed_providers is None` のときは、`allowed_models.*` が設定されていても
+    # model="" を渡す provider では policy_hits が常時空になるため no-op 警告
+    # 対象とする。`allowed_models.*` のみで「真に安全」と判定するには
+    # 「全 provider が model を埋める」前提が必要だが、現状 ClaudeCodeClient は
+    # model="" なのでその前提は成立しない。
+    if no_provider_policy:
         if not gw.log_only and gw.enabled:
-            # 現在 enforce on 状態 → 即座の no-op
+            # 現在 enforce on 状態 → 即座の no-op リスク
             warnings.append(
-                "log_only=false（enforcement on）だが allowed_providers / "
-                "allowed_models.default が両方 None かつ "
-                "high_cost_requires_gate も空 → policy 評価経路 3 つ全て "
-                "無効で policy_hits 常時空、事実上 no-op です。設定を "
-                "追加するまで何も block されません。"
+                "log_only=false（enforcement on）だが allowed_providers が "
+                "None（未指定）です。allowed_models.* も `context.model=\"\"` "
+                "を渡す provider（例: ClaudeCodeClient）では evaluation が "
+                "skip されるため、policy_hits が常時空となり事実上 no-op の "
+                "リスクがあります。`allowed_providers` を設定するまで claude_code "
+                "経由の呼び出しは何も block されません。"
             )
         else:
             # 現在 log_only=true or disabled → 将来切替時のリスク
             warnings.append(
-                "allowed_providers / allowed_models.default が両方 None で "
-                "high_cost_requires_gate も空です。将来 log_only=false に "
-                "切替えても policy 評価経路 3 つ全て無効で enforcement が "
-                "事実上 no-op になります。enforce on にする前に最低限 "
-                "allowed_providers / allowed_models.default / "
-                "high_cost_requires_gate の少なくとも 1 つを設定してください。"
+                "allowed_providers が None（未指定）です。`allowed_models.*` "
+                "（default / high_cost_requires_gate）のみ設定しても、interceptor "
+                "は `context.model=\"\"` を渡す provider（例: ClaudeCodeClient）で "
+                "は evaluation を skip するため、policy_hits 常時空となり enforce "
+                "切替後に事実上 no-op になり得ます。enforce on にする前に "
+                "`allowed_providers` を設定することを強く推奨します。"
             )
+    elif no_model_policy and no_high_cost_gate:
+        # allowed_providers は設定済みだが、model 系は両方空。これは
+        # provider allowlist のみで動作する形（model 取得可能 provider にも
+        # model 制限は無し）。設計上は OK だが、model 制限も欲しいなら
+        # 注記として伝える（warning は出さず info メッセージ）。
+        print("ℹ️  allowed_providers は設定済みですが、allowed_models.default / "
+              "high_cost_requires_gate は両方空です。provider allowlist のみで"
+              "動作します。model 単位の制限が必要なら allowed_models.* も"
+              "設定してください。")
+        print()
 
     # deny-all リスク（明示空 list = 全 LLM 呼び出し block）: これは意図的な
     # 全ブロック設定の可能性もあるが、誤って `[]` を書いてしまった場合に
@@ -1354,9 +1369,9 @@ def _handle_llm_gateway_setup(args, config) -> int:
     if deny_all_models:
         warnings.append(
             "allowed_models.default=[] は deny-all 意図として評価されます。"
-            "log_only=false に切替えると該当 model 呼び出しが全て block "
-            "されます。意図的なら問題ありませんが、誤設定の可能性も考慮 "
-            "してください。"
+            "log_only=false に切替えると（model が取得できる呼び出しのみ）"
+            "全て block されます。意図的なら問題ありませんが、誤設定の可能性も "
+            "考慮してください。"
         )
 
     if gw.log_only and gw.enabled:
@@ -1388,12 +1403,12 @@ def _handle_llm_gateway_setup(args, config) -> int:
         print("  # allowed_models.default: [\"claude-sonnet-4\", ...] も追加可")
         return 1  # 警告ありで exit 1（事故防止のため非ゼロ終了）
 
-    # PR #125 Copilot Round 3 指摘: high_cost_requires_gate のみ設定して warnings
-    # が出ないケースもあるため、3 経路全てを言及した汎用文言にする。
+    # 成功時メッセージ（Round 6 修正後）: `allowed_providers` が allowlist として
+    # 設定済みの場合に限り、ここに到達する（interceptor 仕様: provider 評価は
+    # model に関わらず動作する真の policy_hits 経路）。
     print("✅ 診断: enforcement on に切替えても no-op / deny-all になる "
-          "リスクは検出されませんでした（allowed_providers / "
-          "allowed_models.default / allowed_models.high_cost_requires_gate "
-          "のいずれかが意図された設定で有効）。")
+          "リスクは検出されませんでした（`allowed_providers` が allowlist で "
+          "設定済み、interceptor の provider 評価が機能）。")
     return 0
 
 
