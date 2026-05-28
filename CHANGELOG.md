@@ -14,7 +14,8 @@ HOKUSAI のすべての特筆すべき変更をこのファイルに記録する
 
 ### Added
 
-- **Prime v2 MVP-1: FTS5 検索インデックスの土台**: `SQLiteStore` に FTS5 virtual table `prime_index` + meta table `prime_index_meta` を追加し、`upsert_prime_index()` / `search_prime_index()` / `clear_prime_index_for_workflow()` の 3 メソッドを実装。`_WORKFLOW_DEPENDENT_TABLES` にも追加し completed workflow の cascade-delete で孤児化しない。検索バックエンドは `unicode61 remove_diacritics 2`、引用 (citation) 用に `notion_page_id` / `pr_url` / `file_path` を meta に保持。本段階では CLI 統合や backfill は含まず、土台のみ ([docs/design-prime-v2.md §8.1 MVP-1](docs/design-prime-v2.md))。回帰防止テスト 13 件 (`tests/test_prime_index.py`)。
+- **Prime v2 MVP-1: FTS5 検索インデックスの土台**: `SQLiteStore` に FTS5 virtual table `prime_index` + meta table `prime_index_meta` を追加し、`upsert_prime_index()` / `search_prime_index()` / `clear_prime_index_for_workflow()` の 3 メソッドを実装。`_WORKFLOW_DEPENDENT_TABLES` にも追加し completed workflow の cascade-delete で孤児化しない。検索バックエンドは `unicode61 remove_diacritics 2`、引用 (citation) 用に `notion_page_id` / `pr_url` / `file_path` を meta に保持。本段階では CLI 統合や backfill は含まず、土台のみ ([docs/design-prime-v2.md §8.1 MVP-1](docs/design-prime-v2.md))。回帰防止テスト 16 件 (`tests/test_prime_index.py`)。
+- **Prime v2 MVP-2: `hokusai prime --query` + active context backfill**: `hokusai prime <workflow-id> --query "..."` フラグを追加。`--query` 指定時は Notion から取得した active context (memories / work_items / review_issues / gates) を `prime_index` に backfill した上で FTS5 MATCH 検索を実行し、上位 N 件 (既定 10、`--query-limit` で調整) を Markdown / JSON 出力に追加する。`--query` 未指定時の動作は v1 と完全互換 (出力に検索結果セクションは現れず、JSON も `query` / `query_results` は `null`)。backfill / search の失敗は表示を壊さず stderr の warning のみで graceful degrade。`extract_prime_index_entries()` 純関数で Notion data → index entries の変換を分離し、CLI からも renderer からも再利用可能。回帰防止テスト 15 件 (`tests/test_prime_v2_query.py`)。詳細: [docs/design-prime-v2.md §8.1 MVP-2](docs/design-prime-v2.md)。
 
 ---
 

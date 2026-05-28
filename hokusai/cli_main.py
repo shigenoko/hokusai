@@ -498,6 +498,22 @@ def _build_parser():
         default="markdown",
         help="出力形式（既定 markdown）",
     )
+    # Prime v2 MVP-2 (docs/design-prime-v2.md §8.1): query 検索
+    prime_parser.add_argument(
+        "--query",
+        default=None,
+        help=(
+            "Notion active context を FTS5 検索する（Prime v2 MVP-2）。"
+            "指定時は active context を SQLite `prime_index` に backfill した上で "
+            "FTS5 MATCH 検索した上位 N 件を引用付き表示する。"
+        ),
+    )
+    prime_parser.add_argument(
+        "--query-limit",
+        type=int,
+        default=10,
+        help="--query 指定時の最大返却件数（既定 10）",
+    )
 
     # audit コマンド: SQLite `audit_logs` を CLI から覗く（F3 / PR #123）
     audit_parser = subparsers.add_parser(
@@ -1503,6 +1519,7 @@ def _handle_prime(args, config) -> int:
 
     from .integrations.notion_dashboard.client import NotionAPIClient
     from .integrations.notion_dashboard.prime_renderer import (
+        extract_prime_index_entries,
         render_prime_json,
         render_prime_markdown,
     )
@@ -1516,6 +1533,9 @@ def _handle_prime(args, config) -> int:
     memory_types = getattr(args, "memory_types", None)
     output_format: str = getattr(args, "output", "markdown")
     profile_arg = getattr(args, "profile", None)
+    # Prime v2 MVP-2 (docs/design-prime-v2.md §8.1): query 検索 + backfill
+    query: str | None = getattr(args, "query", None)
+    query_limit: int = getattr(args, "query_limit", 10)
 
     # workflow state を SQLite から取得（profile / current_phase の解決源）
     store = SQLiteStore(config.database_path)
@@ -1710,6 +1730,44 @@ def _handle_prime(args, config) -> int:
                 file=sys.stderr,
             )
 
+    # Prime v2 MVP-2 (docs/design-prime-v2.md §8.1): 取得した active context
+    # を SQLite `prime_index` に backfill する。失敗しても表示は壊さない
+    # best-effort（FTS5 index は補助的な検索基盤で、prime 本来の出力経路を
+    # 阻害してはならない）。
+    query_results: list[dict] | None = None
+    try:
+        index_entries = extract_prime_index_entries(
+            memories=memories,
+            work_items=work_items,
+            review_issues=review_issues,
+            gates=gates,
+        )
+        if index_entries:
+            # 旧 entry を消してから入れ直し（冪等化）
+            store.clear_prime_index_for_workflow(workflow_id)
+            for entry in index_entries:
+                store.upsert_prime_index(
+                    workflow_id=workflow_id,
+                    source_type=entry["source_type"],
+                    source_id=entry["source_id"],
+                    title=entry["title"],
+                    body=entry["body"],
+                    phase=entry.get("phase"),
+                    notion_page_id=entry.get("notion_page_id"),
+                    file_path=entry.get("file_path"),
+                )
+        # --query 指定時のみ実検索を実行（v1 互換: 未指定なら何もしない）
+        if query is not None:
+            query_results = store.search_prime_index(
+                query, workflow_id=workflow_id, limit=query_limit
+            )
+    except Exception as e:
+        # backfill / search の失敗は表示を壊さず stderr に warning のみ
+        print(
+            f"⚠ prime_index backfill / search で失敗（active context のみ表示）: {e}",
+            file=sys.stderr,
+        )
+
     # M2.4 (#92): 空状態の prime 出力で「なぜ空か」（DB share 未完了 / env
     # 未設定 / 取得済 0 件 / Notion 障害）を原因切り分けできるよう、構成
     # 要素ごとの状態を診断行リストに組み立てる（findings §2.1）。Markdown
@@ -1740,6 +1798,8 @@ def _handle_prime(args, config) -> int:
                 review_issues=review_issues,
                 gates=gates,
                 diagnostics=diagnostics,
+                query=query,
+                query_results=query_results,
             )
         )
     else:
@@ -1753,6 +1813,8 @@ def _handle_prime(args, config) -> int:
                 review_issues=review_issues,
                 gates=gates,
                 diagnostics=diagnostics,
+                query=query,
+                query_results=query_results,
             )
         )
     return 0
