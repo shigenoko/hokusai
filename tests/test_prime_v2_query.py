@@ -619,6 +619,43 @@ def test_handle_prime_partial_fetch_preserves_other_source_types(
     assert len(store.search_prime_index('"old work"')) == 1
 
 
+def test_handle_prime_type_filter_preserves_other_memory_types(
+    tmp_path, monkeypatch
+):
+    """`--type avoidance` のような type フィルタ指定時、Notion fetch も
+    指定 type のみ実施されるので、過去 backfill された他 type (project_rule
+    / handover_note 等) の memory 行を保護する (PR #135 Copilot Round 4 #1)。"""
+    cfg, store = _setup_prime_env(
+        tmp_path, monkeypatch,
+        memories_factory=lambda: [
+            _memory_page(
+                "page-new", "new avoidance", summary="new avoidance body",
+                memory_type="avoidance",
+            )
+        ],
+    )
+    # 過去 backfill されていた project_rule / handover_note を直接入れる
+    store.upsert_prime_index(
+        workflow_id="wf-1", source_type="memory", source_id="page-old-rule",
+        title="old rule", body="historical rule",
+    )
+    store.upsert_prime_index(
+        workflow_id="wf-1", source_type="memory", source_id="page-old-handover",
+        title="old handover", body="historical handover",
+    )
+
+    # --type avoidance だけ指定
+    rc, _, _ = _run_handle_prime(cfg, memory_types=["avoidance"])
+    assert rc == 0
+
+    # 過去 backfill された他 type の memory 行は保護される
+    assert len(store.search_prime_index('"historical rule"')) == 1
+    assert len(store.search_prime_index('"historical handover"')) == 1
+    # 新しい avoidance entry は (--type フィルタ無しの将来 fetch で) 入る経路。
+    # 本テストでは fetched_source_types から memory が外れるので未 backfill。
+    # これは設計上の trade-off（次回 --type なしで全 memory が refresh される）。
+
+
 def test_clear_prime_index_source_types_filter(tmp_path):
     """SQLiteStore.clear_prime_index_for_workflow に source_types を渡すと、
     指定 source_type のみ削除される（その他は保護される）。"""

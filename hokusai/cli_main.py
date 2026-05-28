@@ -1787,7 +1787,13 @@ def _handle_prime(args, config) -> int:
     # で work_item/review_issue/gate=None だが Project Memory は成功）でも
     # 試行していない source_type の過去 backfill 行を保護する。
     fetched_source_types: list[str] = []
-    if api_token and db_id:
+    # PR #135 Copilot Round 4 #1 指摘: `--type` フィルタが指定されている場合、
+    # `list_active_memories(types=memory_types)` は指定 type のサブセットしか
+    # fetch しないため、memory 全体を clear すると過去 backfill された他 type
+    # (project_rule / handover_note 等) が消える。--type 指定時は memory を
+    # fetched_source_types に含めず、過去 backfill 行を保護する（次回 --type
+    # なしの起動で全 memory が refresh される）。
+    if api_token and db_id and memory_types is None:
         fetched_source_types.append("memory")
     if work_items is not None:
         fetched_source_types.append("work_item")
