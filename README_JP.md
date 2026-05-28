@@ -281,6 +281,8 @@ hokusai notion-setup --parent-page-id <notion-page-id> --persist
 
 セットアップ後に生成された DB ID は、`HOKUSAI_NOTION_WORKFLOWS_DB_ID`、`HOKUSAI_NOTION_PR_DB_ID`、`HOKUSAI_NOTION_REVIEW_ISSUES_DB_ID`、`HOKUSAI_NOTION_WORK_ITEMS_DB_ID`、`HOKUSAI_NOTION_WORKFLOW_GATES_DB_ID`、`HOKUSAI_NOTION_PROJECT_MEMORY_DB_ID` などの環境変数から参照する。
 
+> ⚠️ **重要**: `notion-setup` で**親ページに integration を接続済み**でも、**生成された子 DB は integration に自動継承されない**。各 DB ページ（Workflows / Pull Requests / Review Issues）で右上 **⋯ → Add connections** から手動で integration を share する必要がある（[詳細手順 + トラブルシューティング](docs/notion-dashboard-operation-guide.md#221-生成された-db-を-integration-に-share重要--dogfooding-findings-1-で記録した運用穴)）。share 漏れは `NotionAPIError: 404` の原因 No.1。
+
 複数の Notion ワークスペースを profile 単位で使い分ける場合は、profile config の `notion_dashboard.api_token_env` / `workflows_db_id_env` / `pull_requests_db_id_env` に案件固有の env 変数名を指定できる。`--profile <name>` を `notion-setup` に渡すと、HOKUSAI は profile config から env 名を自動で採用し、`--persist` で rc に書き込む際も profile 別マーカーを使って複数 profile を同じ rc ファイル内に並列保存できる:
 
 ```bash
