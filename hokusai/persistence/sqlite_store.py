@@ -778,6 +778,100 @@ class SQLiteStore:
                 for row in cursor.fetchall()
             ]
 
+    def list_audit_logs(
+        self,
+        *,
+        workflow_id: str | None = None,
+        phase: int | None = None,
+        action: str | None = None,
+        status: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """`audit_logs` を柔軟にフィルタして最新順に返す（PR #123 / F3）。
+
+        dogfooding-findings.md §7 F3 で記録した「audit_logs を CLI から
+        覗く経路が無い」運用穴を埋めるための `hokusai audit list` サブコマンド用 helper。
+        既存 `get_audit_logs(workflow_id)` は workflow_id 必須 + ASC ソート +
+        id 列を返さないので、新規メソッドとして追加（後方互換性を保つ）。
+
+        Args:
+            workflow_id: 指定すれば一致行のみ返す
+            phase: 指定すれば一致行のみ返す
+            action: 指定すれば一致行のみ返す（例 "llm_gateway_decision"）
+            status: 指定すれば一致行のみ返す（例 "block" / "log"）
+            limit: 取得上限（既定 50、`ORDER BY id DESC` で最新優先）
+
+        Returns:
+            audit_logs 行の dict のリスト（id / workflow_id / phase / action /
+            status / details (parsed JSON) / created_at）。最新が先頭。
+        """
+        clauses: list[str] = []
+        params: list[Any] = []
+        if workflow_id is not None:
+            clauses.append("workflow_id = ?")
+            params.append(workflow_id)
+        if phase is not None:
+            clauses.append("phase = ?")
+            params.append(phase)
+        if action is not None:
+            clauses.append("action = ?")
+            params.append(action)
+        if status is not None:
+            clauses.append("status = ?")
+            params.append(status)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        params.append(limit)
+        with self._connect() as conn:
+            cursor = conn.execute(
+                f"""
+                SELECT id, workflow_id, phase, action, status, details_json, created_at
+                FROM audit_logs
+                {where}
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                params,
+            )
+            return [
+                {
+                    "id": row[0],
+                    "workflow_id": row[1],
+                    "phase": row[2],
+                    "action": row[3],
+                    "status": row[4],
+                    "details": json.loads(row[5]) if row[5] else None,
+                    "created_at": row[6],
+                }
+                for row in cursor.fetchall()
+            ]
+
+    def get_audit_log(self, audit_id: int) -> dict[str, Any] | None:
+        """`audit_logs` 単一行を id で取得（PR #123 / F3）。
+
+        `hokusai audit show <id>` サブコマンド用。存在しない場合 None を返す。
+        """
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                SELECT id, workflow_id, phase, action, status, details_json, created_at
+                FROM audit_logs
+                WHERE id = ?
+                """,
+                (audit_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return None
+            return {
+                "id": row[0],
+                "workflow_id": row[1],
+                "phase": row[2],
+                "action": row[3],
+                "status": row[4],
+                "details": json.loads(row[5]) if row[5] else None,
+                "created_at": row[6],
+            }
+
     def delete_workflow(self, workflow_id: str) -> None:
         """
         ワークフローを削除
