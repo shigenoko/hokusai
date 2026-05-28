@@ -211,9 +211,27 @@ hokusai --profile company-a start https://github.com/your-org/your-repo/issues/1
 
 # Inspect configured profiles
 hokusai profile list
+
+# --- LLM Gateway operations CLI (v0.5.1+) ---
+
+# List audit_logs (newest first)
+hokusai audit list --action llm_gateway_decision --limit 20
+hokusai audit list --workflow-id wf-abc12345
+hokusai audit list --status block  # enforcement block rows only
+
+# Show a single audit_logs row in pretty JSON
+hokusai audit show 42
+
+# Diagnose LLM Gateway config (prevent no-op accidents on enforce on)
+hokusai llm-gateway-setup
+
+# Enable gateway via env override (no yaml edit required)
+HOKUSAI_LLM_GATEWAY_ENABLED=1 hokusai start <task_url>
 ```
 
 State is stored under `~/.hokusai/` by default (`workflow.db`, `checkpoint.db`, `logs/`). Override with the `data_dir` config option if needed. For multi-project operation, use profiles to isolate `data_dir`, databases, worktrees, dashboard ports, and environment-variable names per project.
+
+`audit list/show` / `llm-gateway-setup` and the `HOKUSAI_LLM_GATEWAY_ENABLED` env override were added in v0.5.1 as LLM Gateway operations tooling (resolving the F1–F4 operational gaps observed in [dogfooding-findings §7–§9](docs/dogfooding-findings.md)). Run `hokusai llm-gateway-setup` before turning on Phase 2 enforcement in production to verify your profile policy is not configured into a silent no-op.
 
 ## Configuration
 

@@ -211,9 +211,27 @@ hokusai --profile company-a start https://github.com/your-org/your-repo/issues/1
 
 # profile 一覧を確認
 hokusai profile list
+
+# --- LLM Gateway 運用 CLI（v0.5.1+） ---
+
+# audit_logs を一覧（最新順）
+hokusai audit list --action llm_gateway_decision --limit 20
+hokusai audit list --workflow-id wf-abc12345
+hokusai audit list --status block  # enforcement block 行のみ
+
+# audit_logs 単一行の詳細を JSON 表示
+hokusai audit show 42
+
+# LLM Gateway 設定を診断（policy 未設定の no-op 事故を防ぐ）
+hokusai llm-gateway-setup
+
+# yaml を編集せず env で一時 enable
+HOKUSAI_LLM_GATEWAY_ENABLED=1 hokusai start <task_url>
 ```
 
 状態はデフォルトで `~/.hokusai/` 配下に保存される（`workflow.db`、`checkpoint.db`、`logs/`）。必要に応じて設定の `data_dir` で上書き可能。複数案件で運用する場合は profile を使い、`data_dir`、DB、worktree、dashboard port、環境変数名を案件ごとに分離する。
+
+`audit list/show` / `llm-gateway-setup` および `HOKUSAI_LLM_GATEWAY_ENABLED` env override は v0.5.1 で追加された LLM Gateway 運用ツール群（[dogfooding-findings §7-§9](docs/dogfooding-findings.md) で観察した運用穴 F1-F4 の解消）。Phase 2 enforcement を本格運用する前に `hokusai llm-gateway-setup` で profile policy の no-op リスクを必ず診断することを推奨する。
 
 ## 設定
 
