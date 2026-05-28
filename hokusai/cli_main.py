@@ -510,9 +510,9 @@ def _build_parser():
     )
     prime_parser.add_argument(
         "--query-limit",
-        type=int,
+        type=_positive_int,
         default=10,
-        help="--query 指定時の最大返却件数（既定 10）",
+        help="--query 指定時の最大返却件数（>=1、既定 10）",
     )
 
     # audit コマンド: SQLite `audit_logs` を CLI から覗く（F3 / PR #123）
@@ -1497,6 +1497,46 @@ def _handle_audit(args, config) -> int:
     return 1
 
 
+def _positive_int(s: str) -> int:
+    """argparse type validator: 正の整数（>= 1）のみ受け付ける。
+
+    PR #135 Copilot Round 1 #3 指摘: `--query-limit 0` のような値は
+    `search_prime_index` 側で ValueError になり、best-effort 経路で握りつぶ
+    されて空結果のみ表示されるという silent degrade を起こす。argparse
+    の parse 時点で reject することで明確にユーザーへ返す。
+    """
+    try:
+        n = int(s)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(
+            f"正の整数を指定してください: '{s}'"
+        ) from e
+    if n < 1:
+        raise argparse.ArgumentTypeError(
+            f"1 以上の整数を指定してください: {n}"
+        )
+    return n
+
+
+def _sanitize_fts5_query(q: str) -> str:
+    """ユーザー入力を FTS5 MATCH 安全な phrase 検索式に変換する。
+
+    PR #135 Copilot Round 1 #2 指摘: `--query` の raw 文字列をそのまま
+    FTS5 MATCH に渡すと、`:` / 括弧 / 未対応引用符 / 先頭 `-` 等で
+    `sqlite3.OperationalError` を起こして検索が壊れる。phrase 検索
+    (`"..."`) でラップすれば AND/OR/NOT/コロン等の予約構文を回避できる。
+    含まれる `"` は `""` に escape (FTS5 仕様)。
+
+    AND/OR/NOT などの論理演算は意図的にサポートしない（誤入力防止 +
+    ユーザー向け free-text search としては phrase 一致で十分）。
+    後続 PR で詳細演算が必要になれば opt-in フラグで再導入する。
+    """
+    if not q or not q.strip():
+        return q
+    escaped = q.replace('"', '""')
+    return f'"{escaped}"'
+
+
 def _handle_prime(args, config) -> int:
     """`hokusai prime <workflow-id>` のハンドラ（Workgraph Phase 6 / Issue #48）。
 
@@ -1735,6 +1775,10 @@ def _handle_prime(args, config) -> int:
     # best-effort（FTS5 index は補助的な検索基盤で、prime 本来の出力経路を
     # 阻害してはならない）。
     query_results: list[dict] | None = None
+    # PR #135 Copilot Round 1 #5 指摘: stderr-only warning は
+    # `hokusai prime ... > prime.md` 経路では見えないため、エラー文字列を
+    # diagnostics 経路にも渡して stdout (Markdown 出力) で確認できるようにする。
+    prime_index_error: str | None = None
     try:
         index_entries = extract_prime_index_entries(
             memories=memories,
@@ -1742,8 +1786,14 @@ def _handle_prime(args, config) -> int:
             review_issues=review_issues,
             gates=gates,
         )
-        if index_entries:
-            # 旧 entry を消してから入れ直し（冪等化）
+        # PR #135 Copilot Round 1 #1 指摘: Notion fetch が成功している場合は、
+        # 取得結果が 0 件でも「現在の active context が空である」という真実を
+        # 反映するため、必ず stale 行を clear する。clear をガード内 (entries
+        # > 0) に置くと、過去に backfill された行が古いまま残って検索を汚す。
+        # 一方、Notion fetch エラー時 (notion_fetch_error is not None) は
+        # 部分結果でも stale な index より価値があるかもしれないので clear
+        # しない（fetch 障害復旧後の次回 prime 起動で正しく更新される）。
+        if notion_fetch_error is None:
             store.clear_prime_index_for_workflow(workflow_id)
             for entry in index_entries:
                 store.upsert_prime_index(
@@ -1756,13 +1806,20 @@ def _handle_prime(args, config) -> int:
                     notion_page_id=entry.get("notion_page_id"),
                     file_path=entry.get("file_path"),
                 )
-        # --query 指定時のみ実検索を実行（v1 互換: 未指定なら何もしない）
+        # --query 指定時のみ実検索を実行（v1 互換: 未指定なら何もしない）。
+        # PR #135 Copilot Round 1 #2 指摘: raw 文字列を直接 MATCH に渡すと
+        # `:` / 括弧 / 引用符 / 先頭 `-` 等で OperationalError を起こすため、
+        # phrase 検索 (`"..."`) でラップして safe にする。
         if query is not None:
+            safe_query = _sanitize_fts5_query(query)
             query_results = store.search_prime_index(
-                query, workflow_id=workflow_id, limit=query_limit
+                safe_query, workflow_id=workflow_id, limit=query_limit
             )
     except Exception as e:
-        # backfill / search の失敗は表示を壊さず stderr に warning のみ
+        # backfill / search の失敗は表示を壊さず graceful degrade。
+        # stderr (terminal で見える) + diagnostics (stdout で見える) の
+        # 両方に出して、`> prime.md` リダイレクト時にも気付けるようにする。
+        prime_index_error = f"{type(e).__name__}: {e}"
         print(
             f"⚠ prime_index backfill / search で失敗（active context のみ表示）: {e}",
             file=sys.stderr,
@@ -1785,6 +1842,7 @@ def _handle_prime(args, config) -> int:
         workflow_gates_db_id=workflow_gates_db_id,
         gates=gates,
         notion_fetch_error=notion_fetch_error,
+        prime_index_error=prime_index_error,
     )
 
     if output_format == "json":
@@ -1834,6 +1892,7 @@ def _build_prime_diagnostics(
     workflow_gates_db_id: str,
     gates: list[dict] | None,
     notion_fetch_error: str | None = None,
+    prime_index_error: str | None = None,
 ) -> list[str]:
     """`hokusai prime` 出力用の診断行リストを組み立てる（M2.4 / #92）。
 
@@ -1864,6 +1923,11 @@ def _build_prime_diagnostics(
     # Notion fetch 例外があった場合は最初に明示（0 件と区別、stdout 経路で見える）
     if notion_fetch_error:
         diagnostics.append(f"Notion: 取得失敗 ({notion_fetch_error})")
+    # Prime v2 MVP-2 / PR #135 Copilot Round 1 #5: prime_index backfill /
+    # search の失敗を stdout 経路にも出す（`> prime.md` リダイレクト時にも
+    # 気付けるようにする）。
+    if prime_index_error:
+        diagnostics.append(f"prime_index: 失敗 ({prime_index_error})")
 
     # API token 単独で判定（token が無いと _handle_prime はそもそも Notion
     # 呼び出しを走らせず memories=[] / 他=None になるので、その前に出す）

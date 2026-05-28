@@ -312,3 +312,333 @@ def test_render_json_query_results_present():
     assert payload["query_results"] == [
         {"source_type": "memory", "title": "t", "body": "b"}
     ]
+
+
+# ---------------------------------------------------------------------------
+# CLI handler 経路 (PR #135 Copilot Round 1 #4 指摘の e2e カバレッジ追加)
+# ---------------------------------------------------------------------------
+
+
+import io  # noqa: E402
+import json  # noqa: E402
+import sys  # noqa: E402
+from contextlib import redirect_stderr, redirect_stdout  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+import pytest  # noqa: E402
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from hokusai.cli_main import (  # noqa: E402
+    _handle_prime,
+    _positive_int,
+    _sanitize_fts5_query,
+)
+from hokusai.config.models import (  # noqa: E402
+    NotionDashboardConfig,
+    NotionSyncRateLimitConfig,
+    WorkflowConfig,
+)
+from hokusai.persistence.sqlite_store import SQLiteStore  # noqa: E402
+
+
+class _Args:
+    def __init__(self, **kwargs):
+        for k, v in kwargs.items():
+            setattr(self, k, v)
+
+
+def _make_config(tmp_path: Path) -> WorkflowConfig:
+    return WorkflowConfig(
+        data_dir=tmp_path,
+        database_path=tmp_path / "wf.db",
+        checkpoint_db_path=tmp_path / "cp.db",
+        notion_dashboard=NotionDashboardConfig(
+            enabled=True,
+            api_token_env="TEST_API_TOKEN",
+            project_memory_db_id_env="TEST_MEMORY_DB",
+            workflows_db_id_env="TEST_WORKFLOWS_DB",
+            rate_limit=NotionSyncRateLimitConfig(
+                requests_per_second=100, debounce_ms=0
+            ),
+        ),
+    )
+
+
+def _seed_workflow(config: WorkflowConfig, workflow_id: str = "wf-1") -> None:
+    store = SQLiteStore(config.database_path)
+    store.save_workflow(workflow_id, {
+        "workflow_id": workflow_id,
+        "profile_name": "acme",
+        "current_phase": 4,
+    })
+
+
+def test_positive_int_validator():
+    """--query-limit が正の整数のみ受け付けることを単体で検証"""
+    import argparse
+    assert _positive_int("1") == 1
+    assert _positive_int("10") == 10
+    assert _positive_int("100") == 100
+    with pytest.raises(argparse.ArgumentTypeError):
+        _positive_int("0")
+    with pytest.raises(argparse.ArgumentTypeError):
+        _positive_int("-1")
+    with pytest.raises(argparse.ArgumentTypeError):
+        _positive_int("abc")
+
+
+def test_sanitize_fts5_query_wraps_phrase():
+    """raw クエリを phrase 形式 `"..."` でラップする"""
+    assert _sanitize_fts5_query("Notion outbox") == '"Notion outbox"'
+    # 引用符は `""` に escape
+    assert _sanitize_fts5_query('he said "hi"') == '"he said ""hi"""'
+    # 予約文字を含む入力もエラーなく phrase 化される
+    assert _sanitize_fts5_query("foo:bar (baz)") == '"foo:bar (baz)"'
+    assert _sanitize_fts5_query("-leading-dash") == '"-leading-dash"'
+
+
+def test_sanitize_fts5_query_blank_passthrough():
+    """空文字 / 空白のみは raw を返す（search_prime_index 側で空 result 返却）"""
+    assert _sanitize_fts5_query("") == ""
+    assert _sanitize_fts5_query("   ") == "   "
+
+
+def test_handle_prime_query_path_runs_backfill_and_search(
+    tmp_path, monkeypatch
+):
+    """--query 経路で extract → clear → upsert → search が走り、検索結果が
+    Markdown 出力に現れることを e2e で確認する。"""
+    out = io.StringIO()
+    err = io.StringIO()
+    cfg = _make_config(tmp_path)
+    _seed_workflow(cfg)
+
+    monkeypatch.setenv("TEST_API_TOKEN", "tok")
+    monkeypatch.setenv("TEST_MEMORY_DB", "memdb")
+
+    class _FakeAPI:
+        def __init__(self, *a, **kw):
+            return
+
+    class _FakeMemClient:
+        def __init__(self, *, api, database_id):
+            return
+
+        def list_active_memories(self, *, profile, phase, types, **kwargs):
+            return [_memory_page("page-1", "rule A", summary="outbox error observed")]
+
+    monkeypatch.setattr(
+        "hokusai.integrations.notion_dashboard.client.NotionAPIClient", _FakeAPI
+    )
+    monkeypatch.setattr(
+        "hokusai.integrations.notion_dashboard.project_memory_db.ProjectMemoryDBClient",
+        _FakeMemClient,
+    )
+
+    args = _Args(
+        workflow_id="wf-1", phase=None, memory_types=None, output="markdown",
+        query="outbox", query_limit=10,
+    )
+    with redirect_stdout(out), redirect_stderr(err):
+        rc = _handle_prime(args, cfg)
+    assert rc == 0
+    body = out.getvalue()
+    # 検索結果セクションが現れる
+    assert "## 検索結果（query: `outbox`）" in body
+    # backfill された memory が citation 付きで現れる
+    assert "rule A" in body
+    assert "**Source:** `memory`" in body
+    # backfill 経由で prime_index にデータが入ったことを直接確認
+    store = SQLiteStore(cfg.database_path)
+    assert len(store.search_prime_index('"outbox"')) >= 1
+
+
+def test_handle_prime_clears_stale_when_active_context_becomes_empty(
+    tmp_path, monkeypatch
+):
+    """active context が 0 件になった場合、過去 backfill 行を必ず clear する
+    (PR #135 Copilot Round 1 #1 指摘)。"""
+    out = io.StringIO()
+    err = io.StringIO()
+    cfg = _make_config(tmp_path)
+    _seed_workflow(cfg)
+    # 過去 backfill された stale 行を直接書き込む
+    store = SQLiteStore(cfg.database_path)
+    store.upsert_prime_index(
+        workflow_id="wf-1", source_type="memory", source_id="stale-1",
+        title="old rule", body="old content",
+    )
+    assert len(store.search_prime_index('"old rule"')) == 1
+
+    monkeypatch.setenv("TEST_API_TOKEN", "tok")
+    monkeypatch.setenv("TEST_MEMORY_DB", "memdb")
+
+    class _FakeAPI:
+        def __init__(self, *a, **kw):
+            return
+
+    class _FakeMemClient:
+        def __init__(self, *, api, database_id):
+            return
+
+        def list_active_memories(self, **kwargs):
+            # active context が 0 件になったケース
+            return []
+
+    monkeypatch.setattr(
+        "hokusai.integrations.notion_dashboard.client.NotionAPIClient", _FakeAPI
+    )
+    monkeypatch.setattr(
+        "hokusai.integrations.notion_dashboard.project_memory_db.ProjectMemoryDBClient",
+        _FakeMemClient,
+    )
+
+    args = _Args(
+        workflow_id="wf-1", phase=None, memory_types=None, output="markdown",
+        query=None, query_limit=10,
+    )
+    with redirect_stdout(out), redirect_stderr(err):
+        rc = _handle_prime(args, cfg)
+    assert rc == 0
+    # stale 行が clear されている
+    assert store.search_prime_index('"old rule"') == []
+
+
+def test_handle_prime_keeps_stale_when_notion_fetch_errors(
+    tmp_path, monkeypatch
+):
+    """Notion fetch エラー時は stale 行を残す（部分的に役立つ可能性があるため）
+    (PR #135 Copilot Round 1 #1 指摘の境界条件)。"""
+    out = io.StringIO()
+    err = io.StringIO()
+    cfg = _make_config(tmp_path)
+    _seed_workflow(cfg)
+    store = SQLiteStore(cfg.database_path)
+    store.upsert_prime_index(
+        workflow_id="wf-1", source_type="memory", source_id="kept-1",
+        title="kept rule", body="kept content",
+    )
+
+    monkeypatch.setenv("TEST_API_TOKEN", "tok")
+    monkeypatch.setenv("TEST_MEMORY_DB", "memdb")
+
+    class _FakeAPI:
+        def __init__(self, *a, **kw):
+            return
+
+    class _FakeMemClient:
+        def __init__(self, *, api, database_id):
+            return
+
+        def list_active_memories(self, **kwargs):
+            raise RuntimeError("simulated Notion outage")
+
+    monkeypatch.setattr(
+        "hokusai.integrations.notion_dashboard.client.NotionAPIClient", _FakeAPI
+    )
+    monkeypatch.setattr(
+        "hokusai.integrations.notion_dashboard.project_memory_db.ProjectMemoryDBClient",
+        _FakeMemClient,
+    )
+
+    args = _Args(
+        workflow_id="wf-1", phase=None, memory_types=None, output="markdown",
+        query=None, query_limit=10,
+    )
+    with redirect_stdout(out), redirect_stderr(err):
+        rc = _handle_prime(args, cfg)
+    assert rc == 0
+    # Notion fetch が失敗したので clear されず、stale 行が残る
+    assert len(store.search_prime_index('"kept rule"')) == 1
+
+
+def test_handle_prime_v1_compat_without_query(tmp_path, monkeypatch):
+    """--query 未指定で JSON 出力に query / query_results が null として現れる
+    (v1 互換確認)。"""
+    out = io.StringIO()
+    err = io.StringIO()
+    cfg = _make_config(tmp_path)
+    _seed_workflow(cfg)
+    monkeypatch.setenv("TEST_API_TOKEN", "tok")
+    monkeypatch.setenv("TEST_MEMORY_DB", "memdb")
+
+    class _FakeAPI:
+        def __init__(self, *a, **kw):
+            return
+
+    class _FakeMemClient:
+        def __init__(self, *, api, database_id):
+            return
+
+        def list_active_memories(self, **kwargs):
+            return []
+
+    monkeypatch.setattr(
+        "hokusai.integrations.notion_dashboard.client.NotionAPIClient", _FakeAPI
+    )
+    monkeypatch.setattr(
+        "hokusai.integrations.notion_dashboard.project_memory_db.ProjectMemoryDBClient",
+        _FakeMemClient,
+    )
+
+    args = _Args(
+        workflow_id="wf-1", phase=None, memory_types=None, output="json",
+        query=None, query_limit=10,
+    )
+    with redirect_stdout(out), redirect_stderr(err):
+        rc = _handle_prime(args, cfg)
+    assert rc == 0
+    payload = json.loads(out.getvalue())
+    assert payload["query"] is None
+    assert payload["query_results"] is None
+
+
+def test_handle_prime_diagnostic_row_on_prime_index_error(
+    tmp_path, monkeypatch
+):
+    """prime_index 失敗時に diagnostics に「prime_index: 失敗 (...)」が出る
+    (PR #135 Copilot Round 1 #5 指摘)。"""
+    out = io.StringIO()
+    err = io.StringIO()
+    cfg = _make_config(tmp_path)
+    _seed_workflow(cfg)
+    monkeypatch.setenv("TEST_API_TOKEN", "tok")
+    monkeypatch.setenv("TEST_MEMORY_DB", "memdb")
+
+    class _FakeAPI:
+        def __init__(self, *a, **kw):
+            return
+
+    class _FakeMemClient:
+        def __init__(self, *, api, database_id):
+            return
+
+        def list_active_memories(self, **kwargs):
+            return []
+
+    monkeypatch.setattr(
+        "hokusai.integrations.notion_dashboard.client.NotionAPIClient", _FakeAPI
+    )
+    monkeypatch.setattr(
+        "hokusai.integrations.notion_dashboard.project_memory_db.ProjectMemoryDBClient",
+        _FakeMemClient,
+    )
+
+    # SQLiteStore.clear_prime_index_for_workflow を強制例外化
+    def _boom(self, *a, **kw):
+        raise RuntimeError("simulated index failure")
+    monkeypatch.setattr(SQLiteStore, "clear_prime_index_for_workflow", _boom)
+
+    args = _Args(
+        workflow_id="wf-1", phase=None, memory_types=None, output="json",
+        query=None, query_limit=10,
+    )
+    with redirect_stdout(out), redirect_stderr(err):
+        rc = _handle_prime(args, cfg)
+    assert rc == 0
+    payload = json.loads(out.getvalue())
+    diag = payload["diagnostics"] or []
+    assert any("prime_index" in d and "失敗" in d for d in diag)
+    # stderr にも warning が出る
+    assert "prime_index backfill / search で失敗" in err.getvalue()
