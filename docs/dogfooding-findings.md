@@ -289,7 +289,7 @@ audit_logs の SQLite 列 / details_json 対応関係: テーブル列 `status` 
   - `LLMGatewayBlockedError` が raise された
   - `policy_hits=('unknown_provider',)`, `reason="phase2_policy_block"`
   - audit_logs に `status='block'`（= `details_json.decision='block'`）行が記録される
-  - 例外メッセージは `provider` / `purpose` / `policy_hits` / `reason` のみで prompt 本文を含まない（§14 受け入れ基準どおり）
+  - 例外メッセージは `provider` / `purpose` / `policy_hits` / `reason` のみで prompt 本文を含まない（§5 の PII 防御方針どおり）
 - ✅ Test B (`provider="codex"`, allowlist=`["codex"]`):
   - 例外なし、透過動作
   - audit_logs に `status='log'`（= `details_json.decision='log'`）, `policy_hits=[]` 行が記録される
@@ -320,13 +320,72 @@ audit_logs の SQLite 列 / details_json 対応関係: テーブル列 `status` 
 ### 次のアクション候補（優先順）
 
 1. **F2 の wizard**: 必要性が見えてから着手。policy 未設定で enforce on にすると no-op になる事故 1 回が踏まれてからでも遅くない。**優先度: 中**。
-2. **F1 / F3 / F4 解消後の再観察 dogfooding**: 3 つの運用穴が揃って埋まったので、`HOKUSAI_LLM_GATEWAY_ENABLED=1` で `hokusai start` を 1 phase 回し、`audit_logs.workflow_id` が `wf-...` で埋まることを `hokusai audit list --workflow-id wf-... --action llm_gateway_decision` で実走確認する。
+2. ~~**F1 / F3 / F4 解消後の再観察 dogfooding**~~ → **§8 で軽量 end-to-end 検証完了**。実 `hokusai start` で 1 workflow 完走させる重い dogfooding は引き続き次マイルストーンとして残る（優先度: 中）。
 
 ### Phase 2 enforcement の v0.5.0 評価
 
 - **コード上は完成**: audit 永続化 / block raise / fail-open / 許可透過の 4 経路は全て期待通り動作
 - **運用は未完成**: F1-F4 が揃って初めて「safely enforce on にできる profile」が成立する
 - **段階導入の妥当性**: profile 単位での切り替え方針 (§6) は引き続き正しい。次は `hokusai-enforce` のような専用 profile で 1 workflow 実走させる dogfooding が次マイルストーン。
+
+---
+
+## 8. F1 / F3 / F4 解消後の end-to-end 再観察 (2026-05-28)
+
+PR #122 (F1: env override) + PR #123 (F3: audit CLI) + PR #120 / #121 (F4: workflow_id 伝播) のマージ後、3 つの運用穴が揃って埋まったことを実機で end-to-end 検証した。**§7 で「次マイルストーン」と書いた `hokusai-enforce` 専用 profile を作らずとも、3 PR の組み合わせだけで実用的な観察パスが成立する** ことを確認できた。
+
+### 観察手順（再現可能）
+
+1. **F1**: yaml を編集せず env 経由で gateway を一時 enable
+   ```bash
+   export HOKUSAI_LLM_GATEWAY_ENABLED=1
+   export HOKUSAI_ACTIVE_PROFILE=hokusai
+   ```
+2. **F4**: 実 `ClaudeCodeClient.execute_prompt` を呼び（subprocess のみ mock）、`workflow_id` / `phase` を末端 helper まで伝播させる
+   ```python
+   from unittest.mock import patch, MagicMock
+   from hokusai.integrations.claude_code import ClaudeCodeClient
+
+   client = ClaudeCodeClient.__new__(ClaudeCodeClient)
+   client._claude_path = "/bin/true"
+   client.working_dir = "/tmp"
+
+   with patch("hokusai.integrations.claude_code.ShellRunner") as runner_cls:
+       runner_cls.return_value.run.return_value = MagicMock(
+           returncode=0, stdout="ok output", stderr="",
+           duration_ms=0, success=True,
+       )
+       client.execute_prompt(
+           prompt="end-to-end reobservation",
+           workflow_id="wf-reobservation-001",
+           phase=2,
+       )
+   ```
+3. **F3**: 結果を CLI 経由で確認（`sqlite3` 直叩き不要）
+   ```bash
+   hokusai audit list --workflow-id wf-reobservation-001 --action llm_gateway_decision
+   hokusai audit show <id>
+   ```
+
+### 実観察
+
+- ✅ `hokusai audit list --workflow-id wf-reobservation-001 --action llm_gateway_decision` で 1 行が表示された
+  ```
+      id  created_at           workflow_id     phase  status    action
+  --------------------------------------------------------------------------------
+       4  2026-05-28T15:17:07  wf-reobservati      2  log       llm_gateway_decision
+  ```
+- ✅ `hokusai audit show 4` で `details_json` を整形表示。**4 つの観点が同時確認**:
+  - `config_snapshot.enabled=true` → **F1 の env override が機能**
+  - `context.workflow_id="wf-reobservation-001"` / `context.phase=2` → **F4 の client→helper 配線が機能**
+  - SQLite 行として CLI から見える → **F3 の CLI helper が機能**
+  - `prompt_hash` 16 桁 hex のみ保存（本文なし）→ §5 の PII 防御方針も維持
+
+### 評価 + 次マイルストーン
+
+- **§7 で「コード上は完成、運用は未完成」と書いた状態が、3 PR で「運用上も実用 OK」まで到達**した。専用 enforce profile を作らずとも、env override 1 行で観察開始 → CLI でトレース可能。
+- **残る運用穴**は §7 「残る運用穴」サブセクションで列挙した F2 (policy wizard) のみ。これは「policy 未設定で `log_only=false` にすると enforcement が事実上 no-op」という事故 1 回が踏まれてから対応で十分な優先度。
+- **次マイルストーン**は「実 `hokusai start` で 1 workflow 完走させ、各 phase の `audit_logs` 行が PR #121 の配線通り `workflow_id`/`phase` で埋まることを観察」する **重い dogfooding**。本 §8 で軽量検証は完了しているため、優先度は中。
 
 ---
 
