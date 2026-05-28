@@ -1266,8 +1266,8 @@ def _handle_llm_gateway_setup(args, config) -> int:
         # 両方を拾うため、原因が分かるメッセージにする（PR #125 Copilot
         # Round 3 指摘）。
         print(
-            "エラー: WorkflowConfig.llm_gateway が未設定（None）または属性が "
-            "存在しません",
+            "エラー: WorkflowConfig.llm_gateway が未設定（None）または"
+            "属性が存在しません",
             file=sys.stderr,
         )
         return 1
@@ -1367,7 +1367,15 @@ def _handle_llm_gateway_setup(args, config) -> int:
         for w in warnings:
             print(f"  - {w}")
         print()
-        print("=== 推奨設定例（~/.hokusai/configs/<profile>.yaml に貼り付け）===")
+        # 貼り付け先 yaml は profile registry の `config:` で指定された任意の
+        # 絶対パス（`~/.hokusai/configs/<profile>.yaml` とは限らない）。
+        # WorkflowConfig には config 由来のパスを保持していないため、
+        # 一般表現で案内し profile show での確認方法を併記する
+        # （PR #125 Copilot Round 4 指摘）。
+        print(
+            "=== 推奨設定例（現 profile の config YAML に貼り付け）===\n"
+            "    config YAML のパス確認: hokusai profile show <profile_name>"
+        )
         print("llm_gateway:")
         print("  enabled: true")
         print("  log_only: false  # enforcement on")

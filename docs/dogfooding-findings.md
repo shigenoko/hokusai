@@ -304,9 +304,9 @@ audit_logs の SQLite 列 / details_json 対応関係: テーブル列 `status` 
 | 許可 provider 透過 + audit 残存 | ✅ 機能 | `hokusai/llm_gateway/interceptor.py:138-153`（decision 判定 138-148 + `_emit_audit` 呼び出し 150-153）(M1.1 / #86) |
 | fail-open（gateway 内部例外を握り潰す） | ✅ コード上明示 | `hokusai/llm_gateway/dispatch.py:193-198` (要件 §4.4) |
 
-### 残る運用穴
+### 運用穴のステータス
 
-§7 観察時点（v0.5.0）で確認した F1–F4 は **全て後続 PR で解消済み**。
+§7 観察時点（v0.5.0）で確認した F1–F4 は **全て後続 PR で解消済み**。残る未解消なし。
 
 ### 解消済み（後続 PR）
 
