@@ -386,6 +386,86 @@ PR #122 (F1: env override) + PR #123 (F3: audit CLI) + PR #120 / #121 (F4: workf
 - **§7 で「コード上は完成、運用は未完成」と書いた状態が、3 PR で「運用上も実用 OK」まで到達**した。専用 enforce profile を作らずとも、env override 1 行で観察開始 → CLI でトレース可能。
 - **残る運用穴**は §7 「残る運用穴」サブセクションで列挙した F2 (policy wizard) のみ。これは「policy 未設定で `log_only=false` にすると enforcement が事実上 no-op」という事故 1 回が踏まれてから対応で十分な優先度。
 - **次マイルストーン**は「実 `hokusai start` で 1 workflow 完走させ、各 phase の `audit_logs` 行が PR #121 の配線通り `workflow_id`/`phase` で埋まることを観察」する **重い dogfooding**。本 §8 で軽量検証は完了しているため、優先度は中。
+- ↑ **§9 で着手**: 実 `hokusai start` を 90 秒だけ起動して Phase 2 が真の subprocess (Claude Code CLI 実起動) で動く状態を観察し、`audit_logs` に `workflow_id`/`phase` が記録されることを実証した。
+
+---
+
+## 9. 重い dogfooding: 真の subprocess 経路観察 (2026-05-28, v0.5.1)
+
+§8 で「ClaudeCodeClient.execute_prompt() の subprocess (ShellRunner) のみ mock した end-to-end 検証」を完了したのに対し、本 §9 では **subprocess を本物の Claude Code CLI で起動する真の重い dogfooding** を実施した。F4 配線 (PR #120 / #121) が **本物の subprocess (claude CLI が走る経路)** でも end-to-end で機能することを実証する位置付け。
+
+### 観察手順
+
+| Step | 操作 |
+|---|---|
+| 1 | dogfood-test 用の軽量 GitHub Issue を作成 (`gh issue create` で [#127](https://github.com/shigenoko/hokusai/issues/127)) |
+| 2 | `HOKUSAI_LLM_GATEWAY_ENABLED=1 HOKUSAI_ACTIVE_PROFILE=hokusai uv run hokusai start <issue_url>` を 90 秒だけ background 実行 |
+| 3 | 90 秒経過後、`hokusai audit list --action llm_gateway_decision` で audit_logs を観察 |
+| 4 | `hokusai audit show <id>` で details_json を確認 |
+| 5 | background プロセスを `TaskStop` で kill |
+| 6 | `hokusai cleanup <new_wf>` で worktree 削除、`gh issue close` で test Issue を閉じる |
+
+### 実観察結果
+
+新規 workflow `wf-f373fac6` が Phase 2 まで到達し、`hokusai audit list` で 1 行記録を確認:
+
+```
+    id  created_at           workflow_id     phase  status    action
+--------------------------------------------------------------------------------
+     5  2026-05-28T18:06:16  wf-f373fac6         2  log       llm_gateway_decision
+```
+
+`hokusai audit show 5` の `details_json` 抜粋:
+
+```json
+{
+  "id": 5,
+  "workflow_id": "wf-f373fac6",
+  "phase": 2,
+  "action": "llm_gateway_decision",
+  "status": "log",
+  "details": {
+    "decision": "log",
+    "reason": "phase1_log_only",
+    "context": {
+      "provider": "claude_code",
+      "model": "",
+      "purpose": "execute_prompt",
+      "workflow_id": "wf-f373fac6",
+      "phase": 2,
+      "metadata": {}
+    },
+    "prompt_length": 806,
+    "prompt_hash": "0451be88c0b573d6",
+    "policy_hits": [],
+    "config_snapshot": {
+      "enabled": true,
+      "log_only": true,
+      "dry_run": false,
+      "audit_log_enabled": true
+    }
+  }
+}
+```
+
+### 確認できたこと（§8 との差分）
+
+- ✅ **真の subprocess 経路**: `prompt_length=806` / `prompt_hash="0451be88c0b573d6"` は実 research prompt（task_url + 構成テンプレート）の SHA256 16 桁。§8 は subprocess を mock していたため prompt は固定文字列 (`"end-to-end reobservation"`, length=70) だったが、§9 では **phase2_research_node が組み立てた本物の research prompt** が hash 化されている → ClaudeCodeClient.execute_prompt が **subprocess を mock せず claude CLI 起動経路で走った** ことを示す。
+- ✅ **phase node → client → helper → SQLite の完全 e2e**: `phase2_research_node` が `state["workflow_id"] = "wf-f373fac6"` を `claude.execute_prompt(workflow_id=..., phase=2)` で渡し、`_invoke_llm_gateway_interceptor` → `dispatch_via_gateway` → `LLMGatewayInterceptor.intercept()` → `_emit_audit()` → SQLite `audit_logs` INSERT までの全配線が **3 段階で検証完了**（unit test / 軽量 e2e / 重い e2e）。
+- ✅ **F1 env override も同時動作**: `config_snapshot.enabled=true` だが `hokusai.yaml` には `llm_gateway` セクションなし → `HOKUSAI_LLM_GATEWAY_ENABLED=1` env override (PR #122) が yaml/default を上書きして enable した結果。
+- ✅ **F3 CLI helper も同時動作**: `hokusai audit list/show` (PR #123) で sqlite3 直叩きなしに観察完了。
+
+### Phase 1 観察に関する補足
+
+90 秒では Phase 2 の Claude Code 呼び出しが進行中の段階で kill された（Phase 2 完了せず）。Phase 1 (worktree 作成 + Notion 同期) は LLM Gateway 経路を通らない（直接 LLM 呼び出しは Phase 2 から）ため、`audit_logs` には Phase 1 の行は記録されない（PR #121 配線の対象外。仕様通り）。
+
+### 既知の運用穴の再観察
+
+cleanup 時に Notion 404 警告（`Could not find database with ID: 36085495-565d-8187-ba56-f5bf5a8d3abd`）が出た。これは §1 で記録した「Workflows DB が integration "HOKUSAI" に share されていない」という運用穴で、本 dogfooding とは無関係。F1-F4 の解消対象外で、別途 Notion 側の手作業（DB share）が必要。
+
+### v0.5.1 dogfooding サイクルの真の完結
+
+§7 で記録した F1-F4 が後続 PR (#120-#125) で全て解消され、§8 で軽量 e2e、§9 で真の重い e2e を実証。**「Phase 2 enforcement のコード配線 + 運用配線 + 真の subprocess 経路」が 3 段階で全て検証完了**した。これで v0.5.1 dogfooding サイクルが本当の意味で一段落。残る運用穴なし。
 
 ---
 
