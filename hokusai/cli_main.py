@@ -1277,13 +1277,17 @@ def _handle_llm_gateway_setup(args, config) -> int:
     print(f"allowed_models.default:  {allowed_default}")
     print()
 
-    # 診断ロジック: log_only=false かつ policy 未設定なら no-op になる
-    has_provider_allowlist = (
-        gw.allowed_providers is not None and len(gw.allowed_providers) > 0
-    )
-    has_model_allowlist = (
-        allowed_default is not None and len(allowed_default) > 0
-    )
+    # 診断ロジック: interceptor._evaluate_policy_hits の仕様に従って判定
+    # （PR #125 Copilot Round 1 指摘）:
+    # - None (未指定) → policy 評価 skip = no-op リスク
+    # - [] (明示空 = deny-all 意図) → 全 provider が hit、全 LLM 呼び出し block
+    # - [...] (非空) → 含まれない provider が hit、適切な allowlist
+    # `None` と `[]` を区別せず len() で「未設定」とみなすと、deny-all 意図の
+    # `[]` まで誤って「no-op」と警告してしまうため、必ず is None で判定する。
+    no_provider_policy = gw.allowed_providers is None
+    no_model_policy = allowed_default is None
+    deny_all_provider = gw.allowed_providers == []
+    deny_all_models = allowed_default == []
 
     warnings: list[str] = []
     if not gw.enabled:
@@ -1292,26 +1296,44 @@ def _handle_llm_gateway_setup(args, config) -> int:
               " (PR #122 / F1)")
         print()
 
-    # policy 未設定は「enforce on にしたら no-op になる」リスク。現在の
-    # log_only / enabled 値に関わらず、将来切替時の事故防止のため必ず警告する。
-    no_policy = not has_provider_allowlist and not has_model_allowlist
-    if no_policy:
+    # no-op リスク（両方 None）: 現在の log_only / enabled 値に関わらず、
+    # 将来切替時の事故防止のため必ず警告する。
+    if no_provider_policy and no_model_policy:
         if not gw.log_only and gw.enabled:
             # 現在 enforce on 状態 → 即座の no-op
             warnings.append(
                 "log_only=false（enforcement on）だが allowed_providers / "
-                "allowed_models.default が両方未設定 → policy_hits 常時空で "
-                "事実上 no-op です。設定を追加するまで何も block されません。"
+                "allowed_models.default が両方 None（未指定）→ policy 評価が "
+                "skip され policy_hits 常時空で事実上 no-op です。設定を "
+                "追加するまで何も block されません。"
             )
         else:
             # 現在 log_only=true or disabled → 将来切替時のリスク
             warnings.append(
-                "allowed_providers / allowed_models.default が両方未設定です。"
-                "将来 log_only=false に切替えても policy_hits が常時空で "
-                "enforcement が事実上 no-op になります（policy 未設定 = 全許可 "
-                "扱い）。enforce on にする前に最低限 allowed_providers を "
-                "設定してください。"
+                "allowed_providers / allowed_models.default が両方 None "
+                "（未指定）です。将来 log_only=false に切替えても policy "
+                "評価が skip され enforcement が事実上 no-op になります。"
+                "enforce on にする前に最低限 allowed_providers を設定して "
+                "ください。"
             )
+
+    # deny-all リスク（明示空 list = 全 LLM 呼び出し block）: これは意図的な
+    # 全ブロック設定の可能性もあるが、誤って `[]` を書いてしまった場合に
+    # 全 LLM 呼び出しが block される事故になるため別カテゴリで警告する。
+    if deny_all_provider:
+        warnings.append(
+            "allowed_providers=[] は deny-all 意図として評価されます（全 "
+            "provider が unknown_provider hit）。log_only=false に切替えると "
+            "全 LLM 呼び出しが block されます。意図的なら問題ありませんが、"
+            "誤設定の可能性も考慮してください。"
+        )
+    if deny_all_models:
+        warnings.append(
+            "allowed_models.default=[] は deny-all 意図として評価されます。"
+            "log_only=false に切替えると該当 model 呼び出しが全て block "
+            "されます。意図的なら問題ありませんが、誤設定の可能性も考慮 "
+            "してください。"
+        )
 
     if gw.log_only and gw.enabled:
         # log_only=true は安全（観察モード）。
@@ -1330,13 +1352,13 @@ def _handle_llm_gateway_setup(args, config) -> int:
         print("  log_only: false  # enforcement on")
         print("  audit_log_enabled: true")
         print("  allowed_providers: [\"claude_code\", \"codex\", \"gemini\"]"
-              "  # 許可する LLM provider のみ列挙")
+              "  # 許可する LLM provider のみ列挙（[] は deny-all 扱い）")
         print("  # allowed_models.default: [\"claude-sonnet-4\", ...] も追加可")
         return 1  # 警告ありで exit 1（事故防止のため非ゼロ終了）
 
-    print("✅ 診断: enforcement on に切替えても no-op になる重大なリスクは"
-          "検出されませんでした（allowed_providers / allowed_models.default の"
-          "少なくとも一方が設定済み）。")
+    print("✅ 診断: enforcement on に切替えても no-op / deny-all になる "
+          "リスクは検出されませんでした（allowed_providers / "
+          "allowed_models.default のいずれかが意図された allowlist で設定済み）。")
     return 0
 
 

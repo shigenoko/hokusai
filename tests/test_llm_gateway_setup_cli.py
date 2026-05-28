@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import sys
 from io import StringIO
-from pathlib import Path
 from unittest.mock import patch
 
 from hokusai.cli_main import _build_parser, _handle_llm_gateway_setup
@@ -81,12 +80,23 @@ def test_warns_when_no_policy_and_enforce_on():
     assert "enforcement on" in output
 
 
-def test_warns_when_provider_empty_list():
-    """allowed_providers=[] でも未設定扱い（has_provider_allowlist=False）"""
+def test_warns_when_provider_empty_list_as_deny_all():
+    """allowed_providers=[] は no-op ではなく deny-all として別カテゴリで警告
+    （PR #125 Copilot Round 1 指摘: None と [] を区別、interceptor 仕様に整合）"""
     cfg = _make_config(allowed_providers=[])
     rc, output = _run_setup([], cfg)
     assert rc == 1
-    assert "警告" in output
+    # deny-all 警告が出る（no-op 警告ではない）
+    assert "deny-all" in output
+    assert "全 LLM 呼び出しが block" in output
+
+
+def test_warns_when_models_empty_list_as_deny_all():
+    """allowed_models.default=[] も deny-all として警告"""
+    cfg = _make_config(allowed_models_default=[])
+    rc, output = _run_setup([], cfg)
+    assert rc == 1
+    assert "deny-all" in output
 
 
 # ---------------------------------------------------------------------------
@@ -161,8 +171,10 @@ def test_outputs_current_config_values():
     assert "gemini" in output
 
 
-def test_returns_error_when_config_has_no_llm_gateway_attr(tmp_path):
-    """WorkflowConfig に llm_gateway 属性がない場合 rc=1 + stderr エラー"""
+def test_returns_error_when_llm_gateway_attr_is_none():
+    """WorkflowConfig.llm_gateway が None の場合 rc=1 + stderr エラー
+    （PR #125 Copilot Round 1 指摘: 属性自体は存在するが値が None のケース。
+    `cfg.llm_gateway = None` を明示的にセットしてテスト）"""
     class _Cfg:
         pass
 
