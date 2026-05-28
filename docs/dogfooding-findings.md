@@ -289,7 +289,7 @@ audit_logs の SQLite 列 / details_json 対応関係: テーブル列 `status` 
   - `LLMGatewayBlockedError` が raise された
   - `policy_hits=('unknown_provider',)`, `reason="phase2_policy_block"`
   - audit_logs に `status='block'`（= `details_json.decision='block'`）行が記録される
-  - 例外メッセージは `provider` / `purpose` / `policy_hits` / `reason` のみで prompt 本文を含まない（§14 受け入れ基準どおり）
+  - 例外メッセージは `provider` / `purpose` / `policy_hits` / `reason` のみで prompt 本文を含まない（§5 の PII 防御方針どおり）
 - ✅ Test B (`provider="codex"`, allowlist=`["codex"]`):
   - 例外なし、透過動作
   - audit_logs に `status='log'`（= `details_json.decision='log'`）, `policy_hits=[]` 行が記録される
@@ -379,7 +379,7 @@ PR #122 (F1: env override) + PR #123 (F3: audit CLI) + PR #120 / #121 (F4: workf
   - `config_snapshot.enabled=true` → **F1 の env override が機能**
   - `context.workflow_id="wf-reobservation-001"` / `context.phase=2` → **F4 の client→helper 配線が機能**
   - SQLite 行として CLI から見える → **F3 の CLI helper が機能**
-  - `prompt_hash` 16 桁 hex のみ保存（本文なし）→ §14 受け入れ基準（PII 防御）も維持
+  - `prompt_hash` 16 桁 hex のみ保存（本文なし）→ §5 の PII 防御方針も維持
 
 ### 評価 + 次マイルストーン
 
