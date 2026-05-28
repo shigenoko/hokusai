@@ -1268,24 +1268,35 @@ def _handle_llm_gateway_setup(args, config) -> int:
 
     # 現状を表示
     print("=== LLM Gateway 現設定 ===")
-    print(f"enabled:                 {gw.enabled}")
-    print(f"log_only:                {gw.log_only}")
-    print(f"audit_log_enabled:       {gw.audit_log_enabled}")
-    print(f"dry_run:                 {gw.dry_run}")
-    print(f"allowed_providers:       {gw.allowed_providers}")
+    print(f"enabled:                            {gw.enabled}")
+    print(f"log_only:                           {gw.log_only}")
+    print(f"audit_log_enabled:                  {gw.audit_log_enabled}")
+    print(f"dry_run:                            {gw.dry_run}")
+    print(f"allowed_providers:                  {gw.allowed_providers}")
     allowed_default = gw.allowed_models.default if gw.allowed_models else None
-    print(f"allowed_models.default:  {allowed_default}")
+    high_cost_gate = (
+        gw.allowed_models.high_cost_requires_gate if gw.allowed_models else []
+    )
+    print(f"allowed_models.default:             {allowed_default}")
+    print(f"allowed_models.high_cost_requires_gate: {high_cost_gate}")
     print()
 
     # 診断ロジック: interceptor._evaluate_policy_hits の仕様に従って判定
-    # （PR #125 Copilot Round 1 指摘）:
+    # （PR #125 Copilot Round 1/2 指摘）:
     # - None (未指定) → policy 評価 skip = no-op リスク
     # - [] (明示空 = deny-all 意図) → 全 provider が hit、全 LLM 呼び出し block
     # - [...] (非空) → 含まれない provider が hit、適切な allowlist
     # `None` と `[]` を区別せず len() で「未設定」とみなすと、deny-all 意図の
     # `[]` まで誤って「no-op」と警告してしまうため、必ず is None で判定する。
+    #
+    # policy_hits 生成経路は 3 つあり、いずれかが設定されていれば no-op に
+    # ならない（Round 2 指摘）:
+    #   1. allowed_providers != None → unknown_provider 評価
+    #   2. allowed_models.default != None → unknown_model 評価
+    #   3. allowed_models.high_cost_requires_gate が非空 → high_cost_model 評価
     no_provider_policy = gw.allowed_providers is None
     no_model_policy = allowed_default is None
+    no_high_cost_gate = not high_cost_gate  # 空 list / None / falsy
     deny_all_provider = gw.allowed_providers == []
     deny_all_models = allowed_default == []
 
@@ -1296,25 +1307,29 @@ def _handle_llm_gateway_setup(args, config) -> int:
               " (PR #122 / F1)")
         print()
 
-    # no-op リスク（両方 None）: 現在の log_only / enabled 値に関わらず、
-    # 将来切替時の事故防止のため必ず警告する。
-    if no_provider_policy and no_model_policy:
+    # no-op リスク（policy_hits 生成経路 3 つ全て無効）: 現在の log_only /
+    # enabled 値に関わらず、将来切替時の事故防止のため必ず警告する。
+    # 3 経路: allowed_providers / allowed_models.default / high_cost_requires_gate
+    # （Round 2 指摘: high_cost_requires_gate 非空も policy_hits 生成可能）
+    if no_provider_policy and no_model_policy and no_high_cost_gate:
         if not gw.log_only and gw.enabled:
             # 現在 enforce on 状態 → 即座の no-op
             warnings.append(
                 "log_only=false（enforcement on）だが allowed_providers / "
-                "allowed_models.default が両方 None（未指定）→ policy 評価が "
-                "skip され policy_hits 常時空で事実上 no-op です。設定を "
+                "allowed_models.default が両方 None かつ "
+                "high_cost_requires_gate も空 → policy 評価経路 3 つ全て "
+                "無効で policy_hits 常時空、事実上 no-op です。設定を "
                 "追加するまで何も block されません。"
             )
         else:
             # 現在 log_only=true or disabled → 将来切替時のリスク
             warnings.append(
-                "allowed_providers / allowed_models.default が両方 None "
-                "（未指定）です。将来 log_only=false に切替えても policy "
-                "評価が skip され enforcement が事実上 no-op になります。"
-                "enforce on にする前に最低限 allowed_providers を設定して "
-                "ください。"
+                "allowed_providers / allowed_models.default が両方 None で "
+                "high_cost_requires_gate も空です。将来 log_only=false に "
+                "切替えても policy 評価経路 3 つ全て無効で enforcement が "
+                "事実上 no-op になります。enforce on にする前に最低限 "
+                "allowed_providers / allowed_models.default / "
+                "high_cost_requires_gate の少なくとも 1 つを設定してください。"
             )
 
     # deny-all リスク（明示空 list = 全 LLM 呼び出し block）: これは意図的な

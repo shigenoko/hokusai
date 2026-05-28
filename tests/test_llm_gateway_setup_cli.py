@@ -24,6 +24,7 @@ def _make_config(
     log_only: bool = True,
     allowed_providers: list[str] | None = None,
     allowed_models_default: list[str] | None = None,
+    high_cost_requires_gate: list[str] | None = None,
 ):
     """テスト用 minimal WorkflowConfig stub"""
     class _Cfg:
@@ -36,7 +37,7 @@ def _make_config(
         allowed_providers=allowed_providers,
         allowed_models=LLMGatewayAllowedModelsConfig(
             default=allowed_models_default,
-            high_cost_requires_gate=[],
+            high_cost_requires_gate=high_cost_requires_gate or [],
         ),
     )
     return cfg
@@ -125,6 +126,39 @@ def test_no_warning_when_models_allowlist_set():
     rc, output = _run_setup([], cfg)
     assert rc == 0
     assert "警告" not in output
+
+
+def test_no_warning_when_high_cost_gate_set():
+    """allowed_models.high_cost_requires_gate が非空なら警告なし（PR #125
+    Copilot Round 2 指摘: high_cost_requires_gate も policy_hits 生成経路の
+    1 つで、設定済みなら no-op にならない）"""
+    cfg = _make_config(
+        enabled=False, log_only=True,
+        allowed_providers=None,
+        allowed_models_default=None,
+        high_cost_requires_gate=["gpt-5", "claude-opus-4"],
+    )
+    rc, output = _run_setup([], cfg)
+    assert rc == 0
+    assert "⚠️  警告:" not in output  # 警告ブロックが出ていない
+    # 現設定表示には反映される
+    assert "high_cost_requires_gate" in output
+    assert "gpt-5" in output
+
+
+def test_warns_when_all_three_policy_paths_empty():
+    """allowed_providers=None かつ allowed_models.default=None かつ
+    high_cost_requires_gate=[] のときのみ no-op 警告（3 経路全て無効）"""
+    cfg = _make_config(
+        enabled=False, log_only=True,
+        allowed_providers=None,
+        allowed_models_default=None,
+        high_cost_requires_gate=[],
+    )
+    rc, output = _run_setup([], cfg)
+    assert rc == 1
+    assert "no-op" in output
+    assert "high_cost_requires_gate" in output  # 3 経路言及
 
 
 # ---------------------------------------------------------------------------
