@@ -499,6 +499,67 @@ def _build_parser():
         help="出力形式（既定 markdown）",
     )
 
+    # audit コマンド: SQLite `audit_logs` を CLI から覗く（F3 / PR #123）
+    audit_parser = subparsers.add_parser(
+        "audit",
+        help="audit_logs を一覧・詳細表示する（LLM Gateway 観察用）",
+        parents=[shared_options],
+    )
+    audit_subparsers = audit_parser.add_subparsers(
+        dest="audit_subcommand",
+        help="audit サブコマンド",
+    )
+
+    audit_list_parser = audit_subparsers.add_parser(
+        "list",
+        help="audit_logs を最新順に一覧表示（条件で絞り込み可）",
+        parents=[shared_options],
+    )
+    audit_list_parser.add_argument(
+        "--workflow-id",
+        default=None,
+        help="workflow_id で絞り込む（例 wf-abc12345）",
+    )
+    audit_list_parser.add_argument(
+        "--phase",
+        type=int,
+        default=None,
+        help="phase 番号で絞り込む（例 2）",
+    )
+    audit_list_parser.add_argument(
+        "--action",
+        default=None,
+        help="action で絞り込む（例 llm_gateway_decision）",
+    )
+    audit_list_parser.add_argument(
+        "--status",
+        default=None,
+        help="status で絞り込む（例 block / log / skipped）",
+    )
+    audit_list_parser.add_argument(
+        "--limit",
+        type=int,
+        default=20,
+        help="取得上限（既定 20、最新優先）",
+    )
+    audit_list_parser.add_argument(
+        "--output",
+        choices=("table", "json"),
+        default="table",
+        help="出力形式（既定 table）",
+    )
+
+    audit_show_parser = audit_subparsers.add_parser(
+        "show",
+        help="audit_logs 単一行を id 指定で整形表示（details_json を JSON pretty）",
+        parents=[shared_options],
+    )
+    audit_show_parser.add_argument(
+        "audit_id",
+        type=int,
+        help="audit_logs.id（`hokusai audit list` の id 列）",
+    )
+
     return parser, profile_parser, connect_parser
 
 
@@ -807,6 +868,10 @@ def main():
     # prime コマンド: active Project Memory を Agent prompt 用に出力
     if args.command == "prime":
         sys.exit(_handle_prime(args, config))
+
+    # audit コマンド: audit_logs を CLI から覗く（F3 / PR #123）
+    if args.command == "audit":
+        sys.exit(_handle_audit(args, config))
 
     # 環境設定チェック（start/continueコマンドの場合）
     if args.command in ("start", "continue"):
@@ -1165,6 +1230,75 @@ def _handle_dashboard(args, config) -> int:
         else:
             print(f"エラー: port {port} の確認中に予期しない OS エラー: {e}")
         return 1
+
+
+def _handle_audit(args, config) -> int:
+    """`hokusai audit` のハンドラ（PR #123 / F3）。
+
+    dogfooding-findings.md §7 F3「audit_logs を CLI から覗く経路が無い」を
+    埋めるサブコマンド。`audit list` で一覧、`audit show <id>` で詳細を表示。
+    profile から workflow.db のパスを解決し、`SQLiteStore` の helper 経由で
+    audit_logs を読む（書き込みはしない）。
+    """
+    import json as _json
+
+    from .persistence.sqlite_store import SQLiteStore
+
+    sub = getattr(args, "audit_subcommand", None)
+    if sub is None:
+        print("usage: hokusai audit {list,show} ...", file=sys.stderr)
+        return 1
+
+    database_path = config.database_path
+    store = SQLiteStore(str(database_path))
+
+    if sub == "list":
+        if args.limit < 1:
+            # SQLite は negative LIMIT を no limit と解釈するため、CLI で
+            # 早期 reject して誤って audit_logs 全件を返さないようにする
+            # （PR #123 Copilot Round 1 指摘）。
+            print(
+                f"エラー: --limit は 1 以上を指定してください（指定値={args.limit}）",
+                file=sys.stderr,
+            )
+            return 1
+        rows = store.list_audit_logs(
+            workflow_id=args.workflow_id,
+            phase=args.phase,
+            action=args.action,
+            status=args.status,
+            limit=args.limit,
+        )
+        if args.output == "json":
+            print(_json.dumps(rows, indent=2, ensure_ascii=False, default=str))
+            return 0
+        # table 出力（最低限の固定幅）
+        if not rows:
+            print("(audit_logs に該当行はありません)")
+            return 0
+        print(f"{'id':>6}  {'created_at':<19}  {'workflow_id':<14}  "
+              f"{'phase':>5}  {'status':<8}  action")
+        print("-" * 80)
+        for r in rows:
+            created = (r["created_at"] or "")[:19]
+            wf = (r["workflow_id"] or "")[:14]
+            status = (r["status"] or "")[:8]
+            print(f"{r['id']:>6}  {created:<19}  {wf:<14}  "
+                  f"{(r['phase'] if r['phase'] is not None else 0):>5}  "
+                  f"{status:<8}  {r['action']}")
+        return 0
+
+    if sub == "show":
+        row = store.get_audit_log(args.audit_id)
+        if row is None:
+            print(f"audit_logs に id={args.audit_id} の行はありません",
+                  file=sys.stderr)
+            return 1
+        print(_json.dumps(row, indent=2, ensure_ascii=False, default=str))
+        return 0
+
+    print(f"不明な audit サブコマンド: {sub}", file=sys.stderr)
+    return 1
 
 
 def _handle_prime(args, config) -> int:
