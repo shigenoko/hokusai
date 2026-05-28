@@ -386,7 +386,7 @@ PR #122 (F1: env override) + PR #123 (F3: audit CLI) + PR #120 / #121 (F4: workf
 - **§7 で「コード上は完成、運用は未完成」と書いた状態が、3 PR で「運用上も実用 OK」まで到達**した。専用 enforce profile を作らずとも、env override 1 行で観察開始 → CLI でトレース可能。
 - **残る運用穴**は §7 「残る運用穴」サブセクションで列挙した F2 (policy wizard) のみ。これは「policy 未設定で `log_only=false` にすると enforcement が事実上 no-op」という事故 1 回が踏まれてから対応で十分な優先度。
 - **次マイルストーン**は「実 `hokusai start` で 1 workflow 完走させ、各 phase の `audit_logs` 行が PR #121 の配線通り `workflow_id`/`phase` で埋まることを観察」する **重い dogfooding**。本 §8 で軽量検証は完了しているため、優先度は中。
-- ↑ **§9 で着手**: 実 `hokusai start` を 90 秒だけ起動して Phase 2 が真の subprocess (Claude Code CLI 実起動) で動く状態を観察し、`audit_logs` に `workflow_id`/`phase` が記録されることを実証した。
+- ↑ **§9 で着手**: 実 `hokusai start` を 90 秒だけ起動して、**実 phase node (`phase2_research_node`) entry point から** `audit_logs` に `workflow_id`/`phase` が記録されることを実証した（subprocess 起動「前」までの配線通過を厳密に検証、CLI 実起動は間接的証拠のみ）。
 
 ---
 
