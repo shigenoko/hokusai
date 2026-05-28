@@ -196,6 +196,7 @@ def render_prime_markdown(
     diagnostics: list[str] | None = None,
     query: str | None = None,
     query_results: list[dict[str, Any]] | None = None,
+    prime_index_error: str | None = None,
 ) -> str:
     """active Memory + workgraph context のリストを Agent prompt 向け
     Markdown へ整形する（Workgraph 完成 / Issue #54）。
@@ -258,7 +259,9 @@ def render_prime_markdown(
         # Prime v2 MVP-2: active context が空でも `--query` 指定時は
         # 検索結果セクションを出力する（過去 workflow のみヒットするケース）
         if query is not None:
-            lines.extend(_render_query_section(query, query_results))
+            lines.extend(
+                _render_query_section(query, query_results, prime_index_error)
+            )
             return "\n".join(lines).rstrip() + "\n"
         return "\n".join(lines)
 
@@ -316,26 +319,42 @@ def render_prime_markdown(
 
     # Prime v2 MVP-2: query 検索結果（`--query "..."` 指定時のみ）
     if query is not None:
-        lines.extend(_render_query_section(query, query_results))
+        lines.extend(
+            _render_query_section(query, query_results, prime_index_error)
+        )
 
     return "\n".join(lines).rstrip() + "\n"
 
 
 def _render_query_section(
-    query: str, query_results: list[dict[str, Any]] | None
+    query: str,
+    query_results: list[dict[str, Any]] | None,
+    prime_index_error: str | None = None,
 ) -> list[str]:
     """`--query` 指定時の検索結果セクションを生成する（共通 helper）。
 
     PR #135 Copilot Round 2 #2 指摘: `query_results=None` (backfill/search の
     try block で例外 catch) と `[]` (検索成功で 0 件) は別の意味。`None` なら
-    検索インデックス自体が利用できなかった旨を明示し、diagnostics を参照
-    させる（stdout redirect でも気付ける経路）。
+    検索インデックス自体が利用できなかった旨を明示する。
+
+    PR #135 Copilot Round 3 #2 指摘: active context が non-empty の場合
+    `render_prime_markdown` は `diagnostics` を抑制するため、"diagnostics 参照"
+    と書いても Markdown 出力に diagnostics は無い。失敗詳細を query セクション
+    内に直接 embed することで、stdout redirect 時にも失敗が見えるようにする。
     """
     out: list[str] = []
     out.append(f"## 検索結果（query: `{query}`）")
     out.append("")
     if query_results is None:
-        out.append("_検索インデックスが利用不可のため検索できませんでした (diagnostics 参照)_")
+        if prime_index_error:
+            out.append(
+                f"_検索インデックスが利用不可のため検索できませんでした: "
+                f"{prime_index_error}_"
+            )
+        else:
+            out.append(
+                "_検索インデックスが利用不可のため検索できませんでした_"
+            )
         out.append("")
     elif query_results:
         for r in query_results:

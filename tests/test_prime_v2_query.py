@@ -583,6 +583,111 @@ def test_handle_prime_diagnostic_row_on_prime_index_error(
     assert "prime_index backfill / search で失敗" in err
 
 
+def test_handle_prime_partial_fetch_preserves_other_source_types(
+    tmp_path, monkeypatch
+):
+    """部分 fetch (Project Memory のみ成功 / Workflows DB ID 未設定で
+    work_item/review_issue/gate=None) でも、過去 backfill された他 source_type
+    の行は保護される (PR #135 Copilot Round 3 #1 指摘)。
+    """
+    cfg, store = _setup_prime_env(
+        tmp_path, monkeypatch,
+        memories_factory=lambda: [
+            _memory_page("page-1", "new memory", summary="fresh body")
+        ],
+    )
+    # 過去 backfill された review_issue / work_item 行を直接入れる
+    # (Workflows DB ID 未設定で fetch されないが、過去の backfill 結果として保持)
+    store.upsert_prime_index(
+        workflow_id="wf-1", source_type="review_issue", source_id="ri-old",
+        title="old issue", body="historical issue",
+    )
+    store.upsert_prime_index(
+        workflow_id="wf-1", source_type="work_item", source_id="wi-old",
+        title="old work", body="historical work",
+    )
+
+    # Workflows DB ID env を意図的に削除 → work_item/review_issue/gate は fetch されない
+    monkeypatch.delenv("TEST_WORKFLOWS_DB", raising=False)
+    rc, _, _ = _run_handle_prime(cfg)
+    assert rc == 0
+
+    # memory は新しい entry に置き換わっている
+    assert len(store.search_prime_index('"fresh body"')) == 1
+    # review_issue / work_item は fetch されなかったので過去 backfill が保護される
+    assert len(store.search_prime_index('"old issue"')) == 1
+    assert len(store.search_prime_index('"old work"')) == 1
+
+
+def test_clear_prime_index_source_types_filter(tmp_path):
+    """SQLiteStore.clear_prime_index_for_workflow に source_types を渡すと、
+    指定 source_type のみ削除される（その他は保護される）。"""
+    store = SQLiteStore(tmp_path / "wf.db")
+    store.upsert_prime_index(
+        workflow_id="wf-1", source_type="memory", source_id="m-1",
+        title="t", body="memory body",
+    )
+    store.upsert_prime_index(
+        workflow_id="wf-1", source_type="review_issue", source_id="ri-1",
+        title="t", body="review body",
+    )
+    store.upsert_prime_index(
+        workflow_id="wf-1", source_type="work_item", source_id="wi-1",
+        title="t", body="work body",
+    )
+
+    # memory と review_issue だけ削除
+    deleted = store.clear_prime_index_for_workflow(
+        "wf-1", source_types=["memory", "review_issue"]
+    )
+    assert deleted == 2
+    # work_item は残る
+    assert len(store.search_prime_index('"work body"')) == 1
+    assert store.search_prime_index('"memory body"') == []
+    assert store.search_prime_index('"review body"') == []
+
+
+def test_clear_prime_index_empty_source_types_is_noop(tmp_path):
+    """source_types=[] は no-op として 0 を返す"""
+    store = SQLiteStore(tmp_path / "wf.db")
+    store.upsert_prime_index(
+        workflow_id="wf-1", source_type="memory", source_id="m-1",
+        title="t", body="b",
+    )
+    deleted = store.clear_prime_index_for_workflow("wf-1", source_types=[])
+    assert deleted == 0
+    assert len(store.search_prime_index('"b"')) == 1
+
+
+def test_handle_prime_query_error_message_embedded_in_section(
+    tmp_path, monkeypatch
+):
+    """active context が non-empty で query 失敗時、prime_index_error を query
+    セクション内に直接 embed する (PR #135 Copilot Round 3 #2 指摘)。
+    diagnostics は has_any=True で抑制されるので diagnostics 参照では不十分。
+    """
+    cfg, _ = _setup_prime_env(
+        tmp_path, monkeypatch,
+        memories_factory=lambda: [
+            _memory_page("page-1", "active rule", summary="active body")
+        ],
+    )
+
+    # search_prime_index を強制例外化 (clear/upsert は成功する → has_any=True パス)
+    def _boom_search(self, *a, **kw):
+        raise RuntimeError("simulated search outage")
+    monkeypatch.setattr(SQLiteStore, "search_prime_index", _boom_search)
+
+    rc, body, _ = _run_handle_prime(cfg, query="anything")
+    assert rc == 0
+    # active context (memory) は表示される (has_any=True パス)
+    assert "active rule" in body
+    # query セクション内に error 詳細が embed される
+    assert "## 検索結果（query: `anything`）" in body
+    assert "検索インデックスが利用不可" in body
+    assert "simulated search outage" in body
+
+
 def test_handle_prime_query_section_distinguishes_none_vs_empty(
     tmp_path, monkeypatch
 ):

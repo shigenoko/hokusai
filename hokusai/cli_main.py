@@ -1779,12 +1779,22 @@ def _handle_prime(args, config) -> int:
     # `hokusai prime ... > prime.md` 経路では見えないため、エラー文字列を
     # diagnostics 経路にも渡して stdout (Markdown 出力) で確認できるようにする。
     prime_index_error: str | None = None
-    # PR #135 Copilot Round 2 #1 指摘: Notion fetch を「試行したか」は
-    # `notion_fetch_error is None` だけでは判定できない（api_token 未設定 /
-    # DB ID 未設定で fetch を skip したケースも `None` のため）。fetch を
-    # 実際に試行したかどうかを別フラグで track して、未試行のときは index
-    # を clear しない（過去の backfill 行を保護する）。
-    notion_fetch_attempted = bool(api_token and db_id)
+    # PR #135 Copilot Round 2 #1 / Round 3 #1 指摘: Notion fetch を実際に
+    # 試行したかを source_type 毎に track する。memory は api_token + db_id
+    # で試行判定、その他は fetch 結果が None でないことで試行判定（既存
+    # コードの設計と整合: None=未試行、list=試行）。「試行した source_type
+    # のみ」clear することで、部分 fetch ケース（例: Workflows DB ID 未設定
+    # で work_item/review_issue/gate=None だが Project Memory は成功）でも
+    # 試行していない source_type の過去 backfill 行を保護する。
+    fetched_source_types: list[str] = []
+    if api_token and db_id:
+        fetched_source_types.append("memory")
+    if work_items is not None:
+        fetched_source_types.append("work_item")
+    if review_issues is not None:
+        fetched_source_types.append("review_issue")
+    if gates is not None:
+        fetched_source_types.append("gate")
     try:
         index_entries = extract_prime_index_entries(
             memories=memories,
@@ -1792,14 +1802,15 @@ def _handle_prime(args, config) -> int:
             review_issues=review_issues,
             gates=gates,
         )
-        # PR #135 Copilot Round 1 #1 + Round 2 #1 指摘: Notion fetch を
-        # 「試行して」かつ「成功した」場合のみ index を clear する。
-        # - 試行 + 成功 (0 件含む): stale 行を消して空状態を反映
-        # - 試行 + 失敗: stale 行を残す（障害復旧後の次回で更新）
-        # - 未試行 (token / DB ID 未設定): stale 行を残す（Notion 設定が
-        #   一時的に外れただけかもしれず、過去の backfill 結果は依然有効）
-        if notion_fetch_attempted and notion_fetch_error is None:
-            store.clear_prime_index_for_workflow(workflow_id)
+        # 試行 + 成功 (0 件含む) の source_type のみ clear → upsert。
+        # - 試行 + 成功: stale 行を消して現在の active 状態を反映
+        # - 試行 + 失敗 (notion_fetch_error != None): stale 行を残す
+        # - 未試行 (該当 source_type が fetched_source_types に無い):
+        #   stale 行を残す（過去の backfill が依然有効）
+        if fetched_source_types and notion_fetch_error is None:
+            store.clear_prime_index_for_workflow(
+                workflow_id, source_types=fetched_source_types
+            )
             for entry in index_entries:
                 store.upsert_prime_index(
                     workflow_id=workflow_id,
@@ -1878,6 +1889,7 @@ def _handle_prime(args, config) -> int:
                 diagnostics=diagnostics,
                 query=query,
                 query_results=query_results,
+                prime_index_error=prime_index_error,
             )
         )
     return 0

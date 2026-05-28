@@ -1575,23 +1575,51 @@ class SQLiteStore:
             cols = [d[0] for d in cursor.description]
             return [dict(zip(cols, row, strict=True)) for row in cursor.fetchall()]
 
-    def clear_prime_index_for_workflow(self, workflow_id: str) -> int:
-        """指定 workflow_id の `prime_index` と `prime_index_meta` を全削除。
+    def clear_prime_index_for_workflow(
+        self,
+        workflow_id: str,
+        source_types: list[str] | None = None,
+    ) -> int:
+        """指定 workflow_id の `prime_index` と `prime_index_meta` を削除。
 
         backfill 前の冪等化（同一 workflow を再 index する際の重複防止）
         に使う。返り値は `prime_index_meta` 側の削除行数（FTS5 virtual
         table の rowcount は実装依存で意味的に薄い）。
+
+        PR #135 Copilot Round 3 #1 指摘: 部分的に fetch しただけで全
+        source_type を clear すると、設定欠落で None になった work_item /
+        review_issue / gate 等の過去 backfill 行を巻き込んで削除する。
+        `source_types` を指定すると、その source_type のみ削除する経路を
+        提供する（省略時は従来通り全 source_type を削除＝後方互換）。
         """
         with self._connect() as conn:
-            conn.execute(
-                "DELETE FROM prime_index WHERE workflow_id = ?",
-                (workflow_id,),
-            )
-            cursor = conn.execute(
-                "DELETE FROM prime_index_meta WHERE workflow_id = ?",
-                (workflow_id,),
-            )
-            deleted = cursor.rowcount
+            if source_types is None:
+                conn.execute(
+                    "DELETE FROM prime_index WHERE workflow_id = ?",
+                    (workflow_id,),
+                )
+                cursor = conn.execute(
+                    "DELETE FROM prime_index_meta WHERE workflow_id = ?",
+                    (workflow_id,),
+                )
+                deleted = cursor.rowcount
+            else:
+                if not source_types:
+                    # 空リストは「削除対象 0」とみなして no-op
+                    return 0
+                placeholders = ",".join("?" * len(source_types))
+                params = (workflow_id, *source_types)
+                conn.execute(
+                    f"DELETE FROM prime_index "
+                    f"WHERE workflow_id = ? AND source_type IN ({placeholders})",
+                    params,
+                )
+                cursor = conn.execute(
+                    f"DELETE FROM prime_index_meta "
+                    f"WHERE workflow_id = ? AND source_type IN ({placeholders})",
+                    params,
+                )
+                deleted = cursor.rowcount
             conn.commit()
             return deleted
 
