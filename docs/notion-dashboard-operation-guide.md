@@ -111,6 +111,62 @@ hokusai notion-setup \
 
 冪等性の適用範囲は scaffold ページのみで、**DB 作成（Workflows / Pull Requests / Review Issues）は冪等ではない**: `notion-setup` を再実行すると新しい DB が毎回作成される。DB 作成をやり直したい場合は Notion 側で旧 DB を archive/削除してから再実行すること。
 
+#### 2.2.1. 生成された DB を integration に share（重要 / dogfooding-findings §1 で記録した運用穴）
+
+`notion-setup` で **親ページに integration を接続済み**でも、**作成された子 DB は integration に自動継承されない**。Notion の権限モデルでは「親ページに integration を share しても子 DB は別途 share が必要」になっており、これを忘れると後段の `hokusai start` / `cleanup` / `pr-status` 等で **`NotionAPIError: 404 Could not find database with ID: ...`** が発生する。
+
+**実例** (`docs/dogfooding-findings.md` §1): Workflows DB ID が env に設定済みなのに同期 outbox が 4 件全滅し、`last_error` が全て 404 になった。
+
+##### 手順（必須、各 DB について 1 回ずつ実施）
+
+1. Notion で生成された各 DB ページを開く（`Workflows`, `Pull Requests`, `Review Issues` の 3 つ。v0.4.3〜 で scaffold したなら `Documentation` 配下のサブページは share 不要、DB 本体だけで十分）
+2. 各 DB ページ右上の **⋯（More）** メニューから **Add connections** をクリック
+3. HOKUSAI 用 integration（2.1 で作成したもの）を検索して選択 → **Confirm**
+4. これを **3 DB すべて** で繰り返す（`Workflows` / `Pull Requests` / `Review Issues`）
+
+> **v0.4.3〜 で `--scaffold` を使った場合**: scaffold で作られる Documentation 配下のサブページ（`議論` / `運用ガイド` / `要件定義`）は **HOKUSAI 自体は API アクセスしない**（人間が読み書きするドキュメント置き場のため）。share は **DB 3 つだけで十分**。
+
+##### share 漏れの自己診断
+
+env 変数を設定し終わったら share 健全性を確認する。**専用 CLI コマンドは無いが**、`hokusai start` を新規 workflow で起動すると **冒頭で自動チェック**が走り、404 件数を warning として表示する（v0.5.0〜、Issue M0.2 / PR #83 で導入された `NotionSyncDispatcher.check_db_share_health()`）。
+
+```bash
+# 新規 workflow を立てると share health check が冒頭で自動実行される
+hokusai --profile <name> start <task_url>
+# → ⚠️  Notion DB share check で N 件の問題が見つかりました: ... が出れば share 漏れ
+```
+
+> **`HOKUSAI_ACTIVE_PROFILE` との違い**: `HOKUSAI_ACTIVE_PROFILE` 環境変数は内部的に SKIP_NOTION の profile-aware lookup 用（`hokusai/utils/skip_notion.py`）で、`hokusai start` が読み込む config の選択には使えません。実行する profile を選択するには CLI フラグ `--profile <name>` を使うこと（`hokusai --profile a start ...` または `hokusai start --profile a ...`）。
+
+明示的に手動チェックしたい場合（実 workflow を立てたくない場合）は Python から直接呼べる:
+
+```python
+from hokusai.config.manager import create_config_from_env_and_file
+from hokusai.integrations.notion_dashboard.dispatcher import NotionSyncDispatcher
+from hokusai.persistence.sqlite_store import SQLiteStore
+
+# profile を明示してロードする（get_config() は global singleton で
+# cwd/home の claude-workflow.yaml or default_profile に依存するため
+# multi-profile 環境では意図した profile が選ばれない可能性がある）
+cfg = create_config_from_env_and_file(profile_name="<name>")
+store = SQLiteStore(cfg.database_path)
+dispatcher = NotionSyncDispatcher(store, cfg.notion_dashboard)
+results = dispatcher.check_db_share_health()
+for env, (ok, msg) in results.items():
+    status = "✅" if ok else "❌"
+    print(f"{status} {env}: {msg if msg else 'OK'}")
+```
+
+健全な場合は全 DB に `✅` が並ぶ。404 が出るなら share 漏れ（または env 変数の DB ID 誤り）。
+
+##### トラブルシューティング
+
+| 症状 | 原因 | 対処 |
+|---|---|---|
+| `NotionAPIError: 404 Could not find database with ID: XXX` | 該当 DB が integration に share されていない | 上記手順 1-4 を該当 DB に対して実施 |
+| `notion_sync_outbox` に同じ `last_error: 404` の行が大量に残る | 同上、複数 DB で share 漏れ | 3 DB すべて share 後、Operations Console (`hokusai dashboard`) の Notion 同期パネルから「同期再送」ボタン (`POST /api/notion-dashboard/retry-pending`) を押して pending 行を drain する。`hokusai status` は件数/エラー**表示のみ**で drain しないため要注意 |
+| `Could not find page` (DB ではなくページ) | scaffold ページ親に integration が share されていない | 親ページに対しても 2.2 手順 2 の **Add connections** を実施 |
+
 #### 手動で作成する場合
 
 以下を Notion ワークスペース内に作成し、HOKUSAI インテグレーションを「接続」する。
