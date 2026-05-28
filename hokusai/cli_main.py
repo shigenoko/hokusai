@@ -562,7 +562,9 @@ def _build_parser():
 
     # llm-gateway-setup コマンド: 現 LLM Gateway 設定を診断 + 推奨設定提示
     # （F2 / PR #125）。yaml 直接編集はせず stdout に推奨内容を出すだけ
-    # （user が ~/.hokusai/configs/<profile>.yaml を自分で開いて貼り付ける想定）。
+    # （user が現 profile の config YAML を自分で開いて貼り付ける想定。
+    # 実パスは profile registry の `config:` で指定された任意絶対パスで、
+    # `hokusai profile show <name>` で確認可能）。
     subparsers.add_parser(
         "llm-gateway-setup",
         help="現 profile の LLM Gateway 設定を診断し、enforcement on 前に必要な"
@@ -1255,10 +1257,11 @@ def _handle_llm_gateway_setup(args, config) -> int:
     という事故を踏む前に、現 profile の LLM Gateway 設定を診断して警告する。
 
     安全のため yaml への自動書き込みはせず、stdout に診断結果と推奨設定を
-    出すだけにする（user が自分で `~/.hokusai/configs/<profile>.yaml` を
-    開いて貼り付ける想定）。`hokusai notion-setup` と違って LLM Gateway
-    の policy は値次第で本番影響が出る（block / no-op 切替）ため、user の
-    明示的編集を要求する設計が安全。
+    出すだけにする（user が自分で現 profile の config YAML を開いて貼り付ける
+    想定。実パスは profile registry の `config:` で指定された任意絶対パス、
+    `hokusai profile show <name>` で確認可能）。`hokusai notion-setup` と
+    違って LLM Gateway の policy は値次第で本番影響が出る（block / no-op
+    切替）ため、user の明示的編集を要求する設計が安全。
     """
     gw = getattr(config, "llm_gateway", None)
     if gw is None:
