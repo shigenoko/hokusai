@@ -664,6 +664,97 @@ def test_handle_prime_type_filter_preserves_other_memory_types(
     # これは設計上の trade-off（次回 --type なしで全 memory が refresh される）。
 
 
+def test_render_markdown_v1_compat_without_gaps():
+    """`--include-gaps` 未指定 (gaps=None) なら gap セクションは現れない"""
+    out = render_prime_markdown(
+        workflow_id="wf-1", profile=None, current_phase=None,
+        memories=[],
+    )
+    assert "gap analysis" not in out
+    assert "未確定 / 不足情報" not in out
+
+
+def test_render_markdown_with_empty_gaps_shows_no_gap_message():
+    out = render_prime_markdown(
+        workflow_id="wf-1", profile=None, current_phase=None,
+        memories=[], gaps=[],
+    )
+    assert "## 未確定 / 不足情報 (gap analysis)" in out
+    assert "_検出された gap はありません_" in out
+
+
+def test_render_markdown_with_gap_entries():
+    out = render_prime_markdown(
+        workflow_id="wf-1", profile=None, current_phase=None,
+        memories=[],
+        gaps=[
+            {"kind": "audit_log_silence", "phase": None,
+             "detail": "LLM Gateway enabled but audit empty"},
+            {"kind": "notion_outbox_pending", "phase": 4,
+             "detail": "3 件 pending"},
+        ],
+    )
+    assert "### `audit_log_silence`" in out
+    assert "> LLM Gateway enabled but audit empty" in out
+    assert "### `notion_outbox_pending`" in out
+    assert "**Phase:** `phase4`" in out
+
+
+def test_render_json_v1_compat_gaps_null_when_unspecified():
+    import json as _json
+    payload = _json.loads(render_prime_json(
+        workflow_id="wf-1", profile=None, current_phase=None,
+        memories=[],
+    ))
+    assert payload["gaps"] is None
+
+
+def test_render_json_gaps_present():
+    import json as _json
+    payload = _json.loads(render_prime_json(
+        workflow_id="wf-1", profile=None, current_phase=None,
+        memories=[],
+        gaps=[{"kind": "x", "phase": None, "detail": "y"}],
+    ))
+    assert payload["gaps"] == [{"kind": "x", "phase": None, "detail": "y"}]
+
+
+def test_handle_prime_include_gaps_e2e(tmp_path, monkeypatch):
+    """--include-gaps で gap section が Markdown / JSON 両方に出る"""
+    cfg, store = _setup_prime_env(tmp_path, monkeypatch)
+    # outbox に 1 件投入 → notion_outbox_pending gap
+    store.enqueue_notion_sync(
+        idempotency_key="k1", workflow_id="wf-1",
+        event_type="workflow_started", payload={},
+    )
+    rc, body, _ = _run_handle_prime(cfg, include_gaps=True)
+    assert rc == 0
+    assert "## 未確定 / 不足情報 (gap analysis)" in body
+    assert "### `notion_outbox_pending`" in body
+
+    # JSON でも gaps key が list として現れる
+    rc, body, _ = _run_handle_prime(cfg, include_gaps=True, output="json")
+    assert rc == 0
+    payload = json.loads(body)
+    kinds = [g["kind"] for g in payload["gaps"]]
+    assert "notion_outbox_pending" in kinds
+
+
+def test_handle_prime_without_include_gaps_keeps_v1_output(
+    tmp_path, monkeypatch
+):
+    """--include-gaps なしなら gap section が現れない (MVP-1〜3 互換)"""
+    cfg, _ = _setup_prime_env(tmp_path, monkeypatch)
+    rc, body, _ = _run_handle_prime(cfg)
+    assert rc == 0
+    assert "gap analysis" not in body
+
+    rc, body, _ = _run_handle_prime(cfg, output="json")
+    assert rc == 0
+    payload = json.loads(body)
+    assert payload["gaps"] is None
+
+
 def test_handle_prime_dry_run_skips_backfill_and_search(
     tmp_path, monkeypatch
 ):

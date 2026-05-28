@@ -514,6 +514,17 @@ def _build_parser():
         default=10,
         help="--query 指定時の最大返却件数（>=1、既定 10）",
     )
+    # Prime v2 MVP-4 (docs/design-prime-v2.md §6.1 / §8.1): gap analysis
+    prime_parser.add_argument(
+        "--include-gaps",
+        action="store_true",
+        help=(
+            "未確定 / 不足情報セクション (gap analysis) を追加する "
+            "(Prime v2 MVP-4)。決定的検出のみで LLM は呼ばない: "
+            "unresolved_review_issue_open / notion_outbox_pending / "
+            "audit_log_silence の 3 種"
+        ),
+    )
 
     # audit コマンド: SQLite `audit_logs` を CLI から覗く（F3 / PR #123）
     audit_parser = subparsers.add_parser(
@@ -1576,6 +1587,8 @@ def _handle_prime(args, config) -> int:
     # Prime v2 MVP-2 (docs/design-prime-v2.md §8.1): query 検索 + backfill
     query: str | None = getattr(args, "query", None)
     query_limit: int = getattr(args, "query_limit", 10)
+    # Prime v2 MVP-4 (docs/design-prime-v2.md §6.1 / §8.1): gap analysis
+    include_gaps: bool = getattr(args, "include_gaps", False)
 
     # workflow state を SQLite から取得（profile / current_phase の解決源）
     store = SQLiteStore(config.database_path)
@@ -1876,6 +1889,31 @@ def _handle_prime(args, config) -> int:
             file=sys.stderr,
         )
 
+    # Prime v2 MVP-4 (docs/design-prime-v2.md §6.1 / §8.1): gap analysis
+    # 3 種の決定的検出を `--include-gaps` 指定時に実行する。各 detector の
+    # 失敗は best-effort で握りつぶす設計 (prime 本来の出力を阻害しない)。
+    # gaps=None は「検出 skip」、[] は「検出したが gap なし」を区別する。
+    gaps_list: list[dict] | None = None
+    if include_gaps:
+        from .prime_gaps import collect_gaps as _collect_gaps
+        try:
+            llm_gw_enabled = bool(
+                getattr(getattr(config, "llm_gateway", None), "enabled", False)
+            )
+            collected = _collect_gaps(
+                store=store,
+                review_issues=review_issues,
+                llm_gateway_enabled=llm_gw_enabled,
+                workflow_id=workflow_id,
+            )
+            gaps_list = [g.to_dict() for g in collected]
+        except Exception as e:
+            print(
+                f"⚠ gap analysis で失敗（gap section 省略）: {e}",
+                file=sys.stderr,
+            )
+            gaps_list = []
+
     # M2.4 (#92): 空状態の prime 出力で「なぜ空か」（DB share 未完了 / env
     # 未設定 / 取得済 0 件 / Notion 障害）を原因切り分けできるよう、構成
     # 要素ごとの状態を診断行リストに組み立てる（findings §2.1）。Markdown
@@ -1909,6 +1947,7 @@ def _handle_prime(args, config) -> int:
                 diagnostics=diagnostics,
                 query=query,
                 query_results=query_results,
+                gaps=gaps_list,
             )
         )
     else:
@@ -1925,6 +1964,7 @@ def _handle_prime(args, config) -> int:
                 query=query,
                 query_results=query_results,
                 prime_index_error=prime_index_error,
+                gaps=gaps_list,
             )
         )
     return 0
