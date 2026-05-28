@@ -560,6 +560,16 @@ def _build_parser():
         help="audit_logs.id（`hokusai audit list` の id 列）",
     )
 
+    # llm-gateway-setup コマンド: 現 LLM Gateway 設定を診断 + 推奨設定提示
+    # （F2 / PR #125）。yaml 直接編集はせず stdout に推奨内容を出すだけ
+    # （user が ~/.hokusai/configs/<profile>.yaml を自分で開いて貼り付ける想定）。
+    subparsers.add_parser(
+        "llm-gateway-setup",
+        help="現 profile の LLM Gateway 設定を診断し、enforcement on 前に必要な"
+             " policy 設定の有無を警告する",
+        parents=[shared_options],
+    )
+
     return parser, profile_parser, connect_parser
 
 
@@ -872,6 +882,11 @@ def main():
     # audit コマンド: audit_logs を CLI から覗く（F3 / PR #123）
     if args.command == "audit":
         sys.exit(_handle_audit(args, config))
+
+    # llm-gateway-setup コマンド: 現 LLM Gateway 設定を診断 + 推奨設定提示
+    # （F2 / PR #125）。
+    if args.command == "llm-gateway-setup":
+        sys.exit(_handle_llm_gateway_setup(args, config))
 
     # 環境設定チェック（start/continueコマンドの場合）
     if args.command in ("start", "continue"):
@@ -1230,6 +1245,99 @@ def _handle_dashboard(args, config) -> int:
         else:
             print(f"エラー: port {port} の確認中に予期しない OS エラー: {e}")
         return 1
+
+
+def _handle_llm_gateway_setup(args, config) -> int:
+    """`hokusai llm-gateway-setup` のハンドラ（F2 / PR #125）。
+
+    dogfooding-findings.md §7 F2「`allowed_providers=None` 既定で policy_hits
+    が常時空 → `log_only=false` に切り替えても enforcement が事実上 no-op」
+    という事故を踏む前に、現 profile の LLM Gateway 設定を診断して警告する。
+
+    安全のため yaml への自動書き込みはせず、stdout に診断結果と推奨設定を
+    出すだけにする（user が自分で `~/.hokusai/configs/<profile>.yaml` を
+    開いて貼り付ける想定）。`hokusai notion-setup` と違って LLM Gateway
+    の policy は値次第で本番影響が出る（block / no-op 切替）ため、user の
+    明示的編集を要求する設計が安全。
+    """
+    gw = getattr(config, "llm_gateway", None)
+    if gw is None:
+        print("エラー: WorkflowConfig に llm_gateway が含まれていません",
+              file=sys.stderr)
+        return 1
+
+    # 現状を表示
+    print("=== LLM Gateway 現設定 ===")
+    print(f"enabled:                 {gw.enabled}")
+    print(f"log_only:                {gw.log_only}")
+    print(f"audit_log_enabled:       {gw.audit_log_enabled}")
+    print(f"dry_run:                 {gw.dry_run}")
+    print(f"allowed_providers:       {gw.allowed_providers}")
+    allowed_default = gw.allowed_models.default if gw.allowed_models else None
+    print(f"allowed_models.default:  {allowed_default}")
+    print()
+
+    # 診断ロジック: log_only=false かつ policy 未設定なら no-op になる
+    has_provider_allowlist = (
+        gw.allowed_providers is not None and len(gw.allowed_providers) > 0
+    )
+    has_model_allowlist = (
+        allowed_default is not None and len(allowed_default) > 0
+    )
+
+    warnings: list[str] = []
+    if not gw.enabled:
+        print("ℹ️  LLM Gateway は無効です（enabled=false）。")
+        print("    一時 enable するなら: export HOKUSAI_LLM_GATEWAY_ENABLED=1"
+              " (PR #122 / F1)")
+        print()
+
+    # policy 未設定は「enforce on にしたら no-op になる」リスク。現在の
+    # log_only / enabled 値に関わらず、将来切替時の事故防止のため必ず警告する。
+    no_policy = not has_provider_allowlist and not has_model_allowlist
+    if no_policy:
+        if not gw.log_only and gw.enabled:
+            # 現在 enforce on 状態 → 即座の no-op
+            warnings.append(
+                "log_only=false（enforcement on）だが allowed_providers / "
+                "allowed_models.default が両方未設定 → policy_hits 常時空で "
+                "事実上 no-op です。設定を追加するまで何も block されません。"
+            )
+        else:
+            # 現在 log_only=true or disabled → 将来切替時のリスク
+            warnings.append(
+                "allowed_providers / allowed_models.default が両方未設定です。"
+                "将来 log_only=false に切替えても policy_hits が常時空で "
+                "enforcement が事実上 no-op になります（policy 未設定 = 全許可 "
+                "扱い）。enforce on にする前に最低限 allowed_providers を "
+                "設定してください。"
+            )
+
+    if gw.log_only and gw.enabled:
+        # log_only=true は安全（観察モード）。
+        print("ℹ️  log_only=true（観察モード）で動作中。enforcement は無効、"
+              "全 LLM 呼び出しが audit_logs に log として記録されます。")
+        print()
+
+    if warnings:
+        print("⚠️  警告:")
+        for w in warnings:
+            print(f"  - {w}")
+        print()
+        print("=== 推奨設定例（~/.hokusai/configs/<profile>.yaml に貼り付け）===")
+        print("llm_gateway:")
+        print("  enabled: true")
+        print("  log_only: false  # enforcement on")
+        print("  audit_log_enabled: true")
+        print("  allowed_providers: [\"claude_code\", \"codex\", \"gemini\"]"
+              "  # 許可する LLM provider のみ列挙")
+        print("  # allowed_models.default: [\"claude-sonnet-4\", ...] も追加可")
+        return 1  # 警告ありで exit 1（事故防止のため非ゼロ終了）
+
+    print("✅ 診断: enforcement on に切替えても no-op になる重大なリスクは"
+          "検出されませんでした（allowed_providers / allowed_models.default の"
+          "少なくとも一方が設定済み）。")
+    return 0
 
 
 def _handle_audit(args, config) -> int:
