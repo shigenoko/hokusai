@@ -475,6 +475,10 @@ cleanup 時に Notion 404 警告（`Could not find database with ID: 36085495-56
 - §1 で記録した **Notion DB share 未完了**: `Workflows DB ID` が integration "HOKUSAI" に share されていないため、`hokusai cleanup` 時等で 404 警告が発生する。本 dogfooding §9 でも cleanup 時に再現（[#127](https://github.com/shigenoko/hokusai/issues/127) close 前の cleanup ログ参照）。これは Notion 側の手作業（DB share 設定）が必要で、F1-F4 の解消対象外。
 - Claude CLI subprocess 起動の完全証明: 本 §9 では時間切り (90 秒) のため `Claude Code実行完了:` ログを観察せず終了。完全証明には完走 dogfooding（数十分〜数時間）が必要だが、3 段階検証で配線品質は十分。
 
+### 次マイルストーン (v0.6 以降) の議論起点
+
+v0.5.1 で F1-F4 が解消され Phase 2 enforcement の配線が 3 段階で検証された後、**次に取り組むべき強化点の方向性議論**は別ドキュメント [docs/roadmap-gbrain-inspirations.md](roadmap-gbrain-inspirations.md) に分離した。GBrain (AI agent 用長期記憶エンジン) 調査から「Prime v2 (引用つき合成 / gap analysis)」「Doctor / Status 一画面化」「Operation Registry」等の優先順位を整理しており、v0.6 のスコープ合意形成の土台として参照する。
+
 ---
 
 ## Appendix A: 観察用に叩いたコマンド
