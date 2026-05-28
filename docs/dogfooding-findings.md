@@ -304,23 +304,23 @@ audit_logs の SQLite 列 / details_json 対応関係: テーブル列 `status` 
 | 許可 provider 透過 + audit 残存 | ✅ 機能 | `hokusai/llm_gateway/interceptor.py:138-153`（decision 判定 138-148 + `_emit_audit` 呼び出し 150-153）(M1.1 / #86) |
 | fail-open（gateway 内部例外を握り潰す） | ✅ コード上明示 | `hokusai/llm_gateway/dispatch.py:193-198` (要件 §4.4) |
 
-### 残る運用穴
+### 運用穴のステータス
 
-§7 観察時点（v0.5.0）で確認した F1–F4 のうち、F1 / F3 / F4 は後続 PR で解消済み。
-未解消で残るのは F2 の 1 件のみ。
-
-- **F2: `allowed_providers=None` / `allowed_models.default=None` 既定で policy_hits が常時空**。`log_only=False` に切り替えても policy が未設定だと `decision="log"` のままで enforcement が事実上 no-op になる。`hokusai notion-setup` 相当の「LLM Gateway 設定 wizard」(`hokusai llm-gateway-setup` のような対話 helper) で「最低限 allowed_providers を埋めるよう促す」誘導があると、夜間に enable した profile が翌朝に何も block していないという事故を防げる。**優先度: 中**。
+§7 観察時点（v0.5.0）で確認した F1–F4 は **全て後続 PR で解消済み**。残る未解消なし。
 
 ### 解消済み（後続 PR）
 
 - **F1: LLM Gateway を env で一時 enable できない** → **PR #122 で解消**。`HOKUSAI_LLM_GATEWAY_ENABLED` を truthy/falsy で指定すると yaml/default を上書きする env override を `_parse_llm_gateway_config` に追加（truthy: `1` / `true` / `yes` / `on`、falsy: `0` / `false` / `no` / `off`、case-insensitive）。dogfooding 観察時に yaml 編集なしで一時 enable / disable できる。
+- **F2: policy 未設定で enforce on にすると事実上 no-op** → **PR #125 で解消**。`hokusai llm-gateway-setup` サブコマンドを追加し、現 profile の LLM Gateway 設定を診断する。判定は interceptor の真の policy_hits 生成経路に基づく: **`allowed_providers` が `None` なら no-op 警告**（`allowed_models.*` のみ設定しても `interceptor._evaluate_policy_hits` は `context.model=""` のとき allowed_models 系評価を skip するため、ClaudeCodeClient (model="") 経由の呼び出しは policy_hits 常時空になる、PR #125 Copilot Round 6 指摘）。`[]`（明示空 = deny-all 意図）は別カテゴリの警告（全 LLM 呼び出しが block される）として扱う（Round 1 指摘）。`allowed_providers` 設定済みで `allowed_models.*` 両方空なら ℹ️ info 注記（provider allowlist のみで動作）。yaml 直接書き込みは安全のため避け、user 自身の編集を促す設計。warning ありは `exit 1` で CI フックにも組み込み可能。
 - **F3: audit_logs を CLI から覗く経路が無い** → **PR #123 で解消**。`hokusai audit list` / `hokusai audit show <id>` サブコマンドを追加し、`SQLiteStore` に `list_audit_logs(workflow_id/phase/action/status/limit)` と `get_audit_log(id)` の helper を実装。`--output json` で raw 表示も可能。`sqlite3` 直叩きから解放され、運用調査・自動化テストの導線が整った。
 - **F4: 3 client の workflow_id 伝播未配線** → **PR #120 / #121 で解消**。PR #120 (案 A) で 3 client (claude_code / codex / gemini) の `execute_skill` / `execute_prompt` / `review_document` / `generate` メソッドに `workflow_id: str | None = None` / `phase: int | None = None` 引数を追加し、`_invoke_llm_gateway_interceptor` 経由で `dispatch_via_gateway` まで伝播する経路を整備。PR #121 (案 A2) で各 phase node (`phase2_research` / `phase3_design` / `phase4_plan` / `phase5_implement` / `phase7_review` / `phase8/review_fix` / `utils/cross_review`) から `state["workflow_id"]` と該当 phase 番号を client に渡す配線を完成。これにより実 phase node 経由の LLM 呼び出しでも `audit_logs.workflow_id` が SQLite に書き込まれる状態に到達した（dispatch.py docstring の「後続 PR の課題」は両 PR で閉じた）。
 
 ### 次のアクション候補（優先順）
 
-1. **F2 の wizard**: 必要性が見えてから着手。policy 未設定で enforce on にすると no-op になる事故 1 回が踏まれてからでも遅くない。**優先度: 中**。
+1. ~~F2 の wizard~~ → **PR #125 で解消**。
 2. ~~**F1 / F3 / F4 解消後の再観察 dogfooding**~~ → **§8 で軽量 end-to-end 検証完了**。実 `hokusai start` で 1 workflow 完走させる重い dogfooding は引き続き次マイルストーンとして残る（優先度: 中）。
+
+§7 で記録した運用穴 F1–F4 は本 PR (#125) で全て閉じた。**v0.5.0 dogfooding サイクルは一段落**。
 
 ### Phase 2 enforcement の v0.5.0 評価
 

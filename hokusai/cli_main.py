@@ -560,6 +560,18 @@ def _build_parser():
         help="audit_logs.id（`hokusai audit list` の id 列）",
     )
 
+    # llm-gateway-setup コマンド: 現 LLM Gateway 設定を診断 + 推奨設定提示
+    # （F2 / PR #125）。yaml 直接編集はせず stdout に推奨内容を出すだけ
+    # （user が現 profile の config YAML を自分で開いて貼り付ける想定。
+    # 実パスは profile registry の `config:` で指定された任意絶対パスで、
+    # `hokusai profile show <name>` で確認可能）。
+    subparsers.add_parser(
+        "llm-gateway-setup",
+        help="現 profile の LLM Gateway 設定を診断し、enforcement on 前に必要な"
+             " policy 設定の有無を警告する",
+        parents=[shared_options],
+    )
+
     return parser, profile_parser, connect_parser
 
 
@@ -872,6 +884,11 @@ def main():
     # audit コマンド: audit_logs を CLI から覗く（F3 / PR #123）
     if args.command == "audit":
         sys.exit(_handle_audit(args, config))
+
+    # llm-gateway-setup コマンド: 現 LLM Gateway 設定を診断 + 推奨設定提示
+    # （F2 / PR #125）。
+    if args.command == "llm-gateway-setup":
+        sys.exit(_handle_llm_gateway_setup(args, config))
 
     # 環境設定チェック（start/continueコマンドの場合）
     if args.command in ("start", "continue"):
@@ -1230,6 +1247,169 @@ def _handle_dashboard(args, config) -> int:
         else:
             print(f"エラー: port {port} の確認中に予期しない OS エラー: {e}")
         return 1
+
+
+def _handle_llm_gateway_setup(args, config) -> int:
+    """`hokusai llm-gateway-setup` のハンドラ（F2 / PR #125）。
+
+    dogfooding-findings.md §7 F2「`allowed_providers=None` 既定で policy_hits
+    が常時空 → `log_only=false` に切り替えても enforcement が事実上 no-op」
+    という事故を踏む前に、現 profile の LLM Gateway 設定を診断して警告する。
+
+    安全のため yaml への自動書き込みはせず、stdout に診断結果と推奨設定を
+    出すだけにする（user が自分で現 profile の config YAML を開いて貼り付ける
+    想定。実パスは profile registry の `config:` で指定された任意絶対パス、
+    `hokusai profile show <name>` で確認可能）。`hokusai notion-setup` と
+    違って LLM Gateway の policy は値次第で本番影響が出る（block / no-op
+    切替）ため、user の明示的編集を要求する設計が安全。
+    """
+    gw = getattr(config, "llm_gateway", None)
+    if gw is None:
+        # `getattr(..., None)` は属性が存在しないケースと llm_gateway=None の
+        # 両方を拾うため、原因が分かるメッセージにする（PR #125 Copilot
+        # Round 3 指摘）。
+        print(
+            "エラー: WorkflowConfig.llm_gateway が未設定（None）または"
+            "属性が存在しません",
+            file=sys.stderr,
+        )
+        return 1
+
+    # 現状を表示
+    print("=== LLM Gateway 現設定 ===")
+    print(f"enabled:                            {gw.enabled}")
+    print(f"log_only:                           {gw.log_only}")
+    print(f"audit_log_enabled:                  {gw.audit_log_enabled}")
+    print(f"dry_run:                            {gw.dry_run}")
+    print(f"allowed_providers:                  {gw.allowed_providers}")
+    allowed_default = gw.allowed_models.default if gw.allowed_models else None
+    high_cost_gate = (
+        gw.allowed_models.high_cost_requires_gate if gw.allowed_models else []
+    )
+    print(f"allowed_models.default:             {allowed_default}")
+    print(f"allowed_models.high_cost_requires_gate: {high_cost_gate}")
+    print()
+
+    # 診断ロジック: interceptor._evaluate_policy_hits の仕様に従って判定
+    # （PR #125 Copilot Round 1/2/6 指摘）:
+    # - None (未指定) → policy 評価 skip = no-op リスク
+    # - [] (明示空 = deny-all 意図) → 全 provider が hit、全 LLM 呼び出し block
+    # - [...] (非空) → 含まれない provider が hit、適切な allowlist
+    #
+    # **重要な仕様** (Round 6 指摘 / interceptor.py:194-205):
+    # `context.model` が空文字 ("") のとき、`allowed_models.*` 系の evaluation
+    # が **丸ごと skip される**。ClaudeCodeClient は現状 model="" を渡すため、
+    # `allowed_providers=None` の状態で `allowed_models.*` だけ設定しても
+    # claude_code 経由の呼び出しは policy_hits が常時空になり、事実上 no-op。
+    #
+    # この仕様を踏まえ、**真の policy_hits 生成経路は `allowed_providers` のみ**
+    # と扱う。`allowed_models.*` は補助的（model 取得可能な provider 限定）で、
+    # `allowed_providers` が設定されていない状態では no-op 警告対象に含める。
+    no_provider_policy = gw.allowed_providers is None
+    no_model_policy = allowed_default is None
+    no_high_cost_gate = not high_cost_gate  # 空 list / None / falsy
+    deny_all_provider = gw.allowed_providers == []
+    deny_all_models = allowed_default == []
+
+    warnings: list[str] = []
+    if not gw.enabled:
+        print("ℹ️  LLM Gateway は無効です（enabled=false）。")
+        print("    一時 enable するなら: export HOKUSAI_LLM_GATEWAY_ENABLED=1"
+              " (PR #122 / F1)")
+        print()
+
+    # no-op リスク判定（Round 6 指摘で修正）:
+    # `allowed_providers is None` のときは、`allowed_models.*` が設定されていても
+    # model="" を渡す provider では policy_hits が常時空になるため no-op 警告
+    # 対象とする。`allowed_models.*` のみで「真に安全」と判定するには
+    # 「全 provider が model を埋める」前提が必要だが、現状 ClaudeCodeClient は
+    # model="" なのでその前提は成立しない。
+    if no_provider_policy:
+        if not gw.log_only and gw.enabled:
+            # 現在 enforce on 状態 → 即座の no-op リスク
+            warnings.append(
+                "log_only=false（enforcement on）だが allowed_providers が "
+                "None（未指定）です。allowed_models.* も `context.model=\"\"` "
+                "を渡す provider（例: ClaudeCodeClient）では evaluation が "
+                "skip されるため、policy_hits が常時空となり事実上 no-op の "
+                "リスクがあります。`allowed_providers` を設定するまで claude_code "
+                "経由の呼び出しは何も block されません。"
+            )
+        else:
+            # 現在 log_only=true or disabled → 将来切替時のリスク
+            warnings.append(
+                "allowed_providers が None（未指定）です。`allowed_models.*` "
+                "（default / high_cost_requires_gate）のみ設定しても、interceptor "
+                "は `context.model=\"\"` を渡す provider（例: ClaudeCodeClient）で "
+                "は evaluation を skip するため、policy_hits 常時空となり enforce "
+                "切替後に事実上 no-op になり得ます。enforce on にする前に "
+                "`allowed_providers` を設定することを強く推奨します。"
+            )
+    elif no_model_policy and no_high_cost_gate:
+        # allowed_providers は設定済みだが、model 系は両方空。これは
+        # provider allowlist のみで動作する形（model 取得可能 provider にも
+        # model 制限は無し）。設計上は OK だが、model 制限も欲しいなら
+        # 注記として伝える（warning は出さず info メッセージ）。
+        print("ℹ️  allowed_providers は設定済みですが、allowed_models.default / "
+              "high_cost_requires_gate は両方空です。provider allowlist のみで"
+              "動作します。model 単位の制限が必要なら allowed_models.* も"
+              "設定してください。")
+        print()
+
+    # deny-all リスク（明示空 list = 全 LLM 呼び出し block）: これは意図的な
+    # 全ブロック設定の可能性もあるが、誤って `[]` を書いてしまった場合に
+    # 全 LLM 呼び出しが block される事故になるため別カテゴリで警告する。
+    if deny_all_provider:
+        warnings.append(
+            "allowed_providers=[] は deny-all 意図として評価されます（全 "
+            "provider が unknown_provider hit）。log_only=false に切替えると "
+            "全 LLM 呼び出しが block されます。意図的なら問題ありませんが、"
+            "誤設定の可能性も考慮してください。"
+        )
+    if deny_all_models:
+        warnings.append(
+            "allowed_models.default=[] は deny-all 意図として評価されます。"
+            "log_only=false に切替えると（model が取得できる呼び出しのみ）"
+            "全て block されます。意図的なら問題ありませんが、誤設定の可能性も "
+            "考慮してください。"
+        )
+
+    if gw.log_only and gw.enabled:
+        # log_only=true は安全（観察モード）。
+        print("ℹ️  log_only=true（観察モード）で動作中。enforcement は無効、"
+              "全 LLM 呼び出しが audit_logs に log として記録されます。")
+        print()
+
+    if warnings:
+        print("⚠️  警告:")
+        for w in warnings:
+            print(f"  - {w}")
+        print()
+        # 貼り付け先 yaml は profile registry の `config:` で指定された任意の
+        # 絶対パス（`~/.hokusai/configs/<profile>.yaml` とは限らない）。
+        # WorkflowConfig には config 由来のパスを保持していないため、
+        # 一般表現で案内し profile show での確認方法を併記する
+        # （PR #125 Copilot Round 4 指摘）。
+        print(
+            "=== 推奨設定例（現 profile の config YAML に貼り付け）===\n"
+            "    config YAML のパス確認: hokusai profile show <profile_name>"
+        )
+        print("llm_gateway:")
+        print("  enabled: true")
+        print("  log_only: false  # enforcement on")
+        print("  audit_log_enabled: true")
+        print("  allowed_providers: [\"claude_code\", \"codex\", \"gemini\"]"
+              "  # 許可する LLM provider のみ列挙（[] は deny-all 扱い）")
+        print("  # allowed_models.default: [\"claude-sonnet-4\", ...] も追加可")
+        return 1  # 警告ありで exit 1（事故防止のため非ゼロ終了）
+
+    # 成功時メッセージ（Round 6 修正後）: `allowed_providers` が allowlist として
+    # 設定済みの場合に限り、ここに到達する（interceptor 仕様: provider 評価は
+    # model に関わらず動作する真の policy_hits 経路）。
+    print("✅ 診断: enforcement on に切替えても no-op / deny-all になる "
+          "リスクは検出されませんでした（`allowed_providers` が allowlist で "
+          "設定済み、interceptor の provider 評価が機能）。")
+    return 0
 
 
 def _handle_audit(args, config) -> int:
