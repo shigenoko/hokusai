@@ -200,6 +200,41 @@ def test_search_does_not_match_source_type_value(store: SQLiteStore) -> None:
     assert store.search_prime_index("review_issue") == []
 
 
+def test_already_migrated_lowercase_ddl_is_not_rebuilt(tmp_path: Path) -> None:
+    """小文字 `source_type unindexed` で書かれた新 DDL は legacy 判定されない
+
+    SQLite は user が書いた case を sqlite_master にそのまま保持するため、
+    case-sensitive な含有判定では小文字 DDL を誤って legacy として
+    DROP+rebuild してしまう。`.lower()` で正規化することで防ぐ
+    （PR #134 Copilot Round 2 指摘の回帰防止）。
+    """
+    import sqlite3
+
+    db_path = tmp_path / "lower.db"
+    # 小文字で正しい新 DDL を直接書き込む（source_type unindexed）
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE VIRTUAL TABLE prime_index USING fts5("
+            "workflow_id unindexed, source_type unindexed, "
+            "source_id unindexed, phase unindexed, title, body, "
+            "tokenize='unicode61 remove_diacritics 2')"
+        )
+        # データを入れて rebuild されると消えることを検証する
+        conn.execute(
+            "INSERT INTO prime_index "
+            "(workflow_id, source_type, source_id, phase, title, body) "
+            "VALUES ('wf-keep', 'memory', 'a', 1, 'title', 'body keep')"
+        )
+        conn.commit()
+
+    # SQLiteStore() で開いても rebuild されないことを確認
+    store = SQLiteStore(db_path)
+    # rebuild されたなら row が消える、されていなければ残る
+    results = store.search_prime_index("keep")
+    assert len(results) == 1
+    assert results[0]["workflow_id"] == "wf-keep"
+
+
 def test_legacy_schema_migrates_to_unindexed_source_type(tmp_path: Path) -> None:
     """旧 DDL (source_type indexed) の DB を開いた時に migration が走る
 

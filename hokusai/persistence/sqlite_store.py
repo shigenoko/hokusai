@@ -379,17 +379,26 @@ class SQLiteStore:
             # 取得して `source_type UNINDEXED` が含まれていない場合のみ
             # DROP + CREATE で rebuild する。実 backfill 経路はまだないの
             # で prime_index は空のはずで、rebuild はデータ損失を起こさない。
+            #
+            # PR #134 Copilot Round 2 指摘:
+            # - DDL 判定は case-insensitive にする。SQLite は user が書いた
+            #   case をそのまま sqlite_master に保持するため、小文字
+            #   `unindexed` で書かれた DDL を誤って legacy 判定しないように
+            #   `.lower()` で正規化する。
+            # - DROP は `IF EXISTS` を付ける。複数プロセス同時起動の race
+            #   condition で他プロセスが先に DROP した場合の `no such table`
+            #   を黙殺する。
             cursor = conn.execute(
                 "SELECT sql FROM sqlite_master "
                 "WHERE type='table' AND name='prime_index'"
             )
             row = cursor.fetchone()
             if row is not None:
-                existing_sql = row[0] or ""
-                if "source_type UNINDEXED" not in existing_sql:
+                existing_sql = (row[0] or "").lower()
+                if "source_type unindexed" not in existing_sql:
                     # 旧 DDL を検出。MVP-1 段階で実 backfill が無い前提
                     # なのでデータ損失を許容して DROP + 再作成する。
-                    conn.execute("DROP TABLE prime_index")
+                    conn.execute("DROP TABLE IF EXISTS prime_index")
             conn.execute("""
                 CREATE VIRTUAL TABLE IF NOT EXISTS prime_index USING fts5(
                     workflow_id UNINDEXED,
