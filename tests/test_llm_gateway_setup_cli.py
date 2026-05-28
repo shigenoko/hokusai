@@ -167,9 +167,11 @@ def test_warns_when_all_three_policy_paths_empty():
 
 
 def test_shows_env_override_hint_when_disabled():
-    """enabled=false なら env override のヒントを出す"""
+    """enabled=false なら env override のヒントを出す。policy 未設定で warnings
+    があるので rc=1 を期待"""
     cfg = _make_config(enabled=False)
     rc, output = _run_setup([], cfg)
+    assert rc == 1
     assert "HOKUSAI_LLM_GATEWAY_ENABLED" in output
 
 
@@ -180,6 +182,7 @@ def test_shows_log_only_observation_mode_message():
         allowed_providers=["codex"],
     )
     rc, output = _run_setup([], cfg)
+    assert rc == 0  # policy 設定済み → warnings なし
     assert "log_only=true" in output
     assert "観察モード" in output
 
@@ -197,6 +200,7 @@ def test_outputs_current_config_values():
         allowed_models_default=["gpt-4"],
     )
     rc, output = _run_setup([], cfg)
+    assert rc == 0  # policy 設定済み → warnings なし
     # 各設定値が表示される
     assert "enabled:" in output
     assert "log_only:" in output

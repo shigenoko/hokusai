@@ -1262,8 +1262,14 @@ def _handle_llm_gateway_setup(args, config) -> int:
     """
     gw = getattr(config, "llm_gateway", None)
     if gw is None:
-        print("エラー: WorkflowConfig に llm_gateway が含まれていません",
-              file=sys.stderr)
+        # `getattr(..., None)` は属性が存在しないケースと llm_gateway=None の
+        # 両方を拾うため、原因が分かるメッセージにする（PR #125 Copilot
+        # Round 3 指摘）。
+        print(
+            "エラー: WorkflowConfig.llm_gateway が未設定（None）または属性が "
+            "存在しません",
+            file=sys.stderr,
+        )
         return 1
 
     # 現状を表示
@@ -1371,9 +1377,12 @@ def _handle_llm_gateway_setup(args, config) -> int:
         print("  # allowed_models.default: [\"claude-sonnet-4\", ...] も追加可")
         return 1  # 警告ありで exit 1（事故防止のため非ゼロ終了）
 
+    # PR #125 Copilot Round 3 指摘: high_cost_requires_gate のみ設定して warnings
+    # が出ないケースもあるため、3 経路全てを言及した汎用文言にする。
     print("✅ 診断: enforcement on に切替えても no-op / deny-all になる "
           "リスクは検出されませんでした（allowed_providers / "
-          "allowed_models.default のいずれかが意図された allowlist で設定済み）。")
+          "allowed_models.default / allowed_models.high_cost_requires_gate "
+          "のいずれかが意図された設定で有効）。")
     return 0
 
 
