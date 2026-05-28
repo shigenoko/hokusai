@@ -664,6 +664,55 @@ def test_handle_prime_type_filter_preserves_other_memory_types(
     # これは設計上の trade-off（次回 --type なしで全 memory が refresh される）。
 
 
+def test_handle_prime_dry_run_skips_backfill_and_search(
+    tmp_path, monkeypatch
+):
+    """--dry-run 時は backfill (clear + upsert) と search を skip し、
+    SQLite を mutate しない (PR #135 Copilot Round 7 指摘)。
+    """
+    cfg, store = _setup_prime_env(
+        tmp_path, monkeypatch,
+        memories_factory=lambda: [
+            _memory_page("page-1", "new rule", summary="new rule body")
+        ],
+    )
+    # 過去 backfill された stale 行
+    store.upsert_prime_index(
+        workflow_id="wf-1", source_type="memory", source_id="stale-1",
+        title="stale rule", body="stale rule body",
+    )
+    assert len(store.search_prime_index('"stale rule body"')) == 1
+
+    rc, body, err = _run_handle_prime(cfg, query="rule", dry_run=True)
+    assert rc == 0
+    # SQLite が mutate されない: stale 行は残り、新 entry は upsert されない
+    assert len(store.search_prime_index('"stale rule body"')) == 1
+    assert store.search_prime_index('"new rule body"') == []
+    # stderr に dry-run 通知が出る
+    assert "--dry-run" in err and "skip" in err
+    # query 指定だが search も skip されるので、Markdown 出力では
+    # query_results=None 経路 (「インデックス利用不可」表示)
+    assert "検索インデックスが利用不可" in body
+
+
+def test_handle_prime_dry_run_without_query_no_stderr_noise(
+    tmp_path, monkeypatch
+):
+    """dry-run + --query 未指定 + Notion fetch 試行ありなら stderr 通知が出る
+    (backfill は skip されるため)。
+    """
+    cfg, _ = _setup_prime_env(
+        tmp_path, monkeypatch,
+        memories_factory=lambda: [
+            _memory_page("page-1", "rule", summary="body")
+        ],
+    )
+    rc, _, err = _run_handle_prime(cfg, dry_run=True)
+    assert rc == 0
+    # backfill が skip された旨が stderr に出る (fetched_source_types non-empty)
+    assert "--dry-run" in err and "skip" in err
+
+
 def test_handle_prime_query_limit_caps_result_count(tmp_path, monkeypatch):
     """--query-limit が search_prime_index に伝播し、検索結果数が cap される
     ことを e2e で検証 (PR #135 Copilot Round 6 #2 指摘)。"""

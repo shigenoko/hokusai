@@ -1801,6 +1801,13 @@ def _handle_prime(args, config) -> int:
         fetched_source_types.append("review_issue")
     if gates is not None:
         fetched_source_types.append("gate")
+    # PR #135 Copilot Round 7 指摘: トップレベル `--dry-run` 時は SQLite を
+    # mutate しない (shared_options 経由で prime にも継承される)。
+    # clear + upsert で `prime_index` を書き換えるのは副作用なので dry-run
+    # の契約に反する。dry-run なら backfill と search 両方を skip し、
+    # query_results は None のままにする (search は backfill 後の状態に
+    # 依存するため、stale な index 状態で走らせると誤誘導する)。
+    dry_run = getattr(args, "dry_run", False)
     try:
         index_entries = extract_prime_index_entries(
             memories=memories,
@@ -1813,7 +1820,7 @@ def _handle_prime(args, config) -> int:
         # - 試行 + 失敗 (notion_fetch_error != None): stale 行を残す
         # - 未試行 (該当 source_type が fetched_source_types に無い):
         #   stale 行を残す（過去の backfill が依然有効）
-        if fetched_source_types and notion_fetch_error is None:
+        if fetched_source_types and notion_fetch_error is None and not dry_run:
             store.clear_prime_index_for_workflow(
                 workflow_id, source_types=fetched_source_types
             )
@@ -1842,10 +1849,22 @@ def _handle_prime(args, config) -> int:
         # PR #135 Copilot Round 1 #2 指摘: raw 文字列を直接 MATCH に渡すと
         # `:` / 括弧 / 引用符 / 先頭 `-` 等で OperationalError を起こすため、
         # phrase 検索 (`"..."`) でラップして safe にする。
-        if query is not None:
+        # PR #135 Copilot Round 7 指摘: dry-run 時は backfill を skip した
+        # ため、index が stale (古い backfill 行 or 完全に空) の状態で
+        # search すると誤誘導するので search も skip する。
+        if query is not None and not dry_run:
             safe_query = _sanitize_fts5_query(query)
             query_results = store.search_prime_index(
                 safe_query, workflow_id=workflow_id, limit=query_limit
+            )
+        elif dry_run and (fetched_source_types or query is not None):
+            # dry-run で backfill / search を skip した場合、user に通知する。
+            # `--dry-run` 自体は cli_main main() で先に print_dry_run_mode()
+            # が呼ばれているので「dry-run 中である」ことは既に明示されているが、
+            # prime 経路は副作用と検索の両方が抑止される旨を明示しておく。
+            print(
+                "ℹ --dry-run のため prime_index backfill / search を skip しました",
+                file=sys.stderr,
             )
     except Exception as e:
         # backfill / search の失敗は表示を壊さず graceful degrade。
