@@ -1253,6 +1253,15 @@ def _handle_audit(args, config) -> int:
     store = SQLiteStore(str(database_path))
 
     if sub == "list":
+        if args.limit < 1:
+            # SQLite は negative LIMIT を no limit と解釈するため、CLI で
+            # 早期 reject して誤って audit_logs 全件を返さないようにする
+            # （PR #123 Copilot Round 1 指摘）。
+            print(
+                f"エラー: --limit は 1 以上を指定してください（指定値={args.limit}）",
+                file=sys.stderr,
+            )
+            return 1
         rows = store.list_audit_logs(
             workflow_id=args.workflow_id,
             phase=args.phase,

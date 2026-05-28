@@ -149,14 +149,26 @@ def test_get_audit_log_returns_none_for_missing_id(store_with_audit_rows):
     assert row is None
 
 
+def test_list_audit_logs_rejects_negative_limit(store_with_audit_rows):
+    """`limit < 1` で ValueError を raise する（SQLite negative LIMIT 全件返却防止、
+    PR #123 Copilot Round 1 指摘）"""
+    with pytest.raises(ValueError, match="limit は 1 以上"):
+        store_with_audit_rows.list_audit_logs(limit=0)
+    with pytest.raises(ValueError, match="limit は 1 以上"):
+        store_with_audit_rows.list_audit_logs(limit=-1)
+
+
 # ---------------------------------------------------------------------------
 # CLI: _handle_audit (list / show)
 # ---------------------------------------------------------------------------
 
 
 def _run_audit(args_list: list[str], database_path: Path) -> tuple[int, str]:
-    """`hokusai audit ...` を internal handler 経由で実行し (rc, stdout) を返す"""
-    from hokusai.cli_main import _handle_audit
+    """`hokusai audit ...` を **実 `_build_parser()` 経由で** 実行し (rc, stdout)
+    を返す（PR #123 Copilot Round 1 指摘: 別途 parser を作るとサブコマンド配線
+    のドリフトを検知できないため、本番 parser を使う）。
+    """
+    from hokusai.cli_main import _build_parser, _handle_audit
 
     class _Cfg:
         pass
@@ -164,20 +176,8 @@ def _run_audit(args_list: list[str], database_path: Path) -> tuple[int, str]:
     cfg = _Cfg()
     cfg.database_path = database_path
 
-    # argparse でパース
-    import argparse
-    parser = argparse.ArgumentParser()
-    sub = parser.add_subparsers(dest="audit_subcommand")
-    p_list = sub.add_parser("list")
-    p_list.add_argument("--workflow-id", default=None)
-    p_list.add_argument("--phase", type=int, default=None)
-    p_list.add_argument("--action", default=None)
-    p_list.add_argument("--status", default=None)
-    p_list.add_argument("--limit", type=int, default=20)
-    p_list.add_argument("--output", choices=("table", "json"), default="table")
-    p_show = sub.add_parser("show")
-    p_show.add_argument("audit_id", type=int)
-    args = parser.parse_args(args_list)
+    parser, _profile_parser, _connect_parser = _build_parser()
+    args = parser.parse_args(["audit", *args_list])
 
     buf = StringIO()
     with patch.object(sys, "stdout", buf):
@@ -252,3 +252,13 @@ def test_cli_audit_show_missing_id_returns_error(
     db_path = Path(store_with_audit_rows.db_path)
     rc, _ = _run_audit(["show", "999"], db_path)
     assert rc == 1
+
+
+def test_cli_audit_list_rejects_negative_limit(store_with_audit_rows, tmp_path):
+    """`--limit 0` や `--limit -1` を CLI で reject する（PR #123 Copilot Round 1）"""
+    db_path = Path(store_with_audit_rows.db_path)
+    err_buf = StringIO()
+    with patch.object(sys, "stderr", err_buf):
+        rc, _ = _run_audit(["list", "--limit", "0"], db_path)
+    assert rc == 1
+    assert "--limit は 1 以上" in err_buf.getvalue()

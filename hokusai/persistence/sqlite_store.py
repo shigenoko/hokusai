@@ -799,12 +799,24 @@ class SQLiteStore:
             phase: 指定すれば一致行のみ返す
             action: 指定すれば一致行のみ返す（例 "llm_gateway_decision"）
             status: 指定すれば一致行のみ返す（例 "block" / "log"）
-            limit: 取得上限（既定 50、`ORDER BY id DESC` で最新優先）
+            limit: 取得上限（既定 50、`ORDER BY id DESC` で最新優先）。**必ず
+                1 以上**を渡すこと。SQLite は negative LIMIT を「no limit」と
+                解釈する（PR #123 Copilot Round 1 指摘）ため、`limit < 1` の
+                ときは `ValueError` を raise し全件返却を防ぐ。
 
         Returns:
             audit_logs 行の dict のリスト（id / workflow_id / phase / action /
             status / details (parsed JSON) / created_at）。最新が先頭。
+
+        Raises:
+            ValueError: `limit` が 1 未満の場合（誤って全件返るのを防ぐ）。
         """
+        if limit < 1:
+            raise ValueError(
+                f"limit は 1 以上を指定してください（指定値={limit}）。"
+                "SQLite は negative LIMIT を no limit と解釈するため、"
+                "0 や負値で誤って audit_logs 全件を返すことを防ぐ。"
+            )
         clauses: list[str] = []
         params: list[Any] = []
         if workflow_id is not None:
