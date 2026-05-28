@@ -356,6 +356,74 @@ class SQLiteStore:
                 ON miro_board_cache(board_id)
             """)
 
+            # Prime v2 MVP-1 (docs/design-prime-v2.md §4.2): query 検索 +
+            # gap analysis の土台となる全文検索インデックス。virtual table
+            # prime_index は FTS5 で title / body を検索し、meta table は
+            # 引用 (citation) 用のソースアドレス (notion_page_id / pr_url /
+            # file_path) を保持する。
+            #
+            # tokenize=unicode61 remove_diacritics 2 は混在する日本語 / 英語
+            # を素直に保持する基本セット。日本語の複合句が割れる挙動が
+            # dogfooding で問題になったら trigram への切替を検討する
+            # (docs/design-prime-v2.md §10 未解決の設計問題 2)
+            #
+            # 列の indexed / UNINDEXED 設計:
+            # - workflow_id / source_type / source_id / phase: filter 専用
+            #   なので全て UNINDEXED。indexed のままだと
+            #   `MATCH 'memory'` のような query で source_type に当たって
+            #   ランキングを汚染する（PR #134 Copilot Round 1 指摘）。
+            # - title / body: 全文検索の本来の対象なので indexed
+            #
+            # MVP-1 段階で既存 DB を持つユーザーがいた場合（旧 DDL =
+            # source_type が indexed）の互換: sqlite_master から実 DDL を
+            # 取得して `source_type UNINDEXED` が含まれていない場合のみ
+            # DROP + CREATE で rebuild する。実 backfill 経路はまだないの
+            # で prime_index は空のはずで、rebuild はデータ損失を起こさない。
+            #
+            # PR #134 Copilot Round 2 指摘:
+            # - DDL 判定は case-insensitive にする。SQLite は user が書いた
+            #   case をそのまま sqlite_master に保持するため、小文字
+            #   `unindexed` で書かれた DDL を誤って legacy 判定しないように
+            #   `.lower()` で正規化する。
+            # - DROP は `IF EXISTS` を付ける。複数プロセス同時起動の race
+            #   condition で他プロセスが先に DROP した場合の `no such table`
+            #   を黙殺する。
+            cursor = conn.execute(
+                "SELECT sql FROM sqlite_master "
+                "WHERE type='table' AND name='prime_index'"
+            )
+            row = cursor.fetchone()
+            if row is not None:
+                existing_sql = (row[0] or "").lower()
+                if "source_type unindexed" not in existing_sql:
+                    # 旧 DDL を検出。MVP-1 段階で実 backfill が無い前提
+                    # なのでデータ損失を許容して DROP + 再作成する。
+                    conn.execute("DROP TABLE IF EXISTS prime_index")
+            conn.execute("""
+                CREATE VIRTUAL TABLE IF NOT EXISTS prime_index USING fts5(
+                    workflow_id UNINDEXED,
+                    source_type UNINDEXED,
+                    source_id UNINDEXED,
+                    phase UNINDEXED,
+                    title,
+                    body,
+                    tokenize = 'unicode61 remove_diacritics 2'
+                )
+            """)
+
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS prime_index_meta (
+                    workflow_id TEXT NOT NULL,
+                    source_type TEXT NOT NULL,
+                    source_id TEXT NOT NULL,
+                    notion_page_id TEXT,
+                    pr_url TEXT,
+                    file_path TEXT,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (workflow_id, source_type, source_id)
+                )
+            """)
+
             conn.commit()
 
     def save_workflow(self, workflow_id: str, state: dict[str, Any]) -> None:
@@ -1386,6 +1454,147 @@ class SQLiteStore:
             conn.commit()
             return deleted
 
+    def upsert_prime_index(
+        self,
+        workflow_id: str,
+        source_type: str,
+        source_id: str,
+        title: str,
+        body: str,
+        *,
+        phase: int | None = None,
+        notion_page_id: str | None = None,
+        pr_url: str | None = None,
+        file_path: str | None = None,
+    ) -> None:
+        """Prime v2 MVP-1: `prime_index` (FTS5) と `prime_index_meta` に
+        1 件 upsert する。
+
+        FTS5 virtual table は `INSERT OR REPLACE` を素直にサポートしない
+        ため、`(workflow_id, source_type, source_id)` 一致行を先に DELETE
+        してから INSERT する。meta table は通常テーブルなので UPSERT。
+
+        Args:
+            workflow_id: 起点 workflow ID (citation の主キー要素)
+            source_type: 'memory' / 'work_item' / 'review_issue' / 'gate'
+                / 'pr' / 'handover_note' 等
+            source_id: source_type 内で一意な識別子（Notion page ID か
+                workflow.db row id のいずれか）
+            title: 検索対象タイトル (FTS5 indexed)
+            body: 検索対象本文 (FTS5 indexed)
+            phase: 関連 phase（あれば）
+            notion_page_id / pr_url / file_path: 引用元アドレス（meta）
+        """
+        now = datetime.now().isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM prime_index "
+                "WHERE workflow_id = ? AND source_type = ? AND source_id = ?",
+                (workflow_id, source_type, source_id),
+            )
+            conn.execute(
+                "INSERT INTO prime_index "
+                "(workflow_id, source_type, source_id, phase, title, body) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (workflow_id, source_type, source_id, phase, title, body),
+            )
+            conn.execute(
+                "INSERT INTO prime_index_meta "
+                "(workflow_id, source_type, source_id, "
+                "notion_page_id, pr_url, file_path, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(workflow_id, source_type, source_id) DO UPDATE SET "
+                "notion_page_id = excluded.notion_page_id, "
+                "pr_url = excluded.pr_url, "
+                "file_path = excluded.file_path, "
+                "updated_at = excluded.updated_at",
+                (
+                    workflow_id,
+                    source_type,
+                    source_id,
+                    notion_page_id,
+                    pr_url,
+                    file_path,
+                    now,
+                ),
+            )
+            conn.commit()
+
+    def search_prime_index(
+        self,
+        query: str,
+        *,
+        workflow_id: str | None = None,
+        source_types: list[str] | None = None,
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        """Prime v2 MVP-1: `prime_index` (FTS5) を query で検索し、
+        meta を JOIN して引用情報付きの結果を返す。
+
+        Args:
+            query: FTS5 MATCH クエリ（空文字 / 空白のみは空リスト返却）
+            workflow_id: 指定すれば該当 workflow に絞り込む
+            source_types: 指定すれば source_type のいずれかに絞り込む
+            limit: 返却件数上限（>= 1）
+
+        Returns:
+            検索結果 dict のリスト。各 dict は以下:
+              - workflow_id, source_type, source_id, phase
+              - title, body, rank (FTS5 BM25 ベース、小さいほど関連度高)
+              - notion_page_id, pr_url, file_path, updated_at (meta から)
+        """
+        if not query or not query.strip():
+            return []
+        if limit < 1:
+            raise ValueError(f"limit must be >= 1, got {limit}")
+
+        sql = (
+            "SELECT pi.workflow_id, pi.source_type, pi.source_id, pi.phase, "
+            "pi.title, pi.body, bm25(prime_index) AS rank, "
+            "pim.notion_page_id, pim.pr_url, pim.file_path, pim.updated_at "
+            "FROM prime_index AS pi "
+            "LEFT JOIN prime_index_meta AS pim "
+            "ON pi.workflow_id = pim.workflow_id "
+            "AND pi.source_type = pim.source_type "
+            "AND pi.source_id = pim.source_id "
+            "WHERE prime_index MATCH ?"
+        )
+        params: list[Any] = [query]
+        if workflow_id is not None:
+            sql += " AND pi.workflow_id = ?"
+            params.append(workflow_id)
+        if source_types:
+            placeholders = ",".join("?" * len(source_types))
+            sql += f" AND pi.source_type IN ({placeholders})"
+            params.extend(source_types)
+        sql += " ORDER BY rank LIMIT ?"
+        params.append(limit)
+
+        with self._connect() as conn:
+            cursor = conn.execute(sql, params)
+            cols = [d[0] for d in cursor.description]
+            return [dict(zip(cols, row, strict=True)) for row in cursor.fetchall()]
+
+    def clear_prime_index_for_workflow(self, workflow_id: str) -> int:
+        """指定 workflow_id の `prime_index` と `prime_index_meta` を全削除。
+
+        backfill 前の冪等化（同一 workflow を再 index する際の重複防止）
+        に使う。返り値は `prime_index_meta` 側の削除行数（FTS5 virtual
+        table の rowcount は実装依存で意味的に薄い）。
+        """
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM prime_index WHERE workflow_id = ?",
+                (workflow_id,),
+            )
+            cursor = conn.execute(
+                "DELETE FROM prime_index_meta WHERE workflow_id = ?",
+                (workflow_id,),
+            )
+            deleted = cursor.rowcount
+            conn.commit()
+            return deleted
+
     # workflow_id をキーに持つ依存テーブル（M2.5 / #100 cascade-delete 用）。
     # workflows テーブル自体を含めず、cascade 対象の dependent table のみ列挙。
     # レガシー DB でテーブル不在の場合は skip するため try/except で個別に処理。
@@ -1399,6 +1608,8 @@ class SQLiteStore:
         "miro_sync_outbox",
         "miro_sync_errors",
         "design_writeback_idempotency",
+        "prime_index",
+        "prime_index_meta",
     )
 
     def delete_old_completed_workflows(
