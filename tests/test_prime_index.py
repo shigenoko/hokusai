@@ -181,6 +181,66 @@ def test_meta_fields_propagate_through_search(store: SQLiteStore) -> None:
     assert row["updated_at"] is not None
 
 
+def test_search_does_not_match_source_type_value(store: SQLiteStore) -> None:
+    """source_type は UNINDEXED なので `MATCH 'memory'` 等で source_type の
+    値そのものに当たってランキングが汚染されない（PR #134 Copilot Round 1
+    指摘の回帰防止）。
+    """
+    store.upsert_prime_index(
+        workflow_id="wf-1", source_type="memory", source_id="a",
+        title="hello world", body="lorem ipsum",
+    )
+    store.upsert_prime_index(
+        workflow_id="wf-1", source_type="review_issue", source_id="b",
+        title="hello world", body="lorem ipsum",
+    )
+    # title / body に "memory" は含まれていないので 0 件であるべき
+    assert store.search_prime_index("memory") == []
+    # 同様に "review_issue" でも 0 件
+    assert store.search_prime_index("review_issue") == []
+
+
+def test_legacy_schema_migrates_to_unindexed_source_type(tmp_path: Path) -> None:
+    """旧 DDL (source_type indexed) の DB を開いた時に migration が走る
+
+    sqlite_master から取得した DDL に `source_type UNINDEXED` が含まれて
+    いない場合のみ DROP + CREATE が実行される。MVP-1 段階では実 backfill
+    経路がないので prime_index は空のまま rebuild される（PR #134 Copilot
+    Round 1 指摘の回帰防止）。
+    """
+    import sqlite3
+
+    db_path = tmp_path / "legacy.db"
+    # 旧 DDL を直接書き込む（source_type が indexed の状態）
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE VIRTUAL TABLE prime_index USING fts5("
+            "workflow_id UNINDEXED, source_type, source_id UNINDEXED, "
+            "phase UNINDEXED, title, body, "
+            "tokenize='unicode61 remove_diacritics 2')"
+        )
+        conn.commit()
+
+    # SQLiteStore() で開くと migration が走り、新 DDL に置き換わる
+    store = SQLiteStore(db_path)
+
+    with store._connect() as conn:
+        sql_row = conn.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type='table' AND name='prime_index'"
+        ).fetchone()
+    assert sql_row is not None
+    assert "source_type UNINDEXED" in (sql_row[0] or "")
+
+    # 新 DDL でちゃんと動作する（MATCH 'memory' が source_type に当たらない）
+    store.upsert_prime_index(
+        workflow_id="wf-1", source_type="memory", source_id="a",
+        title="hello", body="world",
+    )
+    assert store.search_prime_index("memory") == []
+    assert len(store.search_prime_index("hello")) == 1
+
+
 def test_japanese_tokenization_limits(store: SQLiteStore) -> None:
     """unicode61 では日本語連続文字が空白区切りの塊単位で 1 token 化される
 

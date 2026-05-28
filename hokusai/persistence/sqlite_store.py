@@ -366,10 +366,34 @@ class SQLiteStore:
             # を素直に保持する基本セット。日本語の複合句が割れる挙動が
             # dogfooding で問題になったら trigram への切替を検討する
             # (docs/design-prime-v2.md §10 未解決の設計問題 2)
+            #
+            # 列の indexed / UNINDEXED 設計:
+            # - workflow_id / source_type / source_id / phase: filter 専用
+            #   なので全て UNINDEXED。indexed のままだと
+            #   `MATCH 'memory'` のような query で source_type に当たって
+            #   ランキングを汚染する（PR #134 Copilot Round 1 指摘）。
+            # - title / body: 全文検索の本来の対象なので indexed
+            #
+            # MVP-1 段階で既存 DB を持つユーザーがいた場合（旧 DDL =
+            # source_type が indexed）の互換: sqlite_master から実 DDL を
+            # 取得して `source_type UNINDEXED` が含まれていない場合のみ
+            # DROP + CREATE で rebuild する。実 backfill 経路はまだないの
+            # で prime_index は空のはずで、rebuild はデータ損失を起こさない。
+            cursor = conn.execute(
+                "SELECT sql FROM sqlite_master "
+                "WHERE type='table' AND name='prime_index'"
+            )
+            row = cursor.fetchone()
+            if row is not None:
+                existing_sql = row[0] or ""
+                if "source_type UNINDEXED" not in existing_sql:
+                    # 旧 DDL を検出。MVP-1 段階で実 backfill が無い前提
+                    # なのでデータ損失を許容して DROP + 再作成する。
+                    conn.execute("DROP TABLE prime_index")
             conn.execute("""
                 CREATE VIRTUAL TABLE IF NOT EXISTS prime_index USING fts5(
                     workflow_id UNINDEXED,
-                    source_type,
+                    source_type UNINDEXED,
                     source_id UNINDEXED,
                     phase UNINDEXED,
                     title,
