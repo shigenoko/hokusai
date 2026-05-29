@@ -268,8 +268,13 @@ def render_notion_dashboard_panel() -> str:
     # gap が無ければ何も出さず、従来パネルの見た目を維持する。
     gaps_html = ""
     if _gaps:
+        # Gap.detail は将来 review issue タイトル / workflow_id 等の外部由来
+        # 文字列を含みうる設計 (hokusai/prime_gaps.py) なので、HTML 展開前に
+        # 必ず escape する (XSS 防御、PR #142 Copilot Round 1 指摘)。
         gap_items = "".join(
-            f"<li><code>{g['kind']}</code>: {g['detail']}</li>" for g in _gaps
+            f"<li><code>{html_mod.escape(g['kind'])}</code>: "
+            f"{html_mod.escape(g['detail'])}</li>"
+            for g in _gaps
         )
         gaps_html = (
             '<div style="margin-top:8px; font-size:0.85em; color:#b35900;">'
