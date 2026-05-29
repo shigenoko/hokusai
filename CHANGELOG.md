@@ -22,7 +22,7 @@ HOKUSAI のすべての特筆すべき変更をこのファイルに記録する
 
 GBrain (AI agent 用長期記憶エンジン) 調査から起こした **v0.6 ロードマップ Step 1「Prime v2」** の MVP-1 / MVP-2 / MVP-4 を実装した minor リリース。`hokusai prime` を「active context の整形出力」から「**過去 workflow 資産を検索し、不足情報を能動的に検出する**」方向へ拡張した。設計議論は [docs/roadmap-gbrain-inspirations.md](docs/roadmap-gbrain-inspirations.md) / [docs/design-prime-v2.md](docs/design-prime-v2.md)、実環境 dogfooding は [docs/dogfooding-findings.md §10](docs/dogfooding-findings.md) を参照。
 
-すべて additive で **`hokusai prime` の既存出力は後方互換 100%**（新フラグ `--query` / `--include-gaps` 未指定なら v0.5.x と同一出力）。
+すべて additive。新フラグ `--query` / `--include-gaps` 未指定時、**Markdown 出力は v0.5.x と完全に同一**（検索結果 / gap section は現れない）。**JSON 出力は additive なキー `query` / `query_results` / `gaps` が増える**が、いずれも未指定時は `null` のため、既存キーを参照する consumer は影響を受けない（byte 単位では非同一だが、後方互換）。
 
 ### Added
 
