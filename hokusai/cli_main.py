@@ -447,7 +447,11 @@ def _build_parser():
     profile_doctor_parser.add_argument(
         "--deep",
         action="store_true",
-        help="実 API 接続まで踏み込んだ詳細診断（rate limit を消費するため明示指定）",
+        help=(
+            "静的検査に加えて runtime 運用ヘルス検査を実行する "
+            "(Notion sync outbox の滞留 / 運用ギャップを SQLite から集約)。"
+            "live API 呼び出しは行わない"
+        ),
     )
 
     # dashboard コマンド: Operations Console を profile 指定で起動
