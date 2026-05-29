@@ -609,6 +609,46 @@ def _build_parser():
         parents=[shared_options],
     )
 
+    # operations コマンド: Operation Registry（Step 3 第1スライス）。
+    # read-only operation を 1 箇所に集約し、CLI / Dashboard / 将来の MCP が
+    # 同じ handler を呼ぶ単一経路を作る。
+    operations_parser = subparsers.add_parser(
+        "operations",
+        help="Operation Registry を一覧・実行する（read-only operations）",
+        parents=[shared_options],
+    )
+    operations_subparsers = operations_parser.add_subparsers(
+        dest="operations_subcommand",
+        help="operations サブコマンド",
+    )
+
+    operations_list_parser = operations_subparsers.add_parser(
+        "list",
+        help="登録 operation を一覧表示（name / scope / summary）",
+        parents=[shared_options],
+    )
+    operations_list_parser.add_argument(
+        "--output",
+        choices=("text", "json"),
+        default="text",
+        help="出力形式（既定 text）。json は stable schema を 1 つ stdout に出す",
+    )
+
+    operations_run_parser = operations_subparsers.add_parser(
+        "run",
+        help="read-only operation を実行し結果を JSON で表示",
+        parents=[shared_options],
+    )
+    operations_run_parser.add_argument("name", help="operation 名（例 runtime.health）")
+    operations_run_parser.add_argument(
+        "--param",
+        action="append",
+        dest="params",
+        default=None,
+        metavar="KEY=VALUE",
+        help="operation 入力パラメータ（複数指定可: --param workflow_id=wf-xxx）",
+    )
+
     return parser, profile_parser, connect_parser
 
 
@@ -921,6 +961,10 @@ def main():
     # audit コマンド: audit_logs を CLI から覗く（F3 / PR #123）
     if args.command == "audit":
         sys.exit(_handle_audit(args, config))
+
+    # operations コマンド: Operation Registry（Step 3 第1スライス）
+    if args.command == "operations":
+        sys.exit(_handle_operations(args, config))
 
     # llm-gateway-setup コマンド: 現 LLM Gateway 設定を診断 + 推奨設定提示
     # （F2 / PR #125）。
@@ -1556,6 +1600,100 @@ def _sanitize_fts5_query(q: str) -> str:
         return q
     escaped = q.replace('"', '""')
     return f'"{escaped}"'
+
+
+def _parse_operation_params(raw_params: list[str] | None) -> dict[str, str]:
+    """`--param KEY=VALUE` の繰り返しを dict に変換する。
+
+    `=` を含まない / KEY が空の指定は ValueError で reject する
+    （silent に無視すると入力ミスに気付けないため）。VALUE 側の `=` は
+    最初の 1 つでのみ分割するので `--param expr=a=b` は {"expr": "a=b"}。
+    """
+    parsed: dict[str, str] = {}
+    for item in raw_params or []:
+        if "=" not in item:
+            raise ValueError(
+                f"--param は KEY=VALUE 形式で指定してください: {item!r}"
+            )
+        key, value = item.split("=", 1)
+        key = key.strip()
+        if not key:
+            raise ValueError(f"--param の KEY が空です: {item!r}")
+        parsed[key] = value
+    return parsed
+
+
+def _handle_operations(args, config) -> int:
+    """`hokusai operations ...` のハンドラ（Step 3 第1スライス）。
+
+    Operation Registry を一覧 / 実行する。`run` は read-only operation のみ
+    許可し、戻り値を JSON で stdout に出す（CLI / Dashboard / 将来の MCP が
+    同じ handler を呼ぶ単一経路の CLI 入口）。
+
+    Returns:
+        0: 正常 / 1: 未知の operation・不正パラメータ・scope 違反など
+    """
+    import json
+
+    from .operations import default_registry
+
+    registry = default_registry()
+    subcommand = getattr(args, "operations_subcommand", None)
+
+    if subcommand == "list":
+        output = getattr(args, "output", "text")
+        ops = registry.list()
+        if output == "json":
+            payload = [
+                {
+                    "name": op.name,
+                    "scope": op.scope,
+                    "summary": op.summary,
+                    "input_schema": op.input_schema,
+                }
+                for op in ops
+            ]
+            print(json.dumps({"operations": payload}, ensure_ascii=False, indent=2))
+        else:
+            print("登録 operations:")
+            for op in ops:
+                print(f"  {op.name}  [{op.scope}]")
+                print(f"    {op.summary}")
+        return 0
+
+    if subcommand == "run":
+        name = args.name
+        op = registry.get(name)
+        if op is None:
+            available = ", ".join(registry.names()) or "(なし)"
+            print(f"✗ 未知の operation: {name}")
+            print(f"  利用可能: {available}")
+            return 1
+        # 第1スライスでは mutating operation を CLI から実行させない
+        # （read-only 経路の単一化が目的。副作用つきは後続スライスで
+        #  確認フロー込みで解禁する）。
+        if not op.is_read_only:
+            print(f"✗ operation '{name}' は scope={op.scope} のため run できません")
+            print("  第1スライスでは read-only operation のみ実行可能です")
+            return 1
+        try:
+            params = _parse_operation_params(getattr(args, "params", None))
+        except ValueError as e:
+            print(f"✗ {e}")
+            return 1
+
+        from .persistence import SQLiteStore
+
+        store = SQLiteStore(config.database_path)
+        result = op.handler(params, store=store, config=config)
+        print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+        return 0
+
+    # subcommand 未指定 → usage を表示
+    print("使い方: hokusai operations {list|run} ...")
+    print("  list           登録 operation を一覧表示")
+    print("  run <name>     read-only operation を実行")
+    return 1
 
 
 def _handle_prime(args, config) -> int:

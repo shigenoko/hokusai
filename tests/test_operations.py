@@ -1,0 +1,177 @@
+"""Operation Registry (Step 3 第1スライス) のテスト。
+
+registry インフラ (登録・取得・一覧・重複拒否)、seed read-only operation の
+handler、CLI `--param KEY=VALUE` パーサを検証する。
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from hokusai.cli_main import _parse_operation_params
+from hokusai.operations import (
+    READ_ONLY,
+    Operation,
+    OperationRegistry,
+    build_default_registry,
+    default_registry,
+)
+
+
+class _FakeStore:
+    """read-only handler が呼ぶメソッドだけを持つ store ダブル。"""
+
+    def __init__(self, *, pending=0, errors=0, workflows=None):
+        self._pending = pending
+        self._errors = errors
+        self._workflows = workflows or []
+
+    def count_notion_sync_pending(self):
+        return self._pending
+
+    def count_notion_sync_errors(self):
+        return self._errors
+
+    def list_active_workflows(self):
+        return self._workflows
+
+
+class _FakeConfig:
+    """llm_gateway.enabled だけ持つ config ダブル。"""
+
+    class _GW:
+        enabled = False
+
+    llm_gateway = _GW()
+
+
+# --- registry インフラ ---------------------------------------------------
+
+
+def test_registry_register_and_get():
+    reg = OperationRegistry()
+    op = Operation(
+        name="x.y",
+        summary="s",
+        scope=READ_ONLY,
+        input_schema={"type": "object", "properties": {}, "required": []},
+        handler=lambda params, *, store, config: {},
+    )
+    reg.register(op)
+    assert reg.get("x.y") is op
+    assert reg.get("missing") is None
+
+
+def test_registry_rejects_duplicate():
+    reg = OperationRegistry()
+    op = Operation(
+        name="dup",
+        summary="s",
+        scope=READ_ONLY,
+        input_schema={"type": "object", "properties": {}, "required": []},
+        handler=lambda params, *, store, config: {},
+    )
+    reg.register(op)
+    with pytest.raises(ValueError, match="already registered"):
+        reg.register(op)
+
+
+def test_registry_names_sorted():
+    reg = OperationRegistry()
+    for n in ("c.op", "a.op", "b.op"):
+        reg.register(
+            Operation(
+                name=n,
+                summary="",
+                scope=READ_ONLY,
+                input_schema={"type": "object", "properties": {}, "required": []},
+                handler=lambda params, *, store, config: {},
+            )
+        )
+    assert reg.names() == ["a.op", "b.op", "c.op"]
+    assert [op.name for op in reg.list()] == ["a.op", "b.op", "c.op"]
+
+
+def test_default_registry_is_singleton():
+    assert default_registry() is default_registry()
+
+
+def test_build_default_registry_seeds_read_only_ops():
+    reg = build_default_registry()
+    names = reg.names()
+    assert "notion.outbox_status" in names
+    assert "runtime.health" in names
+    assert "workflow.list" in names
+    # 第1スライスは全て read-only
+    assert all(op.is_read_only for op in reg.list())
+
+
+# --- seed handler --------------------------------------------------------
+
+
+def test_op_notion_outbox_status():
+    reg = build_default_registry()
+    op = reg.get("notion.outbox_status")
+    result = op.handler(
+        {}, store=_FakeStore(pending=2, errors=1), config=_FakeConfig()
+    )
+    assert result == {"pending": 2, "errors": 1}
+
+
+def test_op_workflow_list():
+    reg = build_default_registry()
+    op = reg.get("workflow.list")
+    wfs = [{"workflow_id": "wf-1"}, {"workflow_id": "wf-2"}]
+    result = op.handler({}, store=_FakeStore(workflows=wfs), config=_FakeConfig())
+    assert result == {"workflows": wfs}
+
+
+def test_op_runtime_health_delegates_to_compute(monkeypatch):
+    import hokusai.health as health_mod
+
+    captured = {}
+
+    def _fake(store, *, llm_gateway_enabled, workflow_id=None, state=None):
+        captured["llm"] = llm_gateway_enabled
+        captured["wf"] = workflow_id
+        return {"ran": True, "gaps": []}
+
+    monkeypatch.setattr(health_mod, "compute_runtime_health", _fake)
+    reg = build_default_registry()
+    op = reg.get("runtime.health")
+    result = op.handler(
+        {"workflow_id": "wf-9"}, store=_FakeStore(), config=_FakeConfig()
+    )
+    assert result == {"ran": True, "gaps": []}
+    assert captured["wf"] == "wf-9"
+    assert captured["llm"] is False
+
+
+# --- --param パーサ ------------------------------------------------------
+
+
+def test_parse_operation_params_basic():
+    assert _parse_operation_params(["a=1", "b=2"]) == {"a": "1", "b": "2"}
+
+
+def test_parse_operation_params_none():
+    assert _parse_operation_params(None) == {}
+
+
+def test_parse_operation_params_value_with_equals():
+    assert _parse_operation_params(["expr=a=b"]) == {"expr": "a=b"}
+
+
+def test_parse_operation_params_rejects_missing_equals():
+    with pytest.raises(ValueError, match="KEY=VALUE"):
+        _parse_operation_params(["noequals"])
+
+
+def test_parse_operation_params_rejects_empty_key():
+    with pytest.raises(ValueError, match="KEY が空"):
+        _parse_operation_params(["=value"])
