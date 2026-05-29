@@ -481,6 +481,36 @@ v0.5.1 で F1-F4 が解消され Phase 2 enforcement の配線が 3 段階で検
 
 ---
 
+## 10. Prime v2 (MVP-1/2/4) の実環境 dogfooding (2026-05-29)
+
+[docs/design-prime-v2.md](design-prime-v2.md) §8.1 の MVP-1 (FTS5 index 土台, PR #134) / MVP-2 (`--query` + active context backfill, PR #135) / MVP-4 (`--include-gaps` gap analysis 3 種, PR #136) をマージ後、HOKUSAI 本体 profile (`hokusai`) の既存 workflow `wf-dbe7b6cd` (current_phase=7) を対象に実 `hokusai prime` を走らせて観察した。**コード変更なしの観察ログ**。
+
+### 観察手順
+
+| Step | 操作 |
+|---|---|
+| 1 | `wf-dbe7b6cd` の SQLite 状態を確認 (`audit_logs` 5 件 / `notion_sync_outbox` 12 件 pending / `prime_index` テーブル不在) |
+| 2 | `uv run hokusai prime wf-dbe7b6cd --profile hokusai --include-gaps` |
+| 3 | `uv run hokusai prime wf-dbe7b6cd --profile hokusai --query "dogfooding"` |
+| 4 | `HOKUSAI_LLM_GATEWAY_ENABLED=1 ... --include-gaps --output json` で `audit_log_silence` の誤検出有無を確認 |
+
+### 実観察結果
+
+- ✅ **MVP-1 migration が既存 DB で無事走った**: `wf-dbe7b6cd` の `workflow.db` は MVP-1 マージ前 (2026-05-28 18:07) に最終更新されており `prime_index` テーブルが無かったが、prime 初回起動時に `SQLiteStore._init_db()` が FTS5 virtual table + shadow tables (`prime_index_data` / `_idx` / `_content` / `_docsize` / `_config`) + `prime_index_meta` を作成。DDL に `source_type UNINDEXED` (PR #134 Round 1 修正) が含まれることも確認。**既存ユーザー DB の前方互換が実証された**。
+- ✅ **MVP-4 `notion_outbox_pending` gap が正しく発火**: outbox に 12 件 pending がある状態で `--include-gaps` を実行すると、「未確定 / 不足情報 (gap analysis)」セクションに `notion_outbox_pending` が 1 件出力され、件数 (12 件) と Operations Console 同期再送ボタンへの導線が表示された。
+- ✅ **gap section が active context 空でも出力される**: 本 workflow は Notion DB ID env が未設定 (`HOKUSAI_NOTION_PROJECT_MEMORY_DB_ID` 等) で active context が全カテゴリ空 (`_active な workgraph context はありません_`) だが、has_any=False の早期 return パスでも gap section が描画された (MVP-4 で early-return パスに `_render_gap_section` を追加した修正が実環境で機能)。
+- ✅ **`audit_log_silence` の誤検出なし**: `wf-dbe7b6cd` は `audit_logs` を 3 件持つ (workflow 別集計: dbe7b6cd=3 / f373fac6=1 / reobservation-001=1)。`HOKUSAI_LLM_GATEWAY_ENABLED=1` で Gateway を有効化して `--include-gaps` を再実行しても gap kinds は `["notion_outbox_pending"]` のみで、`audit_log_silence` は発火しなかった。**scoped 検出 (workflow_id 絞り) が正しく機能し、audit 行がある workflow を誤って silent 判定しない**ことを実証。
+- ✅ **MVP-2 `--query` は動作するが検索対象が空**: `--query "dogfooding"` は例外なく完走し「検索結果（query: `dogfooding`）」セクションを出力したが、結果は「_該当する記録はありません_」。これは active context (Notion DB) が未設定で `prime_index` に backfill される entry が 0 件のため。**正しい挙動**だが、§1 で記録した運用穴 (Notion DB share / env 未設定) が解消されない限り MVP-2 の検索価値は出ない。
+
+### 評価 + 次のアクション候補
+
+- **SQLite-backed な gap (`notion_outbox_pending` / `audit_log_silence`) は Notion 接続なしで即座に価値を出す**。現 dogfooding 環境 (Notion DB 未配線) でも outbox の滞留を 1 コマンドで可視化できた点は実用的。
+- **Notion-backed な機能 (`--query` の検索対象 / `unresolved_review_issue_open` gap) は §1 運用穴に依存**。Prime v2 の「引用つき合成」価値をフルに引き出すには、Notion DB ID env の設定 + integration share が前提。これは [#130](https://github.com/shigenoko/hokusai/pull/130) で手順を docs 化済みだが、実環境ではまだ env 未設定。
+- ⚠ **小さな観察**: prime diagnostics が `HOKUSAI_NOTION_PROJECT_MEMORY_DB_ID` (汎用名) を表示している。profile config で `_4HOKUSAI` 等の profile-tagged env 名を使う設定にしていない場合の既定動作と思われる。誤誘導ではないが、profile 運用時に「どの env を設定すべきか」が分かりにくい可能性 (別途検証対象)。
+- **次マイルストーン候補**: (a) 残り gap 4 種 (MVP-5: `missing_verification_command` / `pending_gate_blocking` / `phase4_plan_missing` / `supersedes_chain_broken`) のうち SQLite-backed で完結するもの (`phase4_plan_missing` 等) を優先実装、(b) MVP-3 (citation リッチ整形) は Notion DB 配線後に dogfooding して必要要件を固めてから着手。
+
+---
+
 ## Appendix A: 観察用に叩いたコマンド
 
 ```bash
