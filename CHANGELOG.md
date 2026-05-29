@@ -12,11 +12,37 @@ HOKUSAI のすべての特筆すべき変更をこのファイルに記録する
 
 ## [Unreleased]
 
+### 追加 / 変更 / 削除予定
+
+- 未定
+
+---
+
+## [0.6.0] - 2026-05-29
+
+GBrain (AI agent 用長期記憶エンジン) 調査から起こした **v0.6 ロードマップ Step 1「Prime v2」** の MVP-1 / MVP-2 / MVP-4 を実装した minor リリース。`hokusai prime` を「active context の整形出力」から「**過去 workflow 資産を検索し、不足情報を能動的に検出する**」方向へ拡張した。設計議論は [docs/roadmap-gbrain-inspirations.md](docs/roadmap-gbrain-inspirations.md) / [docs/design-prime-v2.md](docs/design-prime-v2.md)、実環境 dogfooding は [docs/dogfooding-findings.md §10](docs/dogfooding-findings.md) を参照。
+
+すべて additive で **`hokusai prime` の既存出力は後方互換 100%**（新フラグ `--query` / `--include-gaps` 未指定なら v0.5.x と同一出力）。
+
 ### Added
 
-- **Prime v2 MVP-1: FTS5 検索インデックスの土台**: `SQLiteStore` に FTS5 virtual table `prime_index` + meta table `prime_index_meta` を追加し、`upsert_prime_index()` / `search_prime_index()` / `clear_prime_index_for_workflow()` の 3 メソッドを実装。`_WORKFLOW_DEPENDENT_TABLES` にも追加し completed workflow の cascade-delete で孤児化しない。検索バックエンドは `unicode61 remove_diacritics 2`、引用 (citation) 用に `notion_page_id` / `pr_url` / `file_path` を meta に保持。本段階では CLI 統合や backfill は含まず、土台のみ ([docs/design-prime-v2.md §8.1 MVP-1](docs/design-prime-v2.md))。回帰防止テスト 16 件 (`tests/test_prime_index.py`)。
-- **Prime v2 MVP-4: gap analysis (決定的検出 3 種)**: `hokusai prime <wf> --include-gaps` で「未確定 / 不足情報」セクションを追加。LLM 不要・決定的に検出する 3 種を実装: `unresolved_review_issue_open` (起点 workflow に紐づく Review Issue で Status=Open)、`notion_outbox_pending` (`notion_sync_outbox` に pending 行あり)、`audit_log_silence` (LLM Gateway 有効なのに `audit_logs` 0 件 = interceptor 経路無効化の疑い)。各 detector は純関数として `hokusai/prime_gaps.py` に分離、失敗は best-effort で握りつぶし prime 本来の出力を阻害しない。Markdown / JSON 両形式で出力。`--include-gaps` 未指定時は v1/MVP-2 と完全互換 (gap section 非出力、JSON も `gaps: null`)。残り 4 種 (`missing_verification_command` / `pending_gate_blocking` / `phase4_plan_missing` / `supersedes_chain_broken`) は MVP-5 以降。回帰防止テスト 23 件 (`tests/test_prime_gaps.py` 15 件 + `tests/test_prime_v2_query.py` への追加 8 件)。詳細: [docs/design-prime-v2.md §6.1 / §8.1 MVP-4](docs/design-prime-v2.md)。
-- **Prime v2 MVP-2: `hokusai prime --query` + active context backfill**: `hokusai prime <workflow-id> --query "..."` フラグを追加。`--query` 指定時は Notion から取得した active context (memories / work_items / review_issues / gates) を `prime_index` に backfill した上で FTS5 MATCH 検索を実行し、上位 N 件 (既定 10、`--query-limit` で調整) を Markdown / JSON 出力に追加する。`--query` 未指定時の動作は v1 と完全互換 (出力に検索結果セクションは現れず、JSON も `query` / `query_results` は `null`)。backfill / search の失敗は表示を壊さず stderr warning + `_build_prime_diagnostics` で stdout 経路にも明示。`extract_prime_index_entries()` 純関数で Notion data → index entries の変換を分離し、CLI からも renderer からも再利用可能。`SQLiteStore.clear_prime_index_for_workflow()` に `source_types` 引数を追加して部分 fetch 時の他 source_type 保護、`--type` フィルタ時の memory 保護を実装。FTS5 入力は `_sanitize_fts5_query()` で phrase 化して `:` / 括弧 / 先頭 `-` 等の予約構文回避。`--query-limit` は `_positive_int()` argparse type validator で parse 時に `>=1` を保証。回帰防止テスト 34 件 (`tests/test_prime_v2_query.py`、`tests/test_prime_index.py` は MVP-1 由来の 16 件で変更なし)。`--dry-run` 時は backfill と search を skip して SQLite を mutate しない。詳細: [docs/design-prime-v2.md §8.1 MVP-2](docs/design-prime-v2.md)。
+- **Prime v2 MVP-1: FTS5 検索インデックスの土台** ([#134](https://github.com/shigenoko/hokusai/pull/134)): `SQLiteStore` に FTS5 virtual table `prime_index` + meta table `prime_index_meta` を追加し、`upsert_prime_index()` / `search_prime_index()` / `clear_prime_index_for_workflow()` の 3 メソッドを実装。`_WORKFLOW_DEPENDENT_TABLES` にも追加し completed workflow の cascade-delete で孤児化しない。検索バックエンドは `unicode61 remove_diacritics 2`、引用 (citation) 用に `notion_page_id` / `pr_url` / `file_path` を meta に保持。既存 DB を開いた際は `_init_db()` で migration が走り、旧 DDL (`source_type` indexed) は case-insensitive 判定で検出して rebuild する。回帰防止テスト 16 件 (`tests/test_prime_index.py`)。
+- **Prime v2 MVP-2: `hokusai prime --query` + active context backfill** ([#135](https://github.com/shigenoko/hokusai/pull/135)): `hokusai prime <workflow-id> --query "..."` フラグを追加。指定時は Notion から取得した active context (memories / work_items / review_issues / gates) を `prime_index` に backfill した上で FTS5 MATCH 検索を実行し、上位 N 件 (既定 10、`--query-limit` で調整) を Markdown / JSON 出力に引用付きで追加する。`extract_prime_index_entries()` 純関数で Notion data → index entries の変換を分離。`clear_prime_index_for_workflow()` に `source_types` 引数を追加して部分 fetch 時の他 source_type 保護 / `--type` フィルタ時の memory 保護を実装。FTS5 入力は `_sanitize_fts5_query()` で phrase 化して `:` / 括弧 / 先頭 `-` 等の予約構文を回避、`--query-limit` は `_positive_int()` で parse 時に `>=1` を保証。`--dry-run` 時は backfill / search を skip して SQLite を mutate しない。`--query` 未指定時は v0.5.x と完全互換 (検索結果セクション非出力、JSON も `query` / `query_results` は `null`)。回帰防止テスト 34 件 (`tests/test_prime_v2_query.py`)。
+- **Prime v2 MVP-4: gap analysis (決定的検出 3 種)** ([#136](https://github.com/shigenoko/hokusai/pull/136)): `hokusai prime <wf> --include-gaps` で「未確定 / 不足情報」セクションを追加。LLM 不要・決定的に検出する 3 種を `hokusai/prime_gaps.py` に純関数として実装: `unresolved_review_issue_open` (起点 workflow に紐づく Review Issue で Status=Open)、`notion_outbox_pending` (`notion_sync_outbox` に pending 行あり)、`audit_log_silence` (LLM Gateway 有効なのに `audit_logs` 0 件 = interceptor 経路無効化の疑い)。各 detector は失敗を best-effort で握りつぶし prime 本来の出力を阻害しない。Markdown / JSON 両形式で出力、`--include-gaps` 未指定時は完全互換 (gap section 非出力、JSON も `gaps: null`)。残り 4 種 (`missing_verification_command` / `pending_gate_blocking` / `phase4_plan_missing` / `supersedes_chain_broken`) は MVP-5 以降。回帰防止テスト 23 件 (`tests/test_prime_gaps.py` 15 件 + `tests/test_prime_v2_query.py` 追加 8 件)。
+
+### Documentation
+
+- **v0.6 ロードマップ草案** ([#131](https://github.com/shigenoko/hokusai/pull/131)): GBrain 調査メモを `docs/roadmap-gbrain-inspirations.md` に整理。Prime v2 / Doctor-Status 統合 / Operation Registry / Eval Capture / Local Workgraph Edges の 5 Step に分解。
+- **Prime v2 設計議論** ([#133](https://github.com/shigenoko/hokusai/pull/133)): `docs/design-prime-v2.md` で検索バックエンド選定 (SQLite FTS5)、引用データモデル、gap analysis 7 種、MVP 4 段階分割、未解決の設計問題 7 件を整理。
+- **Notion DB share 手順** ([#130](https://github.com/shigenoko/hokusai/pull/130)): `docs/notion-dashboard-operation-guide.md` §2.2.1 に生成 DB を integration に share する手順 + トラブルシューティングを追記 (dogfooding-findings §1 運用穴)。
+- **§10 Prime v2 実環境 dogfooding** ([#137](https://github.com/shigenoko/hokusai/pull/137)): MVP-1/2/4 を既存 workflow に対し実 `hokusai prime` で観察。MVP-1 migration の前方互換、`notion_outbox_pending` gap 発火、`audit_log_silence` 誤検出なし、`--query` は Notion 未設定で空 (§1 運用穴依存) を実証。
+
+### 統計
+
+- 計 8 PR (#130–#137)、新機能 3 (#134/135/136) + docs 5
+- 回帰防止テスト 計 73 件追加 (index 16 / query 34 / gaps 23 — 一部重複カウントあり)
+- Copilot review: PR #135 単体で 7 round 16 件の指摘を全 resolve
+- 全 PR で CI 全 pass 維持、`hokusai prime` の後方互換を保持
 
 ---
 
