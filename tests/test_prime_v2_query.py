@@ -740,6 +740,26 @@ def test_handle_prime_include_gaps_e2e(tmp_path, monkeypatch):
     assert "notion_outbox_pending" in kinds
 
 
+def test_handle_prime_include_gaps_mvp5_phase4_plan_missing(
+    tmp_path, monkeypatch
+):
+    """MVP-5: current_phase>=5 で work_plan 空の workflow に --include-gaps
+    を付けると phase4_plan_missing gap が CLI 経由で出る。"""
+    cfg, store = _setup_prime_env(tmp_path, monkeypatch)
+    # phase 6 / work_plan 空 で上書き保存 (seed は phase4 なので閾値未満)
+    store.save_workflow("wf-1", {
+        "workflow_id": "wf-1",
+        "profile_name": "acme",
+        "current_phase": 6,
+        "work_plan": None,
+    })
+    rc, body, _ = _run_handle_prime(cfg, include_gaps=True, output="json")
+    assert rc == 0
+    payload = json.loads(body)
+    kinds = [g["kind"] for g in payload["gaps"]]
+    assert "phase4_plan_missing" in kinds
+
+
 def test_handle_prime_without_include_gaps_keeps_v1_output(
     tmp_path, monkeypatch
 ):

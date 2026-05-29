@@ -152,17 +152,120 @@ def detect_audit_log_silence(
     )]
 
 
+# 計画フェーズ (Phase 4) を通過したとみなす最小 phase。
+# current_phase == 4 は「計画を生成している最中」で work_plan が未確定でも
+# 正常なため、誤検出を避けて Phase 5 (implement) 以降を「計画があるべき」
+# 状態とする。docs/design-prime-v2.md §6.1 の「current_phase ≥ 4」を、
+# 実装上の transient 状態を除外する形で >= 5 に精緻化したもの。
+_PLAN_EXPECTED_MIN_PHASE = 5
+
+
+def detect_phase4_plan_missing(state: dict | None) -> list[Gap]:
+    """Phase 5 以降に到達しているのに Phase 4 の plan (`work_plan`) が空、を
+    検出する (docs/design-prime-v2.md §6.1 `phase4_plan_missing`)。
+
+    workflow state のみで完結する決定的検出 (Notion 非依存)。
+
+    判定:
+    - `state` が None / current_phase 不明なら skip
+    - `current_phase < 5` (計画フェーズ通過前) なら skip — Phase 4 実行中に
+      work_plan が未確定なのは正常なので誤検出を避ける
+    - `current_phase >= 5` かつ `work_plan` が空/空白のみなら gap
+
+    Phase 4 は意図的に skip される運用もある (既存ワークフローで Phase 4
+    を経ずに implement へ進むケース) ため、本 gap は「計画なしで実装フェーズ
+    に到達している」という注意喚起であり、必ずしもエラーではない。
+
+    Args:
+        state: workflow state dict (`SQLiteStore.load_workflow` の戻り値)
+
+    Returns:
+        Gap list (0 or 1 件)
+    """
+    if not isinstance(state, dict):
+        return []
+    raw_phase = state.get("current_phase")
+    # current_phase は int (1..10) 想定。文字列 "phase5" 等は範囲外として扱う
+    if not isinstance(raw_phase, int):
+        return []
+    if raw_phase < _PLAN_EXPECTED_MIN_PHASE:
+        return []
+    work_plan = state.get("work_plan")
+    if isinstance(work_plan, str) and work_plan.strip():
+        return []
+    return [Gap(
+        kind="phase4_plan_missing",
+        detail=(
+            f"current_phase={raw_phase} (Phase 5 implement 以降) に到達して "
+            f"いますが Phase 4 の開発計画 (work_plan) が空です。Phase 4 が "
+            f"意図的に skip された可能性もありますが、計画なしで実装が進んで "
+            f"いないか確認してください"
+        ),
+        phase=4,
+    )]
+
+
+def detect_supersedes_chain_broken(
+    store: Any, state: dict | None
+) -> list[Gap]:
+    """Supersedes 元 workflow の Notion 同期が永続失敗している (chain 切れ) を
+    検出する (docs/design-prime-v2.md §6.1 `supersedes_chain_broken`)。
+
+    `state["supersedes_workflow_id"]` で指定された旧 workflow の
+    `workflow_started` イベントが `notion_sync_errors` に flush 済みなら、
+    旧 workflow の Workflows DB レコードが存在せず Supersedes リレーションを
+    張れない (handover_note の世代遡及が途切れる) 疑いがある。
+
+    SQLite (`notion_sync_errors`) + state のみで完結する決定的検出
+    (live Notion 呼び出しなし)。
+
+    Args:
+        store: SQLiteStore インスタンス (`has_failed_workflow_started` を使う)
+        state: workflow state dict
+
+    Returns:
+        Gap list (0 or 1 件)
+    """
+    if not isinstance(state, dict):
+        return []
+    superseded = state.get("supersedes_workflow_id")
+    if not superseded or not isinstance(superseded, str):
+        return []
+    try:
+        failed = store.has_failed_workflow_started(superseded)
+    except Exception:
+        return []
+    if not failed:
+        return []
+    return [Gap(
+        kind="supersedes_chain_broken",
+        detail=(
+            f"supersedes 元 workflow '{superseded}' の workflow_started 同期が "
+            f"notion_sync_errors に永続失敗として記録されています。旧 workflow の "
+            f"Workflows DB レコードが存在せず Supersedes リレーション / handover "
+            f"遡及が途切れている疑いがあります"
+        ),
+        phase=None,
+    )]
+
+
 def collect_gaps(
     *,
     store: Any,
     review_issues: list[dict] | None,
     llm_gateway_enabled: bool,
     workflow_id: str | None = None,
+    state: dict | None = None,
 ) -> list[Gap]:
-    """MVP-4 の 3 detector をまとめて呼ぶ便宜 helper。
+    """MVP-4 (3 種) + MVP-5 (2 種) の detector をまとめて呼ぶ便宜 helper。
 
     各 detector の例外は best-effort で握りつぶす (Prime 本来の表示を
     阻害しないため、docs/design-prime-v2.md §8.1 と整合)。
+
+    MVP-4 (Notion/SQLite-backed): unresolved_review_issue_open /
+    notion_outbox_pending / audit_log_silence
+    MVP-5 (state/SQLite-backed, Notion 非依存): phase4_plan_missing /
+    supersedes_chain_broken
     """
     gaps: list[Gap] = []
     gaps.extend(detect_unresolved_review_issues(review_issues))
@@ -170,6 +273,8 @@ def collect_gaps(
     gaps.extend(detect_audit_log_silence(
         store, llm_gateway_enabled, workflow_id=workflow_id
     ))
+    gaps.extend(detect_phase4_plan_missing(state))
+    gaps.extend(detect_supersedes_chain_broken(store, state))
     return gaps
 
 

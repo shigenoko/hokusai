@@ -1,9 +1,12 @@
-"""Prime v2 MVP-4: gap analysis detector の単体テスト
+"""Prime v2 MVP-4 / MVP-5: gap analysis detector の単体テスト
 
-docs/design-prime-v2.md §6.1 / §8.1 MVP-4 の 3 detector
-(`unresolved_review_issue_open` / `notion_outbox_pending` /
-`audit_log_silence`) を検証する。CLI handler との結合テストは
-test_prime_v2_query.py に集約。
+docs/design-prime-v2.md §6.1 / §8.1 の決定的 gap detector を検証する:
+- MVP-4: `unresolved_review_issue_open` / `notion_outbox_pending` /
+  `audit_log_silence`
+- MVP-5 (Notion 非依存、state/SQLite-backed): `phase4_plan_missing` /
+  `supersedes_chain_broken`
+
+CLI handler との結合テストは test_prime_v2_query.py に集約。
 """
 from __future__ import annotations
 
@@ -17,6 +20,8 @@ from hokusai.prime_gaps import (
     collect_gaps,
     detect_audit_log_silence,
     detect_notion_outbox_pending,
+    detect_phase4_plan_missing,
+    detect_supersedes_chain_broken,
     detect_unresolved_review_issues,
 )
 
@@ -149,6 +154,104 @@ def test_audit_silence_store_exception_returns_no_gaps():
 
 
 # ---------------------------------------------------------------------------
+# detect_phase4_plan_missing (MVP-5, state-backed)
+# ---------------------------------------------------------------------------
+
+
+def test_phase4_plan_none_state_returns_no_gaps():
+    assert detect_phase4_plan_missing(None) == []
+
+
+def test_phase4_plan_non_int_phase_returns_no_gaps():
+    # current_phase が文字列等で int でない場合は skip
+    assert detect_phase4_plan_missing({"current_phase": "phase5"}) == []
+
+
+def test_phase4_plan_below_threshold_returns_no_gaps():
+    # Phase 4 以前は計画生成中とみなして検出しない (>= 5 が閾値)
+    assert detect_phase4_plan_missing(
+        {"current_phase": 4, "work_plan": None}
+    ) == []
+    assert detect_phase4_plan_missing(
+        {"current_phase": 2, "work_plan": None}
+    ) == []
+
+
+def test_phase4_plan_missing_at_phase5_returns_gap():
+    gaps = detect_phase4_plan_missing(
+        {"current_phase": 5, "work_plan": None}
+    )
+    assert len(gaps) == 1
+    assert gaps[0].kind == "phase4_plan_missing"
+    assert gaps[0].phase == 4
+    assert "current_phase=5" in gaps[0].detail
+
+
+def test_phase4_plan_blank_string_is_missing():
+    gaps = detect_phase4_plan_missing(
+        {"current_phase": 7, "work_plan": "   "}
+    )
+    assert len(gaps) == 1
+    assert gaps[0].kind == "phase4_plan_missing"
+
+
+def test_phase4_plan_present_returns_no_gap():
+    # work_plan が非空なら gap なし (実 workflow wf-dbe7b6cd 相当)
+    assert detect_phase4_plan_missing(
+        {"current_phase": 7, "work_plan": "## 開発計画\n- step 1"}
+    ) == []
+
+
+# ---------------------------------------------------------------------------
+# detect_supersedes_chain_broken (MVP-5, state + SQLite-backed)
+# ---------------------------------------------------------------------------
+
+
+def test_supersedes_none_state_returns_no_gaps(store: SQLiteStore):
+    assert detect_supersedes_chain_broken(store, None) == []
+
+
+def test_supersedes_no_supersedes_id_returns_no_gaps(store: SQLiteStore):
+    assert detect_supersedes_chain_broken(
+        store, {"supersedes_workflow_id": None}
+    ) == []
+
+
+def test_supersedes_healthy_chain_returns_no_gap(store: SQLiteStore):
+    # supersedes 元 wf が notion_sync_errors に無ければ chain は健全
+    assert detect_supersedes_chain_broken(
+        store, {"supersedes_workflow_id": "wf-old"}
+    ) == []
+
+
+def test_supersedes_broken_chain_returns_gap(store: SQLiteStore):
+    # supersedes 元 wf の workflow_started が errors に flush 済み → chain 切れ
+    store.record_permanent_notion_sync_failure(
+        idempotency_key="wf-old:workflow_started",
+        workflow_id="wf-old",
+        event_type="workflow_started",
+        payload={},
+        error="404 Not Found",
+    )
+    gaps = detect_supersedes_chain_broken(
+        store, {"supersedes_workflow_id": "wf-old"}
+    )
+    assert len(gaps) == 1
+    assert gaps[0].kind == "supersedes_chain_broken"
+    assert "wf-old" in gaps[0].detail
+
+
+def test_supersedes_store_exception_returns_no_gaps():
+    class _BrokenStore:
+        def has_failed_workflow_started(self, wf):
+            raise RuntimeError("simulated outage")
+
+    assert detect_supersedes_chain_broken(
+        _BrokenStore(), {"supersedes_workflow_id": "wf-old"}
+    ) == []
+
+
+# ---------------------------------------------------------------------------
 # collect_gaps + Gap.to_dict
 # ---------------------------------------------------------------------------
 
@@ -159,7 +262,8 @@ def test_gap_to_dict_shape():
 
 
 def test_collect_gaps_combines_all_three(store: SQLiteStore):
-    """3 detector すべてが gap を出すケースで合計件数を確認"""
+    """MVP-4 の 3 detector すべてが gap を出すケースで合計件数を確認
+    (state 未指定なら MVP-5 detector は発火しない)"""
     store.enqueue_notion_sync(
         idempotency_key="k1", workflow_id="wf-1",
         event_type="workflow_started", payload={},
@@ -176,6 +280,30 @@ def test_collect_gaps_combines_all_three(store: SQLiteStore):
         "notion_outbox_pending",
         "unresolved_review_issue_open",
     ]
+
+
+def test_collect_gaps_includes_mvp5_when_state_given(store: SQLiteStore):
+    """state を渡すと MVP-5 の 2 detector も合流する"""
+    store.record_permanent_notion_sync_failure(
+        idempotency_key="wf-old:workflow_started",
+        workflow_id="wf-old",
+        event_type="workflow_started",
+        payload={},
+        error="404",
+    )
+    gaps = collect_gaps(
+        store=store,
+        review_issues=None,
+        llm_gateway_enabled=False,
+        workflow_id="wf-1",
+        state={
+            "current_phase": 6,
+            "work_plan": None,
+            "supersedes_workflow_id": "wf-old",
+        },
+    )
+    kinds = sorted(g.kind for g in gaps)
+    assert kinds == ["phase4_plan_missing", "supersedes_chain_broken"]
 
 
 def test_collect_gaps_empty_environment_returns_empty(store: SQLiteStore):

@@ -1905,6 +1905,7 @@ def _handle_prime(args, config) -> int:
                 review_issues=review_issues,
                 llm_gateway_enabled=llm_gw_enabled,
                 workflow_id=workflow_id,
+                state=state,
             )
             gaps_list = [g.to_dict() for g in collected]
         except Exception as e:
