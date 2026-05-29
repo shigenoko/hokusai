@@ -274,15 +274,63 @@ def test_profile_doctor_detects_data_dir_conflict(tmp_path, monkeypatch):
     assert "data_dir" in output and "衝突" in output
 
 
-def test_profile_doctor_deep_flag_acknowledged(tmp_path, monkeypatch):
-    """--deep フラグが認識され、Phase E 予定の注意書きが出る"""
-    registry_file = _make_registry(tmp_path, {"a-co": {}})
+def test_profile_doctor_deep_runs_runtime_health_clean(tmp_path, monkeypatch):
+    """--deep で runtime 運用ヘルス検査が走り、空 DB なら滞留なし / ギャップなし"""
+    data_dir = tmp_path / "a-data"
+    data_dir.mkdir()
+    registry_file = _make_registry(
+        tmp_path, {"a-co": {"data_dir": str(data_dir)}}
+    )
     monkeypatch.setenv("HOKUSAI_PROFILES_FILE", str(registry_file))
 
     registry = load_profile_registry()
     rc, output = _capture_stdout(_handle_profile_doctor, "a-co", registry, deep=True)
     assert rc == 0
-    assert "Phase E" in output
+    assert "runtime 運用ヘルス検査" in output
+    assert "滞留なし" in output
+    assert "運用ギャップ: 検出なし" in output
+
+
+def test_profile_doctor_deep_detects_outbox_pending(tmp_path, monkeypatch):
+    """--deep が Notion outbox の pending を検出して問題として扱う"""
+    from hokusai.persistence.sqlite_store import SQLiteStore
+
+    data_dir = tmp_path / "a-data"
+    data_dir.mkdir()
+    registry_file = _make_registry(
+        tmp_path, {"a-co": {"data_dir": str(data_dir)}}
+    )
+    monkeypatch.setenv("HOKUSAI_PROFILES_FILE", str(registry_file))
+
+    # profile が解決する database_path (data_dir/workflow.db) に outbox 行を seed
+    store = SQLiteStore(data_dir / "workflow.db")
+    store.enqueue_notion_sync(
+        idempotency_key="k1", workflow_id="wf-x",
+        event_type="workflow_started", payload={},
+    )
+
+    registry = load_profile_registry()
+    rc, output = _capture_stdout(_handle_profile_doctor, "a-co", registry, deep=True)
+    assert rc == 1
+    assert "notion_outbox_pending" in output
+    assert "pending" in output
+
+
+def test_profile_doctor_deep_detects_audit_silence(tmp_path, monkeypatch):
+    """--deep が LLM Gateway 有効 + audit 空を audit_log_silence として検出"""
+    data_dir = tmp_path / "a-data"
+    data_dir.mkdir()
+    registry_file = _make_registry(
+        tmp_path, {"a-co": {"data_dir": str(data_dir)}}
+    )
+    monkeypatch.setenv("HOKUSAI_PROFILES_FILE", str(registry_file))
+    # env override で Gateway を有効化 (conftest の autouse fixture で後始末)
+    monkeypatch.setenv("HOKUSAI_LLM_GATEWAY_ENABLED", "1")
+
+    registry = load_profile_registry()
+    rc, output = _capture_stdout(_handle_profile_doctor, "a-co", registry, deep=True)
+    assert rc == 1
+    assert "audit_log_silence" in output
 
 
 def test_profile_doctor_unknown_profile(tmp_path, monkeypatch):

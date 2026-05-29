@@ -2492,10 +2492,14 @@ def _handle_profile_doctor(name: str, registry, *, deep: bool = False) -> int:
             print(f"  ✗ {msg}")
             issues.append(msg)
 
-    # 5. --deep モード: 実 API 接続確認（Phase E で実装予定）
+    # 5. --deep モード: runtime 運用ヘルス検査
+    #    (Step 2 / Doctor-Status 一画面化の最初のスライス)。
+    #    config/filesystem の静的検査 (上記 1-4) に加え、profile の SQLite を
+    #    開いて Notion outbox の滞留 / LLM Gateway audit silence 等の運用上の
+    #    詰まりを集約する。prime_gaps の決定的 detector を共通 sink として
+    #    再利用 (live Notion 呼び出しなし)。
     if deep:
-        print()
-        print("  [--deep] 実 API 接続確認は Phase E で実装予定")
+        _run_profile_deep_health(p, issues)
 
     print("-" * 60)
     if issues:
@@ -2504,6 +2508,65 @@ def _handle_profile_doctor(name: str, registry, *, deep: bool = False) -> int:
 
     print("OK: 問題ありません")
     return 0
+
+
+def _run_profile_deep_health(p, issues: list[str]) -> None:
+    """`hokusai profile doctor <name> --deep` の runtime 運用ヘルス検査。
+
+    profile の config を解決して SQLite を開き、以下を集約する:
+    - Notion outbox の pending / 永続 error 件数
+    - prime_gaps の Notion 非依存 detector (`notion_outbox_pending` /
+      `audit_log_silence`) による運用ギャップ
+
+    `prime_gaps.collect_gaps()` を共通 sink として再利用する (Prime v2 の
+    gap analysis と Doctor で検出ロジックを一本化)。live Notion 呼び出しは
+    行わない。検査自体の失敗は doctor 全体を止めず warning 行で表示する
+    (best-effort、static 検査の結果は保持)。
+
+    検出した gap は `issues` に追記して doctor の exit code に反映させる。
+    """
+    print()
+    print("  [--deep] runtime 運用ヘルス検査:")
+    try:
+        from .config import create_config_from_env_and_file
+        from .persistence import SQLiteStore
+        from .prime_gaps import collect_gaps
+
+        config = create_config_from_env_and_file(profile_name=p.name)
+        store = SQLiteStore(config.database_path)
+
+        pending = store.count_notion_sync_pending()
+        errors = store.count_notion_sync_errors()
+        if pending == 0 and errors == 0:
+            print("    ✓ Notion sync outbox: 滞留なし (pending 0 / error 0)")
+        else:
+            print(
+                f"    ⚠ Notion sync outbox: pending {pending} 件 / "
+                f"永続 error {errors} 件"
+            )
+
+        llm_gw_enabled = bool(
+            getattr(getattr(config, "llm_gateway", None), "enabled", False)
+        )
+        # profile 横断の運用ヘルスなので workflow_id / state は渡さない
+        # (workflow 個別の gap は `hokusai prime --include-gaps` 側の責務)。
+        gaps = collect_gaps(
+            store=store,
+            review_issues=None,
+            llm_gateway_enabled=llm_gw_enabled,
+            workflow_id=None,
+            state=None,
+        )
+        if not gaps:
+            print("    ✓ 運用ギャップ: 検出なし")
+        else:
+            for g in gaps:
+                print(f"    ✗ [{g.kind}] {g.detail}")
+                issues.append(f"{g.kind}: {g.detail}")
+    except Exception as e:
+        # 検査失敗は static 検査結果を壊さない (best-effort)。
+        # issues には積まず warning 行のみ (検査不能 ≠ 運用問題ありのため)。
+        print(f"    ⚠ runtime ヘルス検査を実行できませんでした: {e}")
 
 
 def _warn_if_skip_notion_pre_set(config, profile_label: str | None) -> None:
