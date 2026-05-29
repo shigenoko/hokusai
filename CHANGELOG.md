@@ -39,7 +39,7 @@ GBrain (AI agent 用長期記憶エンジン) 調査から起こした **v0.6 �
 
 ### 統計
 
-- 計 8 PR (#130–#137)、新機能 3 (#134/135/136) + docs 5
+- 計 8 PR (#130–#137): 新機能 3 (#134 / #135 / #136) + docs 4 (#130 / #131 / #133 / #137) + chore 1 (#132 `.gitignore`)
 - 回帰防止テスト 計 73 件追加 (index 16 / query 34 / gaps 23 — 一部重複カウントあり)
 - Copilot review: PR #135 単体で 7 round 16 件の指摘を全 resolve
 - 全 PR で CI 全 pass 維持、`hokusai prime` の後方互換を保持
