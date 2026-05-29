@@ -316,6 +316,35 @@ def test_profile_doctor_deep_detects_outbox_pending(tmp_path, monkeypatch):
     assert "pending" in output
 
 
+def test_profile_doctor_deep_detects_persistent_errors_only(tmp_path, monkeypatch):
+    """pending 0 でも永続 error > 0 なら issue として扱い exit 1 になる
+    (PR #140 Copilot Round 1 指摘: error のみのとき exit 0 になる不整合の回帰防止)"""
+    from hokusai.persistence.sqlite_store import SQLiteStore
+
+    data_dir = tmp_path / "a-data"
+    data_dir.mkdir()
+    registry_file = _make_registry(
+        tmp_path, {"a-co": {"data_dir": str(data_dir)}}
+    )
+    monkeypatch.setenv("HOKUSAI_PROFILES_FILE", str(registry_file))
+
+    # pending は入れず、notion_sync_errors に永続 error のみ seed
+    store = SQLiteStore(data_dir / "workflow.db")
+    store.record_permanent_notion_sync_failure(
+        idempotency_key="wf-x:workflow_started",
+        workflow_id="wf-x",
+        event_type="workflow_started",
+        payload={},
+        error="404 Not Found",
+    )
+
+    registry = load_profile_registry()
+    rc, output = _capture_stdout(_handle_profile_doctor, "a-co", registry, deep=True)
+    assert rc == 1
+    assert "notion_sync_errors" in output
+    assert "永続 error" in output
+
+
 def test_profile_doctor_deep_detects_audit_silence(tmp_path, monkeypatch):
     """--deep が LLM Gateway 有効 + audit 空を audit_log_silence として検出"""
     data_dir = tmp_path / "a-data"

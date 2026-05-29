@@ -2544,6 +2544,19 @@ def _run_profile_deep_health(p, issues: list[str]) -> None:
                 f"    ⚠ Notion sync outbox: pending {pending} 件 / "
                 f"永続 error {errors} 件"
             )
+            # 永続 error は collect_gaps のどの detector もカバーしないため
+            # (pending は notion_outbox_pending gap が拾う)、ここで明示的に
+            # ✗ 行 + issues へ積む。さもないと「永続 error N 件」を表示しつつ
+            # exit 0 + 「OK: 問題ありません」になる不整合が起きる
+            # (PR #140 Copilot Round 1 指摘)。
+            if errors > 0:
+                detail = (
+                    f"Notion sync の永続 error が {errors} 件あります "
+                    f"(notion_sync_errors テーブル)。原因を解消し errors 行を "
+                    f"整理してください"
+                )
+                print(f"    ✗ [notion_sync_errors] {detail}")
+                issues.append(f"notion_sync_errors: {detail}")
 
         llm_gw_enabled = bool(
             getattr(getattr(config, "llm_gateway", None), "enabled", False)
