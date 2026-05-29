@@ -1,0 +1,297 @@
+"""Operation Registry (Step 3 第1スライス / roadmap-gbrain-inspirations.md §P1)
+
+GBrain の `operations.ts` 同様、operation 名・説明・scope・入力 schema・
+handler を 1 箇所に集約する registry。CLI / Dashboard / 将来の read-only
+MCP・HTTP admin が同じ handler を呼ぶ単一経路を作るのが狙い。
+
+第1スライスのスコープ:
+- read-only operation のみを registry 化する (mutating は後続スライス)
+- 既存の SQLite-backed な read-only 関数 (compute_runtime_health /
+  store カウント / list_active_workflows) を handler として束ねる
+- `hokusai operations list` / `hokusai operations run <name>` を提供する
+
+CLI handler 全体を registry 経由へ寄せる / MCP・HTTP 化は後続スライス。
+
+handler 契約:
+    handler(params: dict, *, store, config) -> dict
+  - params: 入力 schema に従う dict (CLI からは --param k=v で組み立てる)
+  - store / config: 呼び出し側 (CLI / Console) が解決して渡す
+  - 戻り値: JSON 直列化可能な dict (機械処理 / 表示で一貫)
+"""
+from __future__ import annotations
+
+import sqlite3
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+# scope: 第1スライスでは read_only のみ実在。mutating は将来の registry 拡張で
+# 副作用つき operation を表すための予約値 (run 時に scope guard で弾く)。
+READ_ONLY = "read_only"
+MUTATING = "mutating"
+
+
+@dataclass(frozen=True)
+class Operation:
+    """1 つの operation の contract。
+
+    Attributes:
+        name: 名前空間つき operation 名 (例 "notion.outbox_status")
+        summary: 1 行説明 (一覧表示用)
+        scope: READ_ONLY / MUTATING
+        input_schema: JSON-schema 風の入力定義 (object 固定)
+        handler: handler(params, *, store, config) -> dict
+    """
+
+    name: str
+    summary: str
+    scope: str
+    input_schema: dict[str, Any]
+    handler: Callable[..., dict[str, Any]]
+
+    # frozen=True は dataclass に __hash__ を生成させるが、input_schema (dict)
+    # は hash 不可能なので、Operation を set/dict key に入れると hash 時に
+    # TypeError になる。hash は使わない前提なので明示的に unhashable にして
+    # 潜在バグを防ぐ (PR #143 Copilot Round 4 指摘)。frozen の immutability は
+    # 維持される。
+    __hash__ = None
+
+    @property
+    def is_read_only(self) -> bool:
+        return self.scope == READ_ONLY
+
+
+class OperationRegistry:
+    """operation を名前で引ける registry (重複登録は禁止)。"""
+
+    def __init__(self) -> None:
+        self._ops: dict[str, Operation] = {}
+
+    def register(self, op: Operation) -> None:
+        if op.name in self._ops:
+            raise ValueError(f"operation already registered: {op.name}")
+        self._ops[op.name] = op
+
+    def get(self, name: str) -> Operation | None:
+        return self._ops.get(name)
+
+    def names(self) -> list[str]:
+        return sorted(self._ops)
+
+    def list(self) -> list[Operation]:
+        return [self._ops[n] for n in self.names()]
+
+
+class ReadOnlyStore:
+    """副作用なしの read-only sqlite アクセサ (Operation Registry 用)。
+
+    `SQLiteStore.__init__()` は WAL PRAGMA / CREATE / ALTER を必ず実行し、
+    DB ファイルが無ければ新規作成までしてしまう。read-only operation の
+    実行でこれが走ると「読むだけ」契約に反するため、sqlite3 URI の
+    `mode=ro` で接続し SELECT のみ実行する read-only 専用アクセサを用意する
+    (既存 `hokusai/config/profiles.py::_workflow_exists_readonly` と同方針。
+     PR #143 Copilot Round 5 指摘)。
+
+    DB ファイル不在 / テーブル不在 / sqlite でないファイル等は安全側の既定値
+    (0 / [] / False) を返す。`collect_gaps()` 側も各呼び出しを try/except で
+    包むため、best-effort な runtime health 集約を壊さない。
+    """
+
+    def __init__(self, db_path: Any) -> None:
+        self._db_path = Path(db_path)
+
+    def _read(self, fn: Callable[[sqlite3.Connection], Any], default: Any) -> Any:
+        # URI 構築は Path.as_uri() を使う (スペース / # / ? 等の予約文字を
+        # percent-encode して silent な接続失敗を防ぐ)。接続不可 / SQL 失敗は
+        # すべて安全側の default に倒す。
+        try:
+            uri = f"{self._db_path.resolve().as_uri()}?mode=ro"
+            with sqlite3.connect(uri, uri=True) as conn:
+                return fn(conn)
+        except (sqlite3.Error, ValueError, OSError):
+            return default
+
+    def count_notion_sync_pending(self) -> int:
+        return self._read(
+            lambda c: int(
+                (c.execute("SELECT COUNT(*) FROM notion_sync_outbox").fetchone()
+                 or [0])[0]
+            ),
+            0,
+        )
+
+    def count_notion_sync_errors(self) -> int:
+        return self._read(
+            lambda c: int(
+                (c.execute("SELECT COUNT(*) FROM notion_sync_errors").fetchone()
+                 or [0])[0]
+            ),
+            0,
+        )
+
+    def has_failed_workflow_started(self, workflow_id: str) -> bool:
+        return self._read(
+            lambda c: c.execute(
+                "SELECT 1 FROM notion_sync_errors "
+                "WHERE workflow_id = ? AND event_type = 'workflow_started' LIMIT 1",
+                (workflow_id,),
+            ).fetchone()
+            is not None,
+            False,
+        )
+
+    def list_active_workflows(self) -> list[dict[str, Any]]:
+        keys = ("workflow_id", "task_url", "task_title", "current_phase", "updated_at")
+        return self._read(
+            lambda c: [
+                dict(zip(keys, row))
+                for row in c.execute(
+                    "SELECT workflow_id, task_url, task_title, current_phase, "
+                    "updated_at FROM workflows WHERE current_phase < 10 "
+                    "ORDER BY updated_at DESC"
+                ).fetchall()
+            ],
+            [],
+        )
+
+    def list_audit_logs(
+        self, *, workflow_id: str | None = None, limit: int = 50, **_: Any
+    ) -> list[dict[str, Any]]:
+        # collect_gaps は workflow_id + limit のみ使う (audit_log_silence 判定)。
+        # 余剰フィルタ kwargs は read-only 用途では無視する。
+        if limit < 1:
+            raise ValueError("limit は 1 以上を指定してください")
+        keys = (
+            "id", "workflow_id", "phase", "action", "status", "details", "created_at"
+        )
+        where = "WHERE workflow_id = ?" if workflow_id is not None else ""
+        params: list[Any] = []
+        if workflow_id is not None:
+            params.append(workflow_id)
+        params.append(limit)
+
+        def _run(c: sqlite3.Connection) -> list[dict[str, Any]]:
+            import json
+
+            rows = c.execute(
+                f"SELECT id, workflow_id, phase, action, status, details_json, "
+                f"created_at FROM audit_logs {where} ORDER BY id DESC LIMIT ?",
+                params,
+            ).fetchall()
+            out = []
+            for row in rows:
+                row = list(row)
+                row[5] = json.loads(row[5]) if row[5] else None
+                out.append(dict(zip(keys, row)))
+            return out
+
+        return self._read(_run, [])
+
+
+# --- seed handlers (read-only) -------------------------------------------
+# いずれも既存の SQLite-backed 関数を薄くラップするだけ。live API 呼び出しは
+# 行わない (Doctor / Console と同じ「読むだけ」契約)。
+
+
+def _llm_gateway_enabled(config: Any) -> bool:
+    return bool(getattr(getattr(config, "llm_gateway", None), "enabled", False))
+
+
+def _op_notion_outbox_status(
+    params: dict[str, Any], *, store: Any, config: Any
+) -> dict[str, Any]:
+    """Notion sync outbox の pending / 永続 error 件数を返す。
+
+    キー名は `compute_runtime_health()` / `profile doctor --output json` の
+    `runtime_health` と同じ `outbox_pending` / `outbox_errors` に揃える
+    (Operation Registry は CLI / Dashboard / 将来の API の共通契約なので、
+     同じ概念は同じキー名にして利用者の混乱を避ける。PR #143 Copilot
+     Round 3 指摘)。`outbox_errors` は永続 error 件数を指す。
+    """
+    return {
+        "outbox_pending": store.count_notion_sync_pending(),
+        "outbox_errors": store.count_notion_sync_errors(),
+    }
+
+
+def _op_runtime_health(
+    params: dict[str, Any], *, store: Any, config: Any
+) -> dict[str, Any]:
+    """SQLite-backed な runtime 運用ヘルス (outbox + 運用ギャップ) を集約する。
+
+    Doctor / Operations Console と共通の `compute_runtime_health()` を呼ぶ。
+    """
+    from .health import compute_runtime_health
+
+    return compute_runtime_health(
+        store,
+        llm_gateway_enabled=_llm_gateway_enabled(config),
+        workflow_id=params.get("workflow_id"),
+    )
+
+
+def _op_workflow_list(
+    params: dict[str, Any], *, store: Any, config: Any
+) -> dict[str, Any]:
+    """アクティブな workflow の一覧を返す。"""
+    return {"workflows": store.list_active_workflows()}
+
+
+def build_default_registry() -> OperationRegistry:
+    """seed の read-only operation を登録した registry を構築する。"""
+    reg = OperationRegistry()
+    reg.register(
+        Operation(
+            name="notion.outbox_status",
+            summary="Notion sync outbox の pending / 永続 error 件数を返す",
+            scope=READ_ONLY,
+            input_schema={"type": "object", "properties": {}, "required": []},
+            handler=_op_notion_outbox_status,
+        )
+    )
+    reg.register(
+        Operation(
+            name="runtime.health",
+            summary=(
+                "SQLite-backed な runtime 運用ヘルス (outbox + 運用ギャップ) "
+                "を集約する"
+            ),
+            scope=READ_ONLY,
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "workflow_id": {
+                        "type": "string",
+                        "description": (
+                            "個別 workflow の gap に絞る場合に指定 "
+                            "(未指定なら profile 横断)"
+                        ),
+                    }
+                },
+                "required": [],
+            },
+            handler=_op_runtime_health,
+        )
+    )
+    reg.register(
+        Operation(
+            name="workflow.list",
+            summary="アクティブな workflow の一覧を返す",
+            scope=READ_ONLY,
+            input_schema={"type": "object", "properties": {}, "required": []},
+            handler=_op_workflow_list,
+        )
+    )
+    return reg
+
+
+_DEFAULT_REGISTRY: OperationRegistry | None = None
+
+
+def default_registry() -> OperationRegistry:
+    """プロセス内で共有する既定 registry (遅延構築・シングルトン)。"""
+    global _DEFAULT_REGISTRY
+    if _DEFAULT_REGISTRY is None:
+        _DEFAULT_REGISTRY = build_default_registry()
+    return _DEFAULT_REGISTRY
