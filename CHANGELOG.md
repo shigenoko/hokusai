@@ -12,9 +12,9 @@ HOKUSAI のすべての特筆すべき変更をこのファイルに記録する
 
 ## [Unreleased]
 
-### 追加 / 変更 / 削除予定
+### Added
 
-- 未定
+- **Prime v2 MVP-5: gap analysis 残り 2 種 (state/SQLite-backed)**: `hokusai prime <wf> --include-gaps` の決定的検出に Notion 非依存の 2 種を追加 (MVP-4 の 3 種に追加)。`phase4_plan_missing` (current_phase ≥ 5 = Phase 5 implement 以降に到達しているのに Phase 4 の `work_plan` が空 — 計画なしで実装が進んでいないかの注意喚起。Phase 4 実行中の transient を避けるため閾値を設計 docs の「≥4」から ≥5 に精緻化)、`supersedes_chain_broken` (`state["supersedes_workflow_id"]` の旧 workflow が `notion_sync_errors` に `workflow_started` 永続失敗として記録 = Supersedes リレーション / handover 遡及が途切れている疑い、`SQLiteStore.has_failed_workflow_started()` で判定)。両 detector とも `hokusai/prime_gaps.py` の純関数で、`collect_gaps()` に `state` 引数を追加して合流。live Notion 呼び出しなしで完結 ([docs/dogfooding-findings.md §10](docs/dogfooding-findings.md) の「SQLite-backed gap を優先」方針に沿う)。残り 2 種 (`missing_verification_command` は config に build/test/lint の既定値が常に入り clean な signal が無いため見送り、`pending_gate_blocking` は Notion 依存) は未実装。回帰防止テスト 13 件追加 (`tests/test_prime_gaps.py` 11 件 + `tests/test_prime_v2_query.py` 1 件 + collect_gaps 合流 1 件)。詳細: [docs/design-prime-v2.md §6.1](docs/design-prime-v2.md)。
 
 ---
 
