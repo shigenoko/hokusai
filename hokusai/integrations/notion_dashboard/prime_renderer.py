@@ -197,6 +197,7 @@ def render_prime_markdown(
     query: str | None = None,
     query_results: list[dict[str, Any]] | None = None,
     prime_index_error: str | None = None,
+    gaps: list[dict[str, Any]] | None = None,
 ) -> str:
     """active Memory + workgraph context のリストを Agent prompt 向け
     Markdown へ整形する（Workgraph 完成 / Issue #54）。
@@ -258,10 +259,16 @@ def render_prime_markdown(
         lines.append("")
         # Prime v2 MVP-2: active context が空でも `--query` 指定時は
         # 検索結果セクションを出力する（過去 workflow のみヒットするケース）
-        if query is not None:
-            lines.extend(
-                _render_query_section(query, query_results, prime_index_error)
-            )
+        # Prime v2 MVP-4: gap analysis も同じく active context 空でも出す
+        # (gap が出るのは active context が空でも gap detector がヒットする
+        # 場合がある、例えば notion_sync_outbox に pending 行があるケース)
+        if query is not None or gaps is not None:
+            if query is not None:
+                lines.extend(
+                    _render_query_section(query, query_results, prime_index_error)
+                )
+            if gaps is not None:
+                lines.extend(_render_gap_section(gaps))
             return "\n".join(lines).rstrip() + "\n"
         return "\n".join(lines)
 
@@ -323,7 +330,39 @@ def render_prime_markdown(
             _render_query_section(query, query_results, prime_index_error)
         )
 
+    # Prime v2 MVP-4: gap analysis セクション（`--include-gaps` 指定時のみ、
+    # 引数 gaps が None でなければ表示）
+    if gaps is not None:
+        lines.extend(_render_gap_section(gaps))
+
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _render_gap_section(gaps: list[dict[str, Any]]) -> list[str]:
+    """`--include-gaps` 指定時の gap analysis セクションを生成する。
+
+    Prime v2 MVP-4 (docs/design-prime-v2.md §6.1 / §8.1): 各 gap は
+    `Gap.to_dict()` 形式の `{kind, phase, detail}` を持つ前提。
+    """
+    out: list[str] = ["## 未確定 / 不足情報 (gap analysis)", ""]
+    if not gaps:
+        out.append("_検出された gap はありません_")
+        out.append("")
+        return out
+    for g in gaps:
+        kind = g.get("kind") or "?"
+        detail = (g.get("detail") or "").strip()
+        phase = g.get("phase")
+        out.append(f"### `{kind}`")
+        meta: list[str] = []
+        if isinstance(phase, int) and 1 <= phase <= 10:
+            meta.append(f"**Phase:** `phase{phase}`")
+        if meta:
+            out.append(" / ".join(meta))
+        if detail:
+            out.append(f"> {detail}")
+        out.append("")
+    return out
 
 
 def _render_query_section(
@@ -418,6 +457,7 @@ def render_prime_json(
     diagnostics: list[str] | None = None,
     query: str | None = None,
     query_results: list[dict[str, Any]] | None = None,
+    gaps: list[dict[str, Any]] | None = None,
 ) -> str:
     """active Memory + workgraph context を Agent / 自動処理向け JSON へ整形
     する（Workgraph 完成 / Issue #54）。
@@ -460,6 +500,9 @@ def render_prime_json(
         # なら query/query_results 両方 null。
         "query": query,
         "query_results": query_results,
+        # Prime v2 MVP-4: gap analysis 結果。`--include-gaps` 未指定なら null
+        # (v1/MVP-2 互換)、指定時は list (空でも [])。
+        "gaps": gaps,
     }
     return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
 
