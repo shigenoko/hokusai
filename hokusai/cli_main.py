@@ -1608,6 +1608,8 @@ def _parse_operation_params(raw_params: list[str] | None) -> dict[str, str]:
     `=` を含まない / KEY が空の指定は ValueError で reject する
     （silent に無視すると入力ミスに気付けないため）。VALUE 側の `=` は
     最初の 1 つでのみ分割するので `--param expr=a=b` は {"expr": "a=b"}。
+    同じ KEY を 2 回指定した場合も、後勝ちで静かに上書きせず ValueError で
+    reject する（入力ミスを早期検出するため。PR #143 Copilot Round 2 指摘）。
     """
     parsed: dict[str, str] = {}
     for item in raw_params or []:
@@ -1619,6 +1621,8 @@ def _parse_operation_params(raw_params: list[str] | None) -> dict[str, str]:
         key = key.strip()
         if not key:
             raise ValueError(f"--param の KEY が空です: {item!r}")
+        if key in parsed:
+            raise ValueError(f"--param の KEY が重複しています: {key!r}")
         parsed[key] = value
     return parsed
 

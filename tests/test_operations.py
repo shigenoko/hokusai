@@ -177,6 +177,12 @@ def test_parse_operation_params_rejects_empty_key():
         _parse_operation_params(["=value"])
 
 
+def test_parse_operation_params_rejects_duplicate_key():
+    # 後勝ちで silent 上書きせず reject (PR #143 Copilot Round 2)
+    with pytest.raises(ValueError, match="重複"):
+        _parse_operation_params(["a=1", "a=2"])
+
+
 # --- CLI: stdout/stderr 分離 (PR #143 Copilot Round 1) -------------------
 # `operations run ... | jq` で stdout を pipe する利用者が、エラー文と JSON の
 # 混在出力を掴まないよう、エラー / usage は stderr・結果 (JSON) のみ stdout。
@@ -210,3 +216,94 @@ def test_handle_operations_no_subcommand_usage_to_stderr(capsys):
     assert rc == 1
     assert captured.out == ""
     assert "使い方" in captured.err
+
+
+# --- CLI: list / run の成功パス契約 (PR #143 Copilot Round 2) -------------
+# 回帰しやすい CLI 契約 (stdout のみ・exit 0・JSON schema) を固定する。
+
+
+def test_handle_operations_list_json_contract(capsys):
+    import json
+
+    from hokusai.cli_main import _handle_operations
+
+    rc = _handle_operations(
+        _ns(operations_subcommand="list", output="json"), _FakeConfig()
+    )
+    captured = capsys.readouterr()
+    assert rc == 0
+    payload = json.loads(captured.out)
+    names = {op["name"] for op in payload["operations"]}
+    assert {"notion.outbox_status", "runtime.health", "workflow.list"} <= names
+    # 各 op が契約キーを持つ
+    for op in payload["operations"]:
+        assert set(op) == {"name", "scope", "summary", "input_schema"}
+
+
+def test_handle_operations_list_text(capsys):
+    from hokusai.cli_main import _handle_operations
+
+    rc = _handle_operations(
+        _ns(operations_subcommand="list", output="text"), _FakeConfig()
+    )
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert "notion.outbox_status" in captured.out
+    assert "[read_only]" in captured.out
+
+
+def test_handle_operations_run_success_json_only(capsys, monkeypatch):
+    """run 成功時は stdout に JSON のみ・exit 0 (stderr は空)。"""
+    import json
+
+    import hokusai.persistence as persistence_mod
+    from hokusai.cli_main import _handle_operations
+
+    # SQLiteStore を fake に差し替え (tmp DB 不要)
+    monkeypatch.setattr(
+        persistence_mod,
+        "SQLiteStore",
+        lambda *a, **k: _FakeStore(pending=3, errors=1),
+    )
+
+    class _Cfg(_FakeConfig):
+        database_path = ":memory:"
+
+    rc = _handle_operations(
+        _ns(operations_subcommand="run", name="notion.outbox_status", params=None),
+        _Cfg(),
+    )
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert captured.err == ""
+    assert json.loads(captured.out) == {"pending": 3, "errors": 1}
+
+
+def test_handle_operations_run_mutating_rejected(capsys, monkeypatch):
+    """mutating scope の operation は run 不可・stderr へ・exit 1。"""
+    import hokusai.operations as operations_mod
+    from hokusai.cli_main import _handle_operations
+    from hokusai.operations import MUTATING, Operation, OperationRegistry
+
+    reg = OperationRegistry()
+    reg.register(
+        Operation(
+            name="danger.do",
+            summary="",
+            scope=MUTATING,
+            input_schema={"type": "object", "properties": {}, "required": []},
+            handler=lambda params, *, store, config: {},
+        )
+    )
+    # _handle_operations は関数内で `from .operations import default_registry`
+    # するため、hokusai.operations 側を差し替えれば足りる。
+    monkeypatch.setattr(operations_mod, "default_registry", lambda: reg)
+
+    rc = _handle_operations(
+        _ns(operations_subcommand="run", name="danger.do", params=None),
+        _FakeConfig(),
+    )
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert captured.out == ""
+    assert "scope=" in captured.err
