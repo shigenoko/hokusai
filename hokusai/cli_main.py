@@ -2636,20 +2636,39 @@ def _run_profile_deep_health(p, *, is_json: bool = False) -> dict:
     if not is_json:
         print()
         print("  [--deep] runtime 運用ヘルス検査:")
+
+    # profile の config を解決して SQLite を開き、共通 handler
+    # `compute_runtime_health()` で集約する (Operations Console と同一経路)。
+    # config/store の解決失敗も best-effort で error に記録する。
     try:
         from .config import create_config_from_env_and_file
+        from .health import compute_runtime_health
         from .persistence import SQLiteStore
-        from .prime_gaps import collect_gaps
 
         config = create_config_from_env_and_file(profile_name=p.name)
         store = SQLiteStore(config.database_path)
+        llm_gw_enabled = bool(
+            getattr(getattr(config, "llm_gateway", None), "enabled", False)
+        )
+        # profile 横断の運用ヘルスなので workflow_id / state は渡さない
+        # (workflow 個別の gap は `hokusai prime --include-gaps` 側の責務)。
+        health = compute_runtime_health(
+            store, llm_gateway_enabled=llm_gw_enabled
+        )
+    except Exception as e:
+        health["error"] = f"{type(e).__name__}: {e}"
 
-        pending = store.count_notion_sync_pending()
-        errors = store.count_notion_sync_errors()
-        health["ran"] = True
-        health["outbox_pending"] = pending
-        health["outbox_errors"] = errors
-        if not is_json:
+    if not is_json:
+        if health["error"] is not None:
+            # 検査失敗は static 検査結果を壊さない (best-effort)。
+            # issues には積まない (検査不能 ≠ 運用問題ありのため)。
+            print(
+                f"    ⚠ runtime ヘルス検査を実行できませんでした: "
+                f"{health['error']}"
+            )
+        else:
+            pending = health["outbox_pending"]
+            errors = health["outbox_errors"]
             if pending == 0 and errors == 0:
                 print("    ✓ Notion sync outbox: 滞留なし (pending 0 / error 0)")
             else:
@@ -2666,32 +2685,12 @@ def _run_profile_deep_health(p, *, is_json: bool = False) -> dict:
                         f"    ✗ [notion_sync_errors] "
                         f"{_persistent_errors_detail(errors)}"
                     )
-
-        llm_gw_enabled = bool(
-            getattr(getattr(config, "llm_gateway", None), "enabled", False)
-        )
-        # profile 横断の運用ヘルスなので workflow_id / state は渡さない
-        # (workflow 個別の gap は `hokusai prime --include-gaps` 側の責務)。
-        gaps = collect_gaps(
-            store=store,
-            review_issues=None,
-            llm_gateway_enabled=llm_gw_enabled,
-            workflow_id=None,
-            state=None,
-        )
-        health["gaps"] = [{"kind": g.kind, "detail": g.detail} for g in gaps]
-        if not is_json:
+            gaps = health["gaps"]
             if not gaps:
                 print("    ✓ 運用ギャップ: 検出なし")
             else:
                 for g in gaps:
-                    print(f"    ✗ [{g.kind}] {g.detail}")
-    except Exception as e:
-        # 検査失敗は static 検査結果を壊さない (best-effort)。error フィールドに
-        # 記録するが issues には積まない (検査不能 ≠ 運用問題ありのため)。
-        health["error"] = f"{type(e).__name__}: {e}"
-        if not is_json:
-            print(f"    ⚠ runtime ヘルス検査を実行できませんでした: {e}")
+                    print(f"    ✗ [{g['kind']}] {g['detail']}")
     return health
 
 

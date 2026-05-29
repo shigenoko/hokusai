@@ -243,8 +243,19 @@ def render_notion_dashboard_panel() -> str:
         return ""
 
     store = _get_store()
-    pending = store.count_notion_sync_pending()
-    errors = store.count_notion_sync_errors()
+    # Step 2 共通 handler 化: CLI `profile doctor --deep` と同じ
+    # `compute_runtime_health()` で outbox 件数 + 運用ギャップを集約する
+    # (検出ロジックを CLI / Console で一本化)。
+    from hokusai.config import get_config
+    from hokusai.health import compute_runtime_health
+
+    _llm_gw_enabled = bool(
+        getattr(getattr(get_config(), "llm_gateway", None), "enabled", False)
+    )
+    _health = compute_runtime_health(store, llm_gateway_enabled=_llm_gw_enabled)
+    pending = _health["outbox_pending"]
+    errors = _health["outbox_errors"]
+    _gaps = _health["gaps"]
     is_ready = dispatcher.is_configured()
     state_label = (
         "🟢 接続準備済み" if is_ready
@@ -252,6 +263,20 @@ def render_notion_dashboard_panel() -> str:
     )
 
     identification_html = _render_notion_identification_section()
+
+    # 運用ギャップ (compute_runtime_health の検出結果) を additive に表示する。
+    # gap が無ければ何も出さず、従来パネルの見た目を維持する。
+    gaps_html = ""
+    if _gaps:
+        gap_items = "".join(
+            f"<li><code>{g['kind']}</code>: {g['detail']}</li>" for g in _gaps
+        )
+        gaps_html = (
+            '<div style="margin-top:8px; font-size:0.85em; color:#b35900;">'
+            f"⚠ 運用ギャップ {len(_gaps)} 件:"
+            f"<ul style=\"margin:4px 0 0; padding-left:1.2em;\">{gap_items}</ul>"
+            "</div>"
+        )
 
     return f"""
     <div class="card" id="notion-dashboard-panel">
@@ -269,6 +294,7 @@ def render_notion_dashboard_panel() -> str:
           </button>
         </div>
       </div>
+      {gaps_html}
       {identification_html}
       <div id="notion-dashboard-result" style="margin-top:8px; font-size:0.85em;"></div>
     </div>
