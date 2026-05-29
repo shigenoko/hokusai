@@ -2408,19 +2408,26 @@ def _handle_profile_show(name: str, registry) -> int:
 def _handle_profile_doctor(name: str, registry, *, deep: bool = False) -> int:
     """`hokusai profile doctor <name>` の実装
 
-    v0.3.0 の検査範囲:
+    静的検査 (registry / filesystem):
       1. config file が存在するか
       2. data_dir が存在するか（無ければ作成を試みる）
       3. dashboard port が他 profile と衝突していないか
       4. data_dir が他 profile と衝突していないか
 
-    `--deep` フラグ: 受け付けるが実 API 接続確認は v0.4 以降で実装予定で、
-                   現状は注意書きを表示するだけ。
+    `--deep` フラグ: 上記の静的検査に加えて runtime 運用ヘルス検査を実行する
+        （Step 2 / Doctor-Status 一画面化）。profile の config を解決して
+        SQLite を開き、`_run_profile_deep_health()` で Notion sync outbox の
+        pending / 永続 error 件数と、`prime_gaps.collect_gaps()` を共通 sink
+        として再利用した運用ギャップ (`notion_outbox_pending` /
+        `audit_log_silence`) を集約する。検出した運用問題は `issues` に積まれ
+        exit code に反映される。live Notion 呼び出しは行わず、検査自体の失敗は
+        静的検査の結果を壊さず warning 行で graceful degrade する。
 
-    v0.3.0 では未実装（フォローアップで追加予定）:
+    未実装（フォローアップで追加予定）:
       - env var 名（`api_token_env` 等）の存在確認
       - database_path / checkpoint_db_path / worktree_root 個別の衝突検出
-      - Notion / Figma / Miro / Slack への実 API 接続確認（`--deep`）
+      - Notion / Figma / Miro / Slack への実 API 接続確認
+      - `--output json` による stable schema 化 + Operations Console 共通 handler 化
     """
     from .config.profiles import ProfileNotFoundError
 
