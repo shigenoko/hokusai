@@ -18,6 +18,7 @@ from hokusai.operations import (
     READ_ONLY,
     Operation,
     OperationRegistry,
+    ReadOnlyStore,
     build_default_registry,
     default_registry,
 )
@@ -271,13 +272,13 @@ def test_handle_operations_run_success_json_only(capsys, monkeypatch):
     """run 成功時は stdout に JSON のみ・exit 0 (stderr は空)。"""
     import json
 
-    import hokusai.persistence as persistence_mod
+    import hokusai.operations as operations_mod
     from hokusai.cli_main import _handle_operations
 
-    # SQLiteStore を fake に差し替え (tmp DB 不要)
+    # ReadOnlyStore を fake に差し替え (tmp DB 不要)
     monkeypatch.setattr(
-        persistence_mod,
-        "SQLiteStore",
+        operations_mod,
+        "ReadOnlyStore",
         lambda *a, **k: _FakeStore(pending=3, errors=1),
     )
 
@@ -322,3 +323,85 @@ def test_handle_operations_run_mutating_rejected(capsys, monkeypatch):
     assert rc == 1
     assert captured.out == ""
     assert "scope=" in captured.err
+
+
+# --- ReadOnlyStore: 副作用ゼロの read-only 契約 (PR #143 Copilot Round 5) --
+
+
+def test_read_only_store_does_not_create_db(tmp_path):
+    """存在しない DB パスを読んでも、ファイルを新規作成しない。
+
+    SQLiteStore は mode=rw で DB を新規作成する副作用があるのに対し、
+    ReadOnlyStore は mode=ro なので作成しない (read-only 契約の核心)。
+    """
+    db = tmp_path / "nonexistent.db"
+    store = ReadOnlyStore(db)
+    # 全メソッドが安全側の既定値を返し、例外を投げない
+    assert store.count_notion_sync_pending() == 0
+    assert store.count_notion_sync_errors() == 0
+    assert store.list_active_workflows() == []
+    assert store.has_failed_workflow_started("wf-x") is False
+    assert store.list_audit_logs(workflow_id="wf-x", limit=1) == []
+    # 副作用がない = ファイルは作られていない
+    assert not db.exists()
+
+
+def test_read_only_store_reads_existing_db(tmp_path):
+    """既存 DB に対しては SELECT 結果を正しく返す。"""
+    import sqlite3
+
+    db = tmp_path / "wf.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """
+        CREATE TABLE notion_sync_outbox (idempotency_key TEXT);
+        CREATE TABLE notion_sync_errors (workflow_id TEXT, event_type TEXT);
+        CREATE TABLE workflows (
+            workflow_id TEXT, task_url TEXT, task_title TEXT,
+            current_phase INTEGER, updated_at TEXT
+        );
+        INSERT INTO notion_sync_outbox VALUES ('k1'), ('k2');
+        INSERT INTO notion_sync_errors VALUES ('wf-1', 'workflow_started');
+        INSERT INTO workflows VALUES ('wf-1', 'u', 't', 3, '2026-01-01');
+        INSERT INTO workflows VALUES ('wf-done', 'u', 't', 10, '2026-01-02');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    store = ReadOnlyStore(db)
+    assert store.count_notion_sync_pending() == 2
+    assert store.count_notion_sync_errors() == 1
+    assert store.has_failed_workflow_started("wf-1") is True
+    assert store.has_failed_workflow_started("wf-none") is False
+    wfs = store.list_active_workflows()
+    # current_phase < 10 のみ (wf-done は除外)
+    assert [w["workflow_id"] for w in wfs] == ["wf-1"]
+
+
+def test_read_only_store_rejects_writes(tmp_path):
+    """mode=ro 接続なので INSERT/UPDATE は失敗する (実 I/O レベルの read-only 保証)。
+
+    _read は sqlite3.Error を握りつぶし default を返すため、書き込み試行は
+    黙って no-op になり DB は変化しない。
+    """
+    import sqlite3
+
+    db = tmp_path / "wf.db"
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        "CREATE TABLE notion_sync_outbox (idempotency_key TEXT);"
+        "INSERT INTO notion_sync_outbox VALUES ('k1');"
+    )
+    conn.commit()
+    conn.close()
+
+    store = ReadOnlyStore(db)
+    # _read 経由で書き込みを試みても ro 接続が拒否し default(None) を返す
+    result = store._read(
+        lambda c: c.execute("INSERT INTO notion_sync_outbox VALUES ('k2')"),
+        None,
+    )
+    assert result is None
+    # 件数は増えていない
+    assert store.count_notion_sync_pending() == 1

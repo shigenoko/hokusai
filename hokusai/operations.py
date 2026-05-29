@@ -20,8 +20,10 @@ handler 契約:
 """
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 # scope: 第1スライスでは read_only のみ実在。mutating は将来の registry 拡張で
@@ -79,6 +81,112 @@ class OperationRegistry:
 
     def list(self) -> list[Operation]:
         return [self._ops[n] for n in self.names()]
+
+
+class ReadOnlyStore:
+    """副作用なしの read-only sqlite アクセサ (Operation Registry 用)。
+
+    `SQLiteStore.__init__()` は WAL PRAGMA / CREATE / ALTER を必ず実行し、
+    DB ファイルが無ければ新規作成までしてしまう。read-only operation の
+    実行でこれが走ると「読むだけ」契約に反するため、sqlite3 URI の
+    `mode=ro` で接続し SELECT のみ実行する read-only 専用アクセサを用意する
+    (既存 `hokusai/config/profiles.py::_workflow_exists_readonly` と同方針。
+     PR #143 Copilot Round 5 指摘)。
+
+    DB ファイル不在 / テーブル不在 / sqlite でないファイル等は安全側の既定値
+    (0 / [] / False) を返す。`collect_gaps()` 側も各呼び出しを try/except で
+    包むため、best-effort な runtime health 集約を壊さない。
+    """
+
+    def __init__(self, db_path: Any) -> None:
+        self._db_path = Path(db_path)
+
+    def _read(self, fn: Callable[[sqlite3.Connection], Any], default: Any) -> Any:
+        # URI 構築は Path.as_uri() を使う (スペース / # / ? 等の予約文字を
+        # percent-encode して silent な接続失敗を防ぐ)。接続不可 / SQL 失敗は
+        # すべて安全側の default に倒す。
+        try:
+            uri = f"{self._db_path.resolve().as_uri()}?mode=ro"
+            with sqlite3.connect(uri, uri=True) as conn:
+                return fn(conn)
+        except (sqlite3.Error, ValueError, OSError):
+            return default
+
+    def count_notion_sync_pending(self) -> int:
+        return self._read(
+            lambda c: int(
+                (c.execute("SELECT COUNT(*) FROM notion_sync_outbox").fetchone()
+                 or [0])[0]
+            ),
+            0,
+        )
+
+    def count_notion_sync_errors(self) -> int:
+        return self._read(
+            lambda c: int(
+                (c.execute("SELECT COUNT(*) FROM notion_sync_errors").fetchone()
+                 or [0])[0]
+            ),
+            0,
+        )
+
+    def has_failed_workflow_started(self, workflow_id: str) -> bool:
+        return self._read(
+            lambda c: c.execute(
+                "SELECT 1 FROM notion_sync_errors "
+                "WHERE workflow_id = ? AND event_type = 'workflow_started' LIMIT 1",
+                (workflow_id,),
+            ).fetchone()
+            is not None,
+            False,
+        )
+
+    def list_active_workflows(self) -> list[dict[str, Any]]:
+        keys = ("workflow_id", "task_url", "task_title", "current_phase", "updated_at")
+        return self._read(
+            lambda c: [
+                dict(zip(keys, row))
+                for row in c.execute(
+                    "SELECT workflow_id, task_url, task_title, current_phase, "
+                    "updated_at FROM workflows WHERE current_phase < 10 "
+                    "ORDER BY updated_at DESC"
+                ).fetchall()
+            ],
+            [],
+        )
+
+    def list_audit_logs(
+        self, *, workflow_id: str | None = None, limit: int = 50, **_: Any
+    ) -> list[dict[str, Any]]:
+        # collect_gaps は workflow_id + limit のみ使う (audit_log_silence 判定)。
+        # 余剰フィルタ kwargs は read-only 用途では無視する。
+        if limit < 1:
+            raise ValueError("limit は 1 以上を指定してください")
+        keys = (
+            "id", "workflow_id", "phase", "action", "status", "details", "created_at"
+        )
+        where = "WHERE workflow_id = ?" if workflow_id is not None else ""
+        params: list[Any] = []
+        if workflow_id is not None:
+            params.append(workflow_id)
+        params.append(limit)
+
+        def _run(c: sqlite3.Connection) -> list[dict[str, Any]]:
+            import json
+
+            rows = c.execute(
+                f"SELECT id, workflow_id, phase, action, status, details_json, "
+                f"created_at FROM audit_logs {where} ORDER BY id DESC LIMIT ?",
+                params,
+            ).fetchall()
+            out = []
+            for row in rows:
+                row = list(row)
+                row[5] = json.loads(row[5]) if row[5] else None
+                out.append(dict(zip(keys, row)))
+            return out
+
+        return self._read(_run, [])
 
 
 # --- seed handlers (read-only) -------------------------------------------

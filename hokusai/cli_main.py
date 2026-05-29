@@ -1697,9 +1697,12 @@ def _handle_operations(args, config) -> int:
             print(f"✗ {e}", file=sys.stderr)
             return 1
 
-        from .persistence import SQLiteStore
+        # read-only operation なので、副作用なしの ReadOnlyStore を使う
+        # (SQLiteStore は WAL PRAGMA / CREATE / ALTER / DB 新規作成の副作用が
+        #  あり read-only 契約に反する。PR #143 Copilot Round 5 指摘)。
+        from .operations import ReadOnlyStore
 
-        store = SQLiteStore(config.database_path)
+        store = ReadOnlyStore(config.database_path)
         result = op.handler(params, store=store, config=config)
         print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
         return 0
