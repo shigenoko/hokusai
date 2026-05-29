@@ -86,10 +86,17 @@ def _llm_gateway_enabled(config: Any) -> bool:
 def _op_notion_outbox_status(
     params: dict[str, Any], *, store: Any, config: Any
 ) -> dict[str, Any]:
-    """Notion sync outbox の pending / 永続 error 件数を返す。"""
+    """Notion sync outbox の pending / 永続 error 件数を返す。
+
+    キー名は `compute_runtime_health()` / `profile doctor --output json` の
+    `runtime_health` と同じ `outbox_pending` / `outbox_errors` に揃える
+    (Operation Registry は CLI / Dashboard / 将来の API の共通契約なので、
+     同じ概念は同じキー名にして利用者の混乱を避ける。PR #143 Copilot
+     Round 3 指摘)。`outbox_errors` は永続 error 件数を指す。
+    """
     return {
-        "pending": store.count_notion_sync_pending(),
-        "errors": store.count_notion_sync_errors(),
+        "outbox_pending": store.count_notion_sync_pending(),
+        "outbox_errors": store.count_notion_sync_errors(),
     }
 
 

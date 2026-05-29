@@ -120,7 +120,8 @@ def test_op_notion_outbox_status():
     result = op.handler(
         {}, store=_FakeStore(pending=2, errors=1), config=_FakeConfig()
     )
-    assert result == {"pending": 2, "errors": 1}
+    # キー名は runtime_health と統一 (PR #143 Copilot Round 3)
+    assert result == {"outbox_pending": 2, "outbox_errors": 1}
 
 
 def test_op_workflow_list():
@@ -276,7 +277,7 @@ def test_handle_operations_run_success_json_only(capsys, monkeypatch):
     captured = capsys.readouterr()
     assert rc == 0
     assert captured.err == ""
-    assert json.loads(captured.out) == {"pending": 3, "errors": 1}
+    assert json.loads(captured.out) == {"outbox_pending": 3, "outbox_errors": 1}
 
 
 def test_handle_operations_run_mutating_rejected(capsys, monkeypatch):
