@@ -1630,6 +1630,11 @@ def _handle_operations(args, config) -> int:
     許可し、戻り値を JSON で stdout に出す（CLI / Dashboard / 将来の MCP が
     同じ handler を呼ぶ単一経路の CLI 入口）。
 
+    stdout は機械処理向けの結果 (JSON) 専用にし、エラー / usage / 案内は
+    すべて stderr に出す。これにより `operations run ... | jq` のように
+    stdout を pipe で扱う利用者が、エラー文と JSON の混在出力を掴まずに済む
+    (PR #143 Copilot Round 1 指摘)。
+
     Returns:
         0: 正常 / 1: 未知の operation・不正パラメータ・scope 違反など
     """
@@ -1666,20 +1671,26 @@ def _handle_operations(args, config) -> int:
         op = registry.get(name)
         if op is None:
             available = ", ".join(registry.names()) or "(なし)"
-            print(f"✗ 未知の operation: {name}")
-            print(f"  利用可能: {available}")
+            print(f"✗ 未知の operation: {name}", file=sys.stderr)
+            print(f"  利用可能: {available}", file=sys.stderr)
             return 1
         # 第1スライスでは mutating operation を CLI から実行させない
         # （read-only 経路の単一化が目的。副作用つきは後続スライスで
         #  確認フロー込みで解禁する）。
         if not op.is_read_only:
-            print(f"✗ operation '{name}' は scope={op.scope} のため run できません")
-            print("  第1スライスでは read-only operation のみ実行可能です")
+            print(
+                f"✗ operation '{name}' は scope={op.scope} のため run できません",
+                file=sys.stderr,
+            )
+            print(
+                "  第1スライスでは read-only operation のみ実行可能です",
+                file=sys.stderr,
+            )
             return 1
         try:
             params = _parse_operation_params(getattr(args, "params", None))
         except ValueError as e:
-            print(f"✗ {e}")
+            print(f"✗ {e}", file=sys.stderr)
             return 1
 
         from .persistence import SQLiteStore
@@ -1689,10 +1700,10 @@ def _handle_operations(args, config) -> int:
         print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
         return 0
 
-    # subcommand 未指定 → usage を表示
-    print("使い方: hokusai operations {list|run} ...")
-    print("  list           登録 operation を一覧表示")
-    print("  run <name>     read-only operation を実行")
+    # subcommand 未指定 → usage を表示（stdout を結果専用にするため stderr へ）
+    print("使い方: hokusai operations {list|run} ...", file=sys.stderr)
+    print("  list           登録 operation を一覧表示", file=sys.stderr)
+    print("  run <name>     read-only operation を実行", file=sys.stderr)
     return 1
 
 

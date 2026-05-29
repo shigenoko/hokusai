@@ -175,3 +175,38 @@ def test_parse_operation_params_rejects_missing_equals():
 def test_parse_operation_params_rejects_empty_key():
     with pytest.raises(ValueError, match="KEY が空"):
         _parse_operation_params(["=value"])
+
+
+# --- CLI: stdout/stderr 分離 (PR #143 Copilot Round 1) -------------------
+# `operations run ... | jq` で stdout を pipe する利用者が、エラー文と JSON の
+# 混在出力を掴まないよう、エラー / usage は stderr・結果 (JSON) のみ stdout。
+
+
+def _ns(**kw):
+    import argparse
+
+    return argparse.Namespace(**kw)
+
+
+def test_handle_operations_unknown_op_errors_to_stderr(capsys):
+    from hokusai.cli_main import _handle_operations
+
+    rc = _handle_operations(
+        _ns(operations_subcommand="run", name="no.such.op", params=None),
+        _FakeConfig(),
+    )
+    captured = capsys.readouterr()
+    assert rc == 1
+    # stdout は JSON 専用なので空
+    assert captured.out == ""
+    assert "未知の operation" in captured.err
+
+
+def test_handle_operations_no_subcommand_usage_to_stderr(capsys):
+    from hokusai.cli_main import _handle_operations
+
+    rc = _handle_operations(_ns(operations_subcommand=None), _FakeConfig())
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert captured.out == ""
+    assert "使い方" in captured.err
