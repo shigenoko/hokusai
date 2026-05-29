@@ -6,7 +6,6 @@ Phase D: Operations Console 化のうち、Web Dashboard 側の追加機能を�
 from __future__ import annotations
 
 import sys
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -15,7 +14,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from hokusai.config import set_config
 from hokusai.config.models import NotionDashboardConfig, WorkflowConfig
-from hokusai.persistence.sqlite_store import SQLiteStore
 
 
 @pytest.fixture
@@ -87,6 +85,47 @@ def test_render_notion_dashboard_panel_shows_pending_count(isolated_dashboard, m
     html = isolated_dashboard.render_notion_dashboard_panel()
     assert "保留 2 件" in html
     assert "永続失敗 1 件" in html
+
+
+def test_render_notion_dashboard_panel_escapes_gap_html(
+    isolated_dashboard, monkeypatch
+):
+    """運用ギャップの detail に HTML 特殊文字が入っても escape される
+    (PR #142 Copilot Round 1: XSS 防御の回帰防止)"""
+    import hokusai.health as health_mod
+
+    cfg = WorkflowConfig(
+        data_dir=isolated_dashboard.DB_PATH.parent,
+        database_path=isolated_dashboard.DB_PATH,
+        checkpoint_db_path=isolated_dashboard.DB_PATH.parent / "cp.db",
+        notion_dashboard=NotionDashboardConfig(enabled=True),
+    )
+    set_config(cfg)
+    monkeypatch.setattr(isolated_dashboard, "_store", None)
+
+    # compute_runtime_health を差し替えて悪意ある detail を含む gap を返す
+    def _fake_health(store, **kwargs):
+        return {
+            "ran": True,
+            "outbox_pending": 0,
+            "outbox_errors": 0,
+            "gaps": [{
+                "kind": "x<script>",
+                "detail": "<script>alert(1)</script> & 'evil'",
+            }],
+            "error": None,
+        }
+
+    monkeypatch.setattr(health_mod, "compute_runtime_health", _fake_health)
+
+    html = isolated_dashboard.render_notion_dashboard_panel()
+    # 生の <script> はそのまま出力されない
+    assert "<script>alert(1)</script>" not in html
+    # escape 済み形が含まれる
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
+    assert "x&lt;script&gt;" in html
+    # gap セクション自体は表示される
+    assert "運用ギャップ" in html
 
 
 def test_get_notion_dispatcher_returns_dispatcher(isolated_dashboard):
