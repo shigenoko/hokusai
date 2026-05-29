@@ -48,6 +48,13 @@ class Operation:
     input_schema: dict[str, Any]
     handler: Callable[..., dict[str, Any]]
 
+    # frozen=True は dataclass に __hash__ を生成させるが、input_schema (dict)
+    # は hash 不可能なので、Operation を set/dict key に入れると hash 時に
+    # TypeError になる。hash は使わない前提なので明示的に unhashable にして
+    # 潜在バグを防ぐ (PR #143 Copilot Round 4 指摘)。frozen の immutability は
+    # 維持される。
+    __hash__ = None
+
     @property
     def is_read_only(self) -> bool:
         return self.scope == READ_ONLY

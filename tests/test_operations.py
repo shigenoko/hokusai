@@ -67,6 +67,20 @@ def test_registry_register_and_get():
     assert reg.get("missing") is None
 
 
+def test_operation_is_unhashable():
+    # frozen でも input_schema(dict) を持つので明示的に unhashable
+    # (PR #143 Copilot Round 4: set/dict key 投入時の latent TypeError 防止)
+    op = Operation(
+        name="x.y",
+        summary="s",
+        scope=READ_ONLY,
+        input_schema={"type": "object", "properties": {}, "required": []},
+        handler=lambda params, *, store, config: {},
+    )
+    with pytest.raises(TypeError):
+        hash(op)
+
+
 def test_registry_rejects_duplicate():
     reg = OperationRegistry()
     op = Operation(
