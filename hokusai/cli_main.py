@@ -453,6 +453,12 @@ def _build_parser():
             "live API 呼び出しは行わない"
         ),
     )
+    profile_doctor_parser.add_argument(
+        "--output",
+        choices=("text", "json"),
+        default="text",
+        help="出力形式（既定 text）。json は stable schema を 1 つ stdout に出す",
+    )
 
     # dashboard コマンド: Operations Console を profile 指定で起動
     dashboard_parser = subparsers.add_parser(
@@ -2355,7 +2361,9 @@ def _handle_profile_command(args, profile_parser) -> int:
         return _handle_profile_show(args.name, registry)
     if subcommand == "doctor":
         return _handle_profile_doctor(
-            args.name, registry, deep=getattr(args, "deep", False)
+            args.name, registry,
+            deep=getattr(args, "deep", False),
+            output=getattr(args, "output", "text"),
         )
 
     profile_parser.print_help()
@@ -2409,7 +2417,17 @@ def _handle_profile_show(name: str, registry) -> int:
     return 0
 
 
-def _handle_profile_doctor(name: str, registry, *, deep: bool = False) -> int:
+def _persistent_errors_detail(errors: int) -> str:
+    """notion_sync_errors の永続 error 件数を説明する文字列 (text/JSON 共用)。"""
+    return (
+        f"Notion sync の永続 error が {errors} 件あります "
+        f"(notion_sync_errors テーブル)。原因を解消し errors 行を整理してください"
+    )
+
+
+def _handle_profile_doctor(
+    name: str, registry, *, deep: bool = False, output: str = "text"
+) -> int:
     """`hokusai profile doctor <name>` の実装
 
     静的検査 (registry / filesystem):
@@ -2427,45 +2445,83 @@ def _handle_profile_doctor(name: str, registry, *, deep: bool = False) -> int:
         exit code に反映される。live Notion 呼び出しは行わず、検査自体の失敗は
         静的検査の結果を壊さず warning 行で graceful degrade する。
 
+    `--output json` フラグ: 人間向け text 出力の代わりに stable schema の
+        JSON を 1 つ stdout に出す（CI / 運用監視 / Operations Console から
+        の機械処理用）。schema:
+          {profile, checks: [{id, ok, detail}], runtime_health: {...}|null,
+           issues: [...], healthy: bool}
+        exit code は text モードと同一 (healthy なら 0、issues ありで 1)。
+
     未実装（フォローアップで追加予定）:
       - env var 名（`api_token_env` 等）の存在確認
       - database_path / checkpoint_db_path / worktree_root 個別の衝突検出
       - Notion / Figma / Miro / Slack への実 API 接続確認
-      - `--output json` による stable schema 化 + Operations Console 共通 handler 化
+      - Operations Console との共通 handler 化
     """
+    import json as _json
+
     from .config.profiles import ProfileNotFoundError
+
+    is_json = output == "json"
 
     try:
         p = registry.get(name)
     except ProfileNotFoundError as e:
-        print(f"エラー: {e}")
+        if is_json:
+            print(_json.dumps(
+                {
+                    "profile": name,
+                    "checks": [],
+                    "runtime_health": None,
+                    "issues": [str(e)],
+                    "healthy": False,
+                    "error": str(e),
+                },
+                ensure_ascii=False,
+                indent=2,
+            ))
+        else:
+            print(f"エラー: {e}")
         return 1
 
-    print(f"Diagnosing profile: {p.name}")
-    print("-" * 60)
-
+    checks: list[dict] = []
     issues: list[str] = []
+
+    def record(check_id: str, ok: bool, detail: str) -> None:
+        """1 検査の結果を構造化記録し、text モードでは ✓/✗ 行を出力する。
+        ok=False の検査は issues にも積んで exit code に反映する。"""
+        checks.append({"id": check_id, "ok": ok, "detail": detail})
+        if not is_json:
+            print(f"  {'✓' if ok else '✗'} {detail}")
+        if not ok:
+            issues.append(detail)
+
+    if not is_json:
+        print(f"Diagnosing profile: {p.name}")
+        print("-" * 60)
 
     # 1. config file の存在
     if p.config_path.exists():
-        print(f"  ✓ config file exists: {p.config_path}")
+        record("config_file", True, f"config file exists: {p.config_path}")
     else:
-        msg = f"config file が見つかりません: {p.config_path}"
-        print(f"  ✗ {msg}")
-        issues.append(msg)
+        record(
+            "config_file", False,
+            f"config file が見つかりません: {p.config_path}",
+        )
 
     # 2. data_dir の存在 / 作成可能性
     if p.data_dir:
         if p.data_dir.exists():
-            print(f"  ✓ data_dir exists: {p.data_dir}")
+            record("data_dir", True, f"data_dir exists: {p.data_dir}")
         else:
             try:
                 p.data_dir.mkdir(parents=True, exist_ok=True)
-                print(f"  ✓ data_dir created: {p.data_dir}")
+                record("data_dir", True, f"data_dir created: {p.data_dir}")
             except OSError as e:
-                msg = f"data_dir が作成できません: {p.data_dir}: {e}"
-                print(f"  ✗ {msg}")
-                issues.append(msg)
+                record(
+                    "data_dir", False,
+                    f"data_dir が作成できません: {p.data_dir}: {e}",
+                )
 
     # 3. dashboard port の重複チェック（registry 内）
     if p.dashboard_port:
@@ -2476,14 +2532,16 @@ def _handle_profile_doctor(name: str, registry, *, deep: bool = False) -> int:
         ]
         if conflicts:
             other_names = ", ".join(c.name for c in conflicts)
-            msg = (
+            record(
+                "dashboard_port", False,
                 f"dashboard port {p.dashboard_port} が他 profile と衝突: "
-                f"{other_names}"
+                f"{other_names}",
             )
-            print(f"  ✗ {msg}")
-            issues.append(msg)
         else:
-            print(f"  ✓ dashboard port unique: {p.dashboard_port}")
+            record(
+                "dashboard_port", True,
+                f"dashboard port unique: {p.dashboard_port}",
+            )
 
     # 4. data_dir の他 profile との衝突
     # v0.3.0 では ProfileConfig.data_dir の一致のみ確認する。
@@ -2491,6 +2549,7 @@ def _handle_profile_doctor(name: str, registry, *, deep: bool = False) -> int:
     # 各 profile config を読み込んで解決値で比較する必要があり、v0.4 以降。
     # data_dir 統一運用が主で個別 path override はレアケースのため、
     # data_dir 重複検出で実用上のカバレッジは確保される。
+    # （衝突時のみ ✗ 記録。健全時は record しない＝従来の text 出力を維持）
     if p.data_dir:
         path_conflicts = [
             other
@@ -2499,45 +2558,84 @@ def _handle_profile_doctor(name: str, registry, *, deep: bool = False) -> int:
         ]
         if path_conflicts:
             other_names = ", ".join(c.name for c in path_conflicts)
-            msg = f"data_dir が他 profile と衝突: {other_names}"
-            print(f"  ✗ {msg}")
-            issues.append(msg)
+            record(
+                "data_dir_conflict", False,
+                f"data_dir が他 profile と衝突: {other_names}",
+            )
 
     # 5. --deep モード: runtime 運用ヘルス検査
-    #    (Step 2 / Doctor-Status 一画面化の最初のスライス)。
-    #    config/filesystem の静的検査 (上記 1-4) に加え、profile の SQLite を
-    #    開いて Notion outbox の滞留 / LLM Gateway audit silence 等の運用上の
-    #    詰まりを集約する。prime_gaps の決定的 detector を共通 sink として
-    #    再利用 (live Notion 呼び出しなし)。
+    #    (Step 2 / Doctor-Status 一画面化)。config/filesystem の静的検査
+    #    (上記 1-4) に加え、profile の SQLite を開いて Notion outbox の滞留 /
+    #    LLM Gateway audit silence 等の運用上の詰まりを集約する。
+    #    prime_gaps の決定的 detector を共通 sink として再利用 (live Notion
+    #    呼び出しなし)。
+    runtime_health: dict | None = None
     if deep:
-        _run_profile_deep_health(p, issues)
+        runtime_health = _run_profile_deep_health(p, is_json=is_json)
+        # 構造化された runtime_health から exit-code 用の issues を導出する。
+        for g in runtime_health["gaps"]:
+            issues.append(f"{g['kind']}: {g['detail']}")
+        if runtime_health["outbox_errors"] > 0:
+            issues.append(
+                f"notion_sync_errors: "
+                f"{_persistent_errors_detail(runtime_health['outbox_errors'])}"
+            )
+
+    healthy = not issues
+
+    if is_json:
+        print(_json.dumps(
+            {
+                "profile": p.name,
+                "checks": checks,
+                "runtime_health": runtime_health,
+                "issues": issues,
+                "healthy": healthy,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ))
+        return 0 if healthy else 1
 
     print("-" * 60)
     if issues:
         print(f"発見された問題: {len(issues)} 件")
         return 1
-
     print("OK: 問題ありません")
     return 0
 
 
-def _run_profile_deep_health(p, issues: list[str]) -> None:
+def _run_profile_deep_health(p, *, is_json: bool = False) -> dict:
     """`hokusai profile doctor <name> --deep` の runtime 運用ヘルス検査。
 
-    profile の config を解決して SQLite を開き、以下を集約する:
+    profile の config を解決して SQLite を開き、以下を集約した構造化 dict を
+    返す:
     - Notion outbox の pending / 永続 error 件数
     - prime_gaps の Notion 非依存 detector (`notion_outbox_pending` /
       `audit_log_silence`) による運用ギャップ
 
     `prime_gaps.collect_gaps()` を共通 sink として再利用する (Prime v2 の
     gap analysis と Doctor で検出ロジックを一本化)。live Notion 呼び出しは
-    行わない。検査自体の失敗は doctor 全体を止めず warning 行で表示する
-    (best-effort、static 検査の結果は保持)。
+    行わない。検査自体の失敗は doctor 全体を止めず、`error` フィールドに
+    記録して返す (best-effort、static 検査の結果は保持)。
 
-    検出した gap は `issues` に追記して doctor の exit code に反映させる。
+    text モード (`is_json=False`) では ✓/✗/⚠ 行を出力する。exit-code 用の
+    issues 導出は呼び出し側が返り値の `gaps` / `outbox_errors` から行う。
+
+    Returns:
+        {ran: bool, outbox_pending: int, outbox_errors: int,
+         gaps: [{kind, detail}], error: str | None}
     """
-    print()
-    print("  [--deep] runtime 運用ヘルス検査:")
+    health: dict = {
+        "ran": False,
+        "outbox_pending": 0,
+        "outbox_errors": 0,
+        "gaps": [],
+        "error": None,
+    }
+    if not is_json:
+        print()
+        print("  [--deep] runtime 運用ヘルス検査:")
     try:
         from .config import create_config_from_env_and_file
         from .persistence import SQLiteStore
@@ -2548,26 +2646,26 @@ def _run_profile_deep_health(p, issues: list[str]) -> None:
 
         pending = store.count_notion_sync_pending()
         errors = store.count_notion_sync_errors()
-        if pending == 0 and errors == 0:
-            print("    ✓ Notion sync outbox: 滞留なし (pending 0 / error 0)")
-        else:
-            print(
-                f"    ⚠ Notion sync outbox: pending {pending} 件 / "
-                f"永続 error {errors} 件"
-            )
-            # 永続 error は collect_gaps のどの detector もカバーしないため
-            # (pending は notion_outbox_pending gap が拾う)、ここで明示的に
-            # ✗ 行 + issues へ積む。さもないと「永続 error N 件」を表示しつつ
-            # exit 0 + 「OK: 問題ありません」になる不整合が起きる
-            # (PR #140 Copilot Round 1 指摘)。
-            if errors > 0:
-                detail = (
-                    f"Notion sync の永続 error が {errors} 件あります "
-                    f"(notion_sync_errors テーブル)。原因を解消し errors 行を "
-                    f"整理してください"
+        health["ran"] = True
+        health["outbox_pending"] = pending
+        health["outbox_errors"] = errors
+        if not is_json:
+            if pending == 0 and errors == 0:
+                print("    ✓ Notion sync outbox: 滞留なし (pending 0 / error 0)")
+            else:
+                print(
+                    f"    ⚠ Notion sync outbox: pending {pending} 件 / "
+                    f"永続 error {errors} 件"
                 )
-                print(f"    ✗ [notion_sync_errors] {detail}")
-                issues.append(f"notion_sync_errors: {detail}")
+                # 永続 error は collect_gaps のどの detector もカバーしないため
+                # (pending は notion_outbox_pending gap が拾う)、ここで ✗ 行を
+                # 出す。issues 計上は呼び出し側が outbox_errors から行う
+                # (PR #140 Copilot Round 1 指摘)。
+                if errors > 0:
+                    print(
+                        f"    ✗ [notion_sync_errors] "
+                        f"{_persistent_errors_detail(errors)}"
+                    )
 
         llm_gw_enabled = bool(
             getattr(getattr(config, "llm_gateway", None), "enabled", False)
@@ -2581,16 +2679,20 @@ def _run_profile_deep_health(p, issues: list[str]) -> None:
             workflow_id=None,
             state=None,
         )
-        if not gaps:
-            print("    ✓ 運用ギャップ: 検出なし")
-        else:
-            for g in gaps:
-                print(f"    ✗ [{g.kind}] {g.detail}")
-                issues.append(f"{g.kind}: {g.detail}")
+        health["gaps"] = [{"kind": g.kind, "detail": g.detail} for g in gaps]
+        if not is_json:
+            if not gaps:
+                print("    ✓ 運用ギャップ: 検出なし")
+            else:
+                for g in gaps:
+                    print(f"    ✗ [{g.kind}] {g.detail}")
     except Exception as e:
-        # 検査失敗は static 検査結果を壊さない (best-effort)。
-        # issues には積まず warning 行のみ (検査不能 ≠ 運用問題ありのため)。
-        print(f"    ⚠ runtime ヘルス検査を実行できませんでした: {e}")
+        # 検査失敗は static 検査結果を壊さない (best-effort)。error フィールドに
+        # 記録するが issues には積まない (検査不能 ≠ 運用問題ありのため)。
+        health["error"] = f"{type(e).__name__}: {e}"
+        if not is_json:
+            print(f"    ⚠ runtime ヘルス検査を実行できませんでした: {e}")
+    return health
 
 
 def _warn_if_skip_notion_pre_set(config, profile_label: str | None) -> None:

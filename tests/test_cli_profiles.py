@@ -373,6 +373,117 @@ def test_profile_doctor_unknown_profile(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# --output json (Step 2 次スライス: stable schema)
+# ---------------------------------------------------------------------------
+
+
+def test_profile_doctor_json_clean(tmp_path, monkeypatch):
+    """--output json: 健全 profile は healthy=true / issues 空 / rc 0、
+    人間向けの装飾行 (Diagnosing / OK) は出さない"""
+    import json
+
+    data_dir = tmp_path / "a-data"
+    data_dir.mkdir()
+    registry_file = _make_registry(
+        tmp_path, {"a-co": {"data_dir": str(data_dir), "dashboard": {"port": 8765}}}
+    )
+    monkeypatch.setenv("HOKUSAI_PROFILES_FILE", str(registry_file))
+
+    registry = load_profile_registry()
+    rc, output = _capture_stdout(
+        _handle_profile_doctor, "a-co", registry, output="json"
+    )
+    assert rc == 0
+    payload = json.loads(output)
+    assert payload["profile"] == "a-co"
+    assert payload["healthy"] is True
+    assert payload["issues"] == []
+    assert payload["runtime_health"] is None  # --deep なし
+    # 各 check は {id, ok, detail} 構造
+    assert all({"id", "ok", "detail"} <= set(c) for c in payload["checks"])
+    assert all(c["ok"] for c in payload["checks"])
+    # text の装飾行は JSON モードでは出さない
+    assert "Diagnosing profile" not in output
+    assert "OK: 問題ありません" not in output
+
+
+def test_profile_doctor_json_static_issue(tmp_path, monkeypatch):
+    """--output json: 静的検査の問題が issues に入り healthy=false / rc 1"""
+    import json
+
+    registry_path = tmp_path / "profiles.yaml"
+    registry_path.write_text(yaml.safe_dump({
+        "profiles": {"a-co": {"config": str(tmp_path / "missing.yaml")}}
+    }))
+    monkeypatch.setenv("HOKUSAI_PROFILES_FILE", str(registry_path))
+
+    registry = load_profile_registry()
+    rc, output = _capture_stdout(
+        _handle_profile_doctor, "a-co", registry, output="json"
+    )
+    assert rc == 1
+    payload = json.loads(output)
+    assert payload["healthy"] is False
+    assert any("config file" in i for i in payload["issues"])
+    cfg_check = next(c for c in payload["checks"] if c["id"] == "config_file")
+    assert cfg_check["ok"] is False
+
+
+def test_profile_doctor_json_deep_runtime_health(tmp_path, monkeypatch):
+    """--output json --deep: runtime_health が構造化され、gap が issues に入る"""
+    import json
+
+    from hokusai.persistence.sqlite_store import SQLiteStore
+
+    data_dir = tmp_path / "a-data"
+    data_dir.mkdir()
+    registry_file = _make_registry(
+        tmp_path, {"a-co": {"data_dir": str(data_dir)}}
+    )
+    monkeypatch.setenv("HOKUSAI_PROFILES_FILE", str(registry_file))
+
+    # outbox に pending を seed → notion_outbox_pending gap
+    store = SQLiteStore(data_dir / "workflow.db")
+    store.enqueue_notion_sync(
+        idempotency_key="k1", workflow_id="wf-x",
+        event_type="workflow_started", payload={},
+    )
+
+    registry = load_profile_registry()
+    rc, output = _capture_stdout(
+        _handle_profile_doctor, "a-co", registry, deep=True, output="json"
+    )
+    assert rc == 1
+    payload = json.loads(output)
+    rh = payload["runtime_health"]
+    assert rh is not None
+    assert rh["ran"] is True
+    assert rh["outbox_pending"] == 1
+    assert rh["error"] is None
+    kinds = [g["kind"] for g in rh["gaps"]]
+    assert "notion_outbox_pending" in kinds
+    assert any("notion_outbox_pending" in i for i in payload["issues"])
+
+
+def test_profile_doctor_json_unknown_profile(tmp_path, monkeypatch):
+    """--output json: 存在しない profile は error フィールド付き JSON + rc 1"""
+    import json
+
+    registry_file = _make_registry(tmp_path, {"a-co": {}})
+    monkeypatch.setenv("HOKUSAI_PROFILES_FILE", str(registry_file))
+
+    registry = load_profile_registry()
+    rc, output = _capture_stdout(
+        _handle_profile_doctor, "missing", registry, output="json"
+    )
+    assert rc == 1
+    payload = json.loads(output)
+    assert payload["healthy"] is False
+    assert payload["profile"] == "missing"
+    assert "error" in payload
+
+
+# ---------------------------------------------------------------------------
 # argparse: --profile はトップレベル / サブコマンド後ろの両方で受け付ける
 # ---------------------------------------------------------------------------
 
