@@ -261,6 +261,11 @@ class WorkflowRunner:
             pending = state_values.get("pending_review_issues") or []
             if not pending:
                 return 0
+            # clear 前にローカル SQLite へ durable 永続化する (Step 5 第3スライス)。
+            # Notion 配線/dispatch の成否に関わらず、recurring 検出等の土台として
+            # review_issues table に残す。best-effort で drain 本体を止めない。
+            from .local_persistence import persist_review_issue_payloads
+            persist_review_issue_payloads(self.store, pending)
             operator = state_values.get("operator")
             if not operator and self.notion_dispatcher.is_configured():
                 operator = resolve_operator_name()
@@ -328,6 +333,9 @@ class WorkflowRunner:
             pending = state_values.get("pending_work_items") or []
             if not pending:
                 return 0
+            # clear 前にローカル SQLite へ durable 永続化する (Step 5 第3スライス)。
+            from .local_persistence import persist_work_item_payloads
+            persist_work_item_payloads(self.store, pending)
             operator = state_values.get("operator")
             if not operator and self.notion_dispatcher.is_configured():
                 operator = resolve_operator_name()
