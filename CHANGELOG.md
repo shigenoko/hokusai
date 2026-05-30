@@ -12,6 +12,10 @@ HOKUSAI のすべての特筆すべき変更をこのファイルに記録する
 
 ## [Unreleased]
 
+### Added
+
+- **Step 5 (Local Workgraph Edges) 第 5 スライス: durable edge + resolved_by**: 第 3 スライスで永続化した `work_items` / `review_issues` テーブルを使って durable な edge を構築する。`hokusai/workgraph_edges.py::extract_durable_edges(workflow_id, *, work_items, review_issues, pr_urls)` を追加（決定的・I/O なし）。抽出する edge: `workflow -> has_work_item -> work_item`（durable 版。state-based は drain で消えるため補完）、`workflow -> has_review_issue -> review_issue`（dst_id=dedupe_key、source/rule/status を metadata に）、`review_issue -> resolved_by -> pull_request`（status="resolved" の review issue を、その workflow が産んだ各 PR に結ぶ workflow 単位の関連付け）。`hokusai graph build <wf>` を拡張し、`extract_edges_from_state`（state）+ `extract_durable_edges`（durable table）を合流して 5-tuple で dedup してから冪等 replace する（state-based / durable で重複する has_work_item を二重計上しない）。`--dry-run` は従来通り非 mutate。回帰防止テスト 4 件追加 (`tests/test_workgraph_edges.py`: durable has_work_item/has_review_issue 抽出 / resolved_by は resolved のみ / 空入力 / graph build の durable 合流が drain 済み state でも残る)。設計: [docs/roadmap-gbrain-inspirations.md §P1 / Step 5](docs/roadmap-gbrain-inspirations.md)。
+
 ---
 
 ## [0.8.0] - 2026-05-31

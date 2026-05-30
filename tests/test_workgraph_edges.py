@@ -14,7 +14,11 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from hokusai.persistence import SQLiteStore
-from hokusai.workgraph_edges import Edge, extract_edges_from_state
+from hokusai.workgraph_edges import (
+    Edge,
+    extract_durable_edges,
+    extract_edges_from_state,
+)
 
 # --- extractor (純関数) --------------------------------------------------
 
@@ -107,6 +111,54 @@ def test_edge_is_unhashable():
     e = Edge("workflow", "a", "has_pr", "pull_request", "u", {"x": 1})
     with pytest.raises(TypeError):
         hash(e)
+
+
+# --- extract_durable_edges (Step 5 第5スライス) --------------------------
+
+
+def test_extract_durable_has_work_item_and_review_issue():
+    work_items = [
+        {"title": "認証", "phase": 4, "status": "done"},
+        {"title": ""},  # title 無し → skip
+    ]
+    review_issues = [
+        {"dedupe_key": "k1", "source": "verification_failure",
+         "rule": "npm test", "status": "open"},
+        {"source": "x"},  # dedupe_key 無し → skip
+    ]
+    edges = extract_durable_edges(
+        "wf-1", work_items=work_items, review_issues=review_issues, pr_urls=[]
+    )
+    wi = [e for e in edges if e.edge_type == "has_work_item"]
+    ri = [e for e in edges if e.edge_type == "has_review_issue"]
+    assert [e.dst_id for e in wi] == ["認証"]
+    assert wi[0].metadata == {"phase": 4, "status": "done"}
+    assert [e.dst_id for e in ri] == ["k1"]
+    assert ri[0].dst_type == "review_issue"
+
+
+def test_extract_durable_resolved_by_only_for_resolved():
+    review_issues = [
+        {"dedupe_key": "k-open", "status": "open"},
+        {"dedupe_key": "k-resolved", "status": "resolved"},
+    ]
+    edges = extract_durable_edges(
+        "wf-1", work_items=[], review_issues=review_issues,
+        pr_urls=["https://gh/o/r/pull/1", "https://gh/o/r/pull/2"],
+    )
+    resolved = [e for e in edges if e.edge_type == "resolved_by"]
+    # resolved の review issue のみ、各 PR に resolved_by edge
+    assert len(resolved) == 2
+    assert all(e.src_type == "review_issue" and e.src_id == "k-resolved"
+               for e in resolved)
+    assert {e.dst_id for e in resolved} == {
+        "https://gh/o/r/pull/1", "https://gh/o/r/pull/2"
+    }
+
+
+def test_extract_durable_empty_inputs():
+    assert extract_durable_edges(
+        "wf-1", work_items=[], review_issues=[], pr_urls=[]) == []
 
 
 # --- SQLiteStore 永続化 --------------------------------------------------
@@ -330,6 +382,49 @@ def test_graph_build_dry_run_does_not_mutate(tmp_path, capsys):
     assert "has_pr" in out
     # SQLite には書き込まれていない
     assert store.list_workgraph_edges() == []
+
+
+def test_graph_build_includes_durable_edges(tmp_path, capsys):
+    """graph build が durable table (work_items / review_issues) からも
+    edge を構築する。state を drain 済み（pending 空）にしても残る
+    (Step 5 第5スライス)。"""
+    import argparse
+
+    from hokusai.cli_main import _handle_graph
+
+    db = tmp_path / "wf.db"
+    store = SQLiteStore(db)
+    # state は drain 済み (pending 空) で PR を持つ
+    store.save_workflow("wf-1", {
+        "workflow_id": "wf-1", "task_url": "u", "task_title": "t",
+        "current_phase": 7,
+        "pull_requests": [{"url": "https://gh/o/r/pull/9", "number": 9}],
+        "pending_work_items": [], "pending_review_issues": [],
+    })
+    # durable table には永続化済み
+    store.upsert_work_item(dedupe_key="d1", workflow_id="wf-1", title="認証",
+                           phase=4, status="done")
+    store.upsert_review_issue(dedupe_key="r1", workflow_id="wf-1",
+                              source="verification_failure", message="boom",
+                              status="resolved")
+
+    class _Cfg:
+        database_path = db
+
+    rc = _handle_graph(
+        argparse.Namespace(graph_subcommand="build", workflow_id="wf-1",
+                           dry_run=False),
+        _Cfg(),
+    )
+    capsys.readouterr()
+    assert rc == 0
+    types = {e["edge_type"] for e in store.list_workgraph_edges()}
+    # durable has_work_item / has_review_issue / resolved_by + state has_pr
+    assert {"has_pr", "has_work_item", "has_review_issue", "resolved_by"} <= types
+    # resolved review issue → PR
+    resolved = store.list_workgraph_edges(edge_type="resolved_by")
+    assert resolved[0]["src_id"] == "r1"
+    assert resolved[0]["dst_id"] == "https://gh/o/r/pull/9"
 
 
 # --- graph status 集約 (Step 5 第2スライス) -------------------------------
