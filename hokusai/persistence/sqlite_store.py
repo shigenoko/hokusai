@@ -2049,7 +2049,8 @@ class SQLiteStore:
                 WHERE workflow_id IS NOT NULL
                 GROUP BY source, rule, file, message, repository
                 HAVING wf_count >= ?
-                ORDER BY wf_count DESC, occ DESC
+                ORDER BY wf_count DESC, occ DESC,
+                         source, rule, file, message, repository
                 LIMIT ?
                 """,
                 (min_workflows, limit),

@@ -102,12 +102,35 @@ def test_find_recurring_review_issues_across_workflows(store):
 
 
 def test_find_recurring_counts_distinct_workflows_not_rows(store):
-    # 同一 workflow で同一 content が複数 row（別 dedupe_key）でも
-    # workflow_count は 1 → min_workflows=2 では検出されない
+    # 同一 content signature (file=None で全て同一) が wf-1 で 2 row（別
+    # dedupe_key）→ COUNT(DISTINCT workflow_id)=1 なので min_workflows=2 では
+    # 検出されない（同一 workflow 内の複数 row は再発扱いしない）
     _add_ri(store, "k1", "wf-1")
-    _add_ri(store, "k2", "wf-1", file="a.py")  # 別 file → 別 content
-    _add_ri(store, "k3", "wf-1", file="b.py")
+    _add_ri(store, "k2", "wf-1")  # 同一 signature・同一 workflow・別 row
     assert store.find_recurring_review_issues(min_workflows=2) == []
+
+    # wf-2 を足すと 2 workflow にまたがる。row は計 3 だが workflow_count は
+    # DISTINCT で 2、occurrence_count は 3（DISTINCT が row 数と別物であること）
+    _add_ri(store, "k3", "wf-2")
+    result = store.find_recurring_review_issues(min_workflows=2)
+    assert len(result) == 1
+    assert result[0]["workflow_count"] == 2  # 3 row ではなく DISTINCT workflow 2
+    assert result[0]["occurrence_count"] == 3
+
+
+def test_find_recurring_is_deterministic_for_equal_rank(store):
+    """同順位 (同 workflow_count / occurrence) の group は signature 順で安定。
+
+    PR #148 Copilot Round 1: tie-breaker が無いと LIMIT 結果が plan/run で
+    揺れるため、signature 列で決定的に並ぶことを確認する。
+    """
+    # 2 つの異なる rule がそれぞれ 2 workflow で発生（同順位）
+    for wf in ("wf-1", "wf-2"):
+        _add_ri(store, f"z-{wf}", wf, rule="zzz")
+        _add_ri(store, f"a-{wf}", wf, rule="aaa")
+    result = store.find_recurring_review_issues(min_workflows=2)
+    # rule 昇順で安定（aaa が先）
+    assert [r["rule"] for r in result] == ["aaa", "zzz"]
 
 
 def test_find_recurring_rejects_bad_args(store):
