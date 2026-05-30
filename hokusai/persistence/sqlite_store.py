@@ -1840,6 +1840,24 @@ class SQLiteStore:
             conn.commit()
             return cursor.rowcount
 
+    def count_workgraph_edges_by_type(
+        self, *, workflow_id: str | None = None
+    ) -> dict[str, int]:
+        """`workgraph_edges` を edge_type ごとに集計して返す（graph status 用）。
+
+        edge_type index を使った GROUP BY で全件 scan を避ける。返り値は
+        edge_type → 件数 の dict（edge_type 名でソート）。
+        """
+        where = "WHERE workflow_id = ?" if workflow_id is not None else ""
+        params = (workflow_id,) if workflow_id is not None else ()
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"SELECT edge_type, COUNT(*) FROM workgraph_edges {where} "
+                f"GROUP BY edge_type ORDER BY edge_type",
+                params,
+            ).fetchall()
+        return {row[0]: int(row[1]) for row in rows}
+
     # workflow_id をキーに持つ依存テーブル（M2.5 / #100 cascade-delete 用）。
     # workflows テーブル自体を含めず、cascade 対象の dependent table のみ列挙。
     # レガシー DB でテーブル不在の場合は skip するため try/except で個別に処理。
