@@ -457,6 +457,57 @@ class SQLiteStore:
                 "ON workgraph_edges(edge_type)"
             )
 
+            # Step 5 第3スライス: review issue / work item をローカルに永続化する。
+            # これまで pending_review_issues / pending_work_items は Notion dispatch
+            # 後に drain layer が clear するため transient だった。durable table を
+            # 設けることで recurring review issue 検出・durable な workgraph edge・
+            # resolved_by edge 等を後続スライスで構築できる土台にする。
+            # dedupe_key (workflow_id を内包する決定的 hash) を主キーに採用し、
+            # 再 drain での重複を冪等 upsert で抑止する。
+            # dedupe_key は NOT NULL を明示する。SQLite は非 INTEGER の
+            # PRIMARY KEY に対し NOT NULL を自動付与しない（legacy 互換挙動）ため、
+            # 明示しないと dedupe_key=None の行が複数挿入でき ON CONFLICT が
+            # 効かず idempotency が壊れる（PR #147 Copilot Round 3）。
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS review_issues (
+                    dedupe_key TEXT NOT NULL PRIMARY KEY,
+                    workflow_id TEXT,
+                    source TEXT,
+                    rule TEXT,
+                    file TEXT,
+                    message TEXT,
+                    repository TEXT,
+                    severity TEXT,
+                    status TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+            """)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_review_issues_workflow "
+                "ON review_issues(workflow_id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_review_issues_status "
+                "ON review_issues(status)"
+            )
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS work_items (
+                    dedupe_key TEXT NOT NULL PRIMARY KEY,
+                    workflow_id TEXT,
+                    title TEXT,
+                    phase INTEGER,
+                    status TEXT,
+                    description TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+            """)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_work_items_workflow "
+                "ON work_items(workflow_id)"
+            )
+
             conn.commit()
 
     def save_workflow(self, workflow_id: str, state: dict[str, Any]) -> None:
@@ -1883,6 +1934,151 @@ class SQLiteStore:
             ).fetchall()
         return {row[0]: int(row[1]) for row in rows}
 
+    # === Review Issues / Work Items ローカル永続化 (Step 5 第3スライス) ===
+
+    def upsert_review_issue(
+        self,
+        *,
+        dedupe_key: str,
+        workflow_id: str | None = None,
+        source: str | None = None,
+        rule: str | None = None,
+        file: str | None = None,
+        message: str | None = None,
+        repository: str | None = None,
+        severity: str | None = None,
+        status: str | None = None,
+    ) -> None:
+        """`review_issues` に 1 件を冪等 upsert する（dedupe_key 主キー）。
+
+        再 drain で同じ Review Issue が来ても重複行を作らず、status / message /
+        updated_at を最新化する（created_at は初回値を維持）。
+
+        後続イベントが optional フィールドを省略した場合に既存値を NULL で
+        上書きしないよう、各列は `COALESCE(excluded.x, review_issues.x)` で
+        「来た値があれば更新、無ければ現状維持」とする（PR #147 Copilot Round 1）。
+        """
+        now = datetime.now().isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO review_issues (
+                    dedupe_key, workflow_id, source, rule, file, message,
+                    repository, severity, status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(dedupe_key) DO UPDATE SET
+                    workflow_id = COALESCE(excluded.workflow_id,
+                                           review_issues.workflow_id),
+                    source = COALESCE(excluded.source, review_issues.source),
+                    rule = COALESCE(excluded.rule, review_issues.rule),
+                    file = COALESCE(excluded.file, review_issues.file),
+                    message = COALESCE(excluded.message, review_issues.message),
+                    repository = COALESCE(excluded.repository,
+                                          review_issues.repository),
+                    severity = COALESCE(excluded.severity,
+                                        review_issues.severity),
+                    status = COALESCE(excluded.status, review_issues.status),
+                    updated_at = excluded.updated_at
+                """,
+                (dedupe_key, workflow_id, source, rule, file, message,
+                 repository, severity, status, now, now),
+            )
+            conn.commit()
+
+    def list_review_issues(
+        self,
+        *,
+        workflow_id: str | None = None,
+        status: str | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """`review_issues` をフィルタして返す（最新 updated_at 順）。"""
+        if limit < 1:
+            raise ValueError("limit は 1 以上を指定してください")
+        clauses: list[str] = []
+        params: list[Any] = []
+        for col, val in (("workflow_id", workflow_id), ("status", status)):
+            if val is not None:
+                clauses.append(f"{col} = ?")
+                params.append(val)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        params.append(limit)
+        keys = ("dedupe_key", "workflow_id", "source", "rule", "file",
+                "message", "repository", "severity", "status",
+                "created_at", "updated_at")
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"SELECT {', '.join(keys)} FROM review_issues {where} "
+                f"ORDER BY updated_at DESC LIMIT ?",
+                params,
+            ).fetchall()
+        return [dict(zip(keys, row)) for row in rows]
+
+    def upsert_work_item(
+        self,
+        *,
+        dedupe_key: str,
+        workflow_id: str | None = None,
+        title: str | None = None,
+        phase: int | None = None,
+        status: str | None = None,
+        description: str | None = None,
+    ) -> None:
+        """`work_items` に 1 件を冪等 upsert する（dedupe_key 主キー）。
+
+        再 drain / status_change で同じ Work Item が来ても重複行を作らず、
+        status / phase / updated_at を最新化する。
+
+        Phase 5 の lifecycle イベント（status_change → lease_release 等）は
+        同一 dedupe_key で来るが optional フィールドを省略することがある。
+        省略フィールドで既存値を NULL 上書きしないよう、各列は
+        `COALESCE(excluded.x, work_items.x)` で更新する（例: status="done" の後に
+        status 無しの lease_release が来ても "done" を維持。PR #147 Copilot Round 1）。
+        """
+        now = datetime.now().isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO work_items (
+                    dedupe_key, workflow_id, title, phase, status,
+                    description, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(dedupe_key) DO UPDATE SET
+                    workflow_id = COALESCE(excluded.workflow_id,
+                                           work_items.workflow_id),
+                    title = COALESCE(excluded.title, work_items.title),
+                    phase = COALESCE(excluded.phase, work_items.phase),
+                    status = COALESCE(excluded.status, work_items.status),
+                    description = COALESCE(excluded.description,
+                                           work_items.description),
+                    updated_at = excluded.updated_at
+                """,
+                (dedupe_key, workflow_id, title, phase, status,
+                 description, now, now),
+            )
+            conn.commit()
+
+    def list_work_items(
+        self, *, workflow_id: str | None = None, limit: int = 200
+    ) -> list[dict[str, Any]]:
+        """`work_items` をフィルタして返す（最新 updated_at 順）。"""
+        if limit < 1:
+            raise ValueError("limit は 1 以上を指定してください")
+        where = "WHERE workflow_id = ?" if workflow_id is not None else ""
+        params: list[Any] = []
+        if workflow_id is not None:
+            params.append(workflow_id)
+        params.append(limit)
+        keys = ("dedupe_key", "workflow_id", "title", "phase", "status",
+                "description", "created_at", "updated_at")
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"SELECT {', '.join(keys)} FROM work_items {where} "
+                f"ORDER BY updated_at DESC LIMIT ?",
+                params,
+            ).fetchall()
+        return [dict(zip(keys, row)) for row in rows]
+
     # workflow_id をキーに持つ依存テーブル（M2.5 / #100 cascade-delete 用）。
     # workflows テーブル自体を含めず、cascade 対象の dependent table のみ列挙。
     # レガシー DB でテーブル不在の場合は skip するため try/except で個別に処理。
@@ -1899,6 +2095,8 @@ class SQLiteStore:
         "prime_index",
         "prime_index_meta",
         "workgraph_edges",
+        "review_issues",
+        "work_items",
     )
 
     def delete_old_completed_workflows(
