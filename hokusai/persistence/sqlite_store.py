@@ -1840,6 +1840,49 @@ class SQLiteStore:
             conn.commit()
             return cursor.rowcount
 
+    def count_workgraph_edges_by_type(
+        self, *, workflow_id: str | None = None
+    ) -> dict[str, int]:
+        """`workgraph_edges` を edge_type ごとに集計して返す（graph status 用）。
+
+        edge_type index を使った GROUP BY で全件 scan を避ける。返り値は
+        edge_type → 件数 の dict（edge_type 名でソート）。
+        """
+        where = "WHERE workflow_id = ?" if workflow_id is not None else ""
+        params = (workflow_id,) if workflow_id is not None else ()
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"SELECT edge_type, COUNT(*) FROM workgraph_edges {where} "
+                f"GROUP BY edge_type ORDER BY edge_type",
+                params,
+            ).fetchall()
+        return {row[0]: int(row[1]) for row in rows}
+
+    def count_workgraph_pr_status(
+        self, *, workflow_id: str | None = None
+    ) -> dict[str, int]:
+        """`has_pr` edge を metadata の github_status ごとに集計する。
+
+        SQL の `json_extract` + GROUP BY で**全件を cap なしで正確に**数える
+        (行 fetch + Python 集計だと limit cap で undercount し、total と不整合に
+        なる。PR #146 Copilot Round 1 指摘)。github_status が無い / metadata 無し
+        の edge は "unknown" に寄せる。返り値は status 名でソート。
+        """
+        clause = "edge_type = 'has_pr'"
+        params: list[Any] = []
+        if workflow_id is not None:
+            clause += " AND workflow_id = ?"
+            params.append(workflow_id)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"SELECT COALESCE("
+                f"json_extract(metadata_json, '$.github_status'), 'unknown'), "
+                f"COUNT(*) FROM workgraph_edges WHERE {clause} "
+                f"GROUP BY 1 ORDER BY 1",
+                params,
+            ).fetchall()
+        return {row[0]: int(row[1]) for row in rows}
+
     # workflow_id をキーに持つ依存テーブル（M2.5 / #100 cascade-delete 用）。
     # workflows テーブル自体を含めず、cascade 対象の dependent table のみ列挙。
     # レガシー DB でテーブル不在の場合は skip するため try/except で個別に処理。

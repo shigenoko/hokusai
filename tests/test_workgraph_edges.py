@@ -68,6 +68,25 @@ def test_extract_no_workflow_id_returns_empty():
     assert extract_edges_from_state({"supersedes_workflow_id": "x"}) == []
 
 
+def test_extract_has_work_item_edges():
+    state = {
+        "workflow_id": "wf-1",
+        "pending_work_items": [
+            {"title": "認証を実装", "phase": 4, "status": "pending",
+             "workflow_id": "wf-1"},
+            {"title": "テスト追加"},  # phase/status 無しでも抽出
+            {"status": "done"},  # title 無し → skip
+            "not-a-dict",  # skip
+        ],
+    }
+    edges = extract_edges_from_state(state)
+    wi = [e for e in edges if e.edge_type == "has_work_item"]
+    assert [e.dst_id for e in wi] == ["認証を実装", "テスト追加"]
+    assert wi[0].dst_type == "work_item"
+    assert wi[0].metadata == {"phase": 4, "status": "pending"}
+    assert wi[1].metadata is None
+
+
 def test_extract_is_deterministic_and_dedup():
     state = {
         "workflow_id": "wf-1",
@@ -311,3 +330,100 @@ def test_graph_build_dry_run_does_not_mutate(tmp_path, capsys):
     assert "has_pr" in out
     # SQLite には書き込まれていない
     assert store.list_workgraph_edges() == []
+
+
+# --- graph status 集約 (Step 5 第2スライス) -------------------------------
+
+
+def test_count_workgraph_edges_by_type(store):
+    store.upsert_workgraph_edge(
+        src_type="workflow", src_id="wf-1", edge_type="has_pr",
+        dst_type="pull_request", dst_id="u1", workflow_id="wf-1",
+    )
+    store.upsert_workgraph_edge(
+        src_type="workflow", src_id="wf-1", edge_type="has_pr",
+        dst_type="pull_request", dst_id="u2", workflow_id="wf-1",
+    )
+    store.upsert_workgraph_edge(
+        src_type="workflow", src_id="wf-2", edge_type="supersedes",
+        dst_type="workflow", dst_id="wf-1", workflow_id="wf-2",
+    )
+    assert store.count_workgraph_edges_by_type() == {"has_pr": 2, "supersedes": 1}
+    # workflow_id 絞り込み
+    assert store.count_workgraph_edges_by_type(workflow_id="wf-2") == {
+        "supersedes": 1
+    }
+
+
+def test_build_graph_status_aggregates(store):
+    from hokusai.cli_main import _build_graph_status
+
+    store.upsert_workgraph_edge(
+        src_type="workflow", src_id="wf-2", edge_type="supersedes",
+        dst_type="workflow", dst_id="wf-1", workflow_id="wf-2",
+    )
+    store.upsert_workgraph_edge(
+        src_type="workflow", src_id="wf-2", edge_type="has_pr",
+        dst_type="pull_request", dst_id="u1", workflow_id="wf-2",
+        metadata={"github_status": "open"},
+    )
+    store.upsert_workgraph_edge(
+        src_type="workflow", src_id="wf-2", edge_type="has_pr",
+        dst_type="pull_request", dst_id="u2", workflow_id="wf-2",
+        metadata={"github_status": "merged"},
+    )
+    store.upsert_workgraph_edge(
+        src_type="workflow", src_id="wf-2", edge_type="has_pr",
+        dst_type="pull_request", dst_id="u3", workflow_id="wf-2",
+    )  # metadata 無し → unknown
+
+    status = _build_graph_status(store, workflow_id=None)
+    assert status["total_edges"] == 4
+    assert status["edge_type_counts"] == {"has_pr": 3, "supersedes": 1}
+    assert status["supersedes_chains"] == [{"from": "wf-2", "to": "wf-1"}]
+    assert status["supersedes_chains_truncated"] is False
+    # pr_status_counts は SQL 集約（cap なし・正確）
+    assert status["pr_status_counts"] == {"merged": 1, "open": 1, "unknown": 1}
+
+
+def test_count_workgraph_pr_status_sql_aggregate(store):
+    """has_pr の github_status 集計は SQL（json_extract）で cap なし・正確。"""
+    for i, st in enumerate(["open", "open", "merged", None]):
+        meta = {"github_status": st} if st else None
+        store.upsert_workgraph_edge(
+            src_type="workflow", src_id="wf-1", edge_type="has_pr",
+            dst_type="pull_request", dst_id=f"u{i}", workflow_id="wf-1",
+            metadata=meta,
+        )
+    # supersedes も混ぜて has_pr のみ拾うことを確認
+    store.upsert_workgraph_edge(
+        src_type="workflow", src_id="wf-1", edge_type="supersedes",
+        dst_type="workflow", dst_id="wf-0", workflow_id="wf-1",
+    )
+    assert store.count_workgraph_pr_status() == {
+        "merged": 1, "open": 2, "unknown": 1
+    }
+
+
+def test_handle_graph_status_json(store, tmp_path, capsys):
+    import argparse
+    import json
+
+    from hokusai.cli_main import _handle_graph
+
+    store.upsert_workgraph_edge(
+        src_type="workflow", src_id="wf-1", edge_type="has_work_item",
+        dst_type="work_item", dst_id="認証", workflow_id="wf-1",
+    )
+
+    class _Cfg:
+        database_path = store.db_path
+
+    args = argparse.Namespace(
+        graph_subcommand="status", workflow_id=None, output="json"
+    )
+    rc = _handle_graph(args, _Cfg())
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert payload["total_edges"] == 1
+    assert payload["edge_type_counts"] == {"has_work_item": 1}

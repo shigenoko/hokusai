@@ -700,6 +700,24 @@ def _build_parser():
         help="出力形式（既定 text）",
     )
 
+    graph_status_parser = graph_subparsers.add_parser(
+        "status",
+        help="edge を集約して graph の運用状態を表示（edge 種別 / supersedes "
+             "チェーン / PR 状態）",
+        parents=[shared_options],
+    )
+    graph_status_parser.add_argument(
+        "--workflow-id",
+        default=None,
+        help="特定 workflow に絞って集約する",
+    )
+    graph_status_parser.add_argument(
+        "--output",
+        choices=("text", "json"),
+        default="text",
+        help="出力形式（既定 text）",
+    )
+
     return parser, profile_parser, connect_parser
 
 
@@ -1768,11 +1786,90 @@ def _handle_graph(args, config) -> int:
                     )
         return 0
 
+    if subcommand == "status":
+        status = _build_graph_status(
+            store, workflow_id=getattr(args, "workflow_id", None)
+        )
+        output = getattr(args, "output", "text")
+        if output == "json":
+            print(json.dumps(status, ensure_ascii=False, indent=2))
+        else:
+            _print_graph_status_text(status)
+        return 0
+
     # subcommand 未指定 → usage
-    print("使い方: hokusai graph {build|list} ...", file=sys.stderr)
+    print("使い方: hokusai graph {build|list|status} ...", file=sys.stderr)
     print("  build <workflow_id>   state から edge を抽出", file=sys.stderr)
     print("  list [--workflow-id]  登録済み edge を一覧", file=sys.stderr)
+    print("  status                edge を集約して運用状態を表示", file=sys.stderr)
     return 1
+
+
+# supersedes チェーン一覧の表示 cap。件数系は SQL 集約で正確なので、
+# この cap は「一覧の長さ」だけに効く（超過時は truncated フラグで明示）。
+_GRAPH_STATUS_CHAIN_CAP = 1000
+
+
+def _build_graph_status(store, *, workflow_id: str | None) -> dict:
+    """`workgraph_edges` を集約して graph 運用状態の構造化 dict を返す。
+
+    決定的・SQLite-backed（live API 呼び出しなし）。集約内容:
+    - `edge_type_counts`: edge 種別ごとの本数（SQL GROUP BY、正確）
+    - `total_edges`: 総 edge 数
+    - `supersedes_chains`: workflow -> supersedes -> workflow の (from, to) 一覧
+    - `supersedes_chains_truncated`: chains が cap で切り詰められたか
+    - `pr_status_counts`: has_pr edge の github_status 別件数（SQL 集約、cap なし）
+
+    件数系（total / edge_type_counts / pr_status_counts）は SQL 集約で常に正確。
+    一覧の `supersedes_chains` のみ表示上の cap を持ち、超過時は truncated フラグ
+    で明示する（PR #146 Copilot Round 1: 件数と一覧の silent な不整合を防ぐ）。
+    """
+    counts = store.count_workgraph_edges_by_type(workflow_id=workflow_id)
+    supersedes = store.list_workgraph_edges(
+        workflow_id=workflow_id, edge_type="supersedes",
+        limit=_GRAPH_STATUS_CHAIN_CAP,
+    )
+    supersedes_total = counts.get("supersedes", 0)
+    return {
+        "workflow_id": workflow_id,
+        "total_edges": sum(counts.values()),
+        "edge_type_counts": counts,
+        "supersedes_chains": [
+            {"from": e["src_id"], "to": e["dst_id"]} for e in supersedes
+        ],
+        "supersedes_chains_truncated": supersedes_total > len(supersedes),
+        "pr_status_counts": store.count_workgraph_pr_status(
+            workflow_id=workflow_id
+        ),
+    }
+
+
+def _print_graph_status_text(status: dict) -> None:
+    """`_build_graph_status` の結果を人間向け text で出力する。"""
+    scope = status["workflow_id"]
+    header = "Workgraph status"
+    if scope:
+        header += f"（workflow: {scope}）"
+    print(f"{header}:")
+    print(f"  総 edge 数: {status['total_edges']}")
+    counts = status["edge_type_counts"]
+    if counts:
+        print("  edge 種別:")
+        for k, v in counts.items():
+            print(f"    {k}: {v}")
+    chains = status["supersedes_chains"]
+    if chains:
+        label = f"  Supersedes チェーン（{len(chains)} 本"
+        if status.get("supersedes_chains_truncated"):
+            label += f"、{_GRAPH_STATUS_CHAIN_CAP} 件で表示打ち切り"
+        print(label + "）:")
+        for c in chains:
+            print(f"    {c['from']} ⟶ {c['to']}")
+    pr_status = status["pr_status_counts"]
+    if pr_status:
+        print("  PR edge（github_status 別）:")
+        for k, v in pr_status.items():
+            print(f"    {k}: {v}")
 
 
 def _handle_operations(args, config) -> int:

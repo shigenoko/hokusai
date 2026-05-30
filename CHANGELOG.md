@@ -12,6 +12,10 @@ HOKUSAI のすべての特筆すべき変更をこのファイルに記録する
 
 ## [Unreleased]
 
+### Added
+
+- **Step 5 (Local Workgraph Edges) 第 2 スライス: `graph status` 集約ビュー + work_item edge**: 第 1 スライスの edge table を活かした運用状態の可視化と、抽出 edge 種別の追加。決定的 extractor (`hokusai/workgraph_edges.py::extract_edges_from_state`) に 3 種目の edge `workflow -> has_work_item -> work_item` を追加 (`state["pending_work_items"][].title` から抽出、phase / status を metadata に。work item の node identity は title = Phase 4 plan と Phase 5 implement が同一 identity として扱う挙動と整合)。`SQLiteStore.count_workgraph_edges_by_type()` を追加 (edge_type index を使った GROUP BY で全件 scan 回避)。CLI `hokusai graph status [--workflow-id] [--output text|json]` を追加し、`workgraph_edges` を集約して **edge 種別ごとの本数 / supersedes チェーン / has_pr edge の github_status 別件数** を表示する (live API 呼び出しなし・決定的)。json は stable schema (`{workflow_id, total_edges, edge_type_counts, supersedes_chains:[{from,to}], supersedes_chains_truncated, pr_status_counts}`)。件数系 (total / edge_type_counts / pr_status_counts) は SQL 集約で常に正確 (`pr_status_counts` は `SQLiteStore.count_workgraph_pr_status()` の `json_extract` + GROUP BY で cap なし)、一覧の `supersedes_chains` のみ表示 cap (1000) を持ち超過時は `supersedes_chains_truncated` で明示する。**既知の制約**: `has_work_item` edge は `state["pending_work_items"]` 由来だが、これは Notion dispatch 後に drain layer が `[]` に clear・永続化するため transient（drain 済み work item は edge 化されず、再 build で失われ得る）。work item の完全な履歴には durable な永続化を前提とする後続スライスが必要。recurring review issue 検出も review issue のローカル永続化が前提のため後続。回帰防止テスト 6 件追加 (`tests/test_workgraph_edges.py`: has_work_item 抽出 / edge_type 集計 + workflow 絞り / pr_status SQL 集約 / status 集約ロジック + truncated フラグ / `graph status --output json`)。設計: [docs/roadmap-gbrain-inspirations.md §P1 / Step 5](docs/roadmap-gbrain-inspirations.md)。
+
 ---
 
 ## [0.7.0] - 2026-05-30

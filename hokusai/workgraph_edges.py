@@ -95,4 +95,33 @@ def extract_edges_from_state(state: dict[str, Any]) -> list[Edge]:
             metadata or None,
         ))
 
+    # workflow -> has_work_item -> work_item
+    # work item の node identity は title (Phase 4 plan と Phase 5 implement が
+    # 同じ workflow_id + title を同一 identity として扱うのと整合。phase を
+    # またいでも同じ work item を指す)。phase / status は metadata に持ち、
+    # 再抽出時は最新値で上書きされる。
+    #
+    # ⚠ 既知の制約 (PR #146 Copilot Round 1): `pending_work_items` は Notion
+    # dispatch 後に drain layer (workflow.py) が `[]` に clear して永続化する
+    # ため、drain 済みの work item は state に残らない。よって `graph build` は
+    # 「未 drain の work item のみ」を edge 化し、再 build 時 (clear→再抽出) は
+    # 既存 has_work_item edge を失い得る。has_work_item edge は transient で
+    # work item の完全な履歴を表さない。完全な履歴が要るなら、durable な
+    # work-item イベント源 (SQLite への永続化) を前提とする後続スライスが必要。
+    for wi in state.get("pending_work_items", []) or []:
+        if not isinstance(wi, dict):
+            continue
+        title = wi.get("title")
+        if not title:
+            continue
+        metadata = {
+            k: wi.get(k)
+            for k in ("phase", "status")
+            if wi.get(k) is not None
+        }
+        _add(Edge(
+            "workflow", workflow_id, "has_work_item", "work_item", str(title),
+            metadata or None,
+        ))
+
     return edges
