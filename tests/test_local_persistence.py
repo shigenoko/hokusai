@@ -176,6 +176,20 @@ def test_persist_review_issue_payloads(store):
     assert keys == {"k1", expected_fallback}
 
 
+def test_persist_review_issue_skips_malformed(store):
+    """dispatcher guard を mirror: source / message 欠落は永続化しない
+    (PR #147 Copilot Round 2)。"""
+    payloads = [
+        {"dedupe_key": "k1", "workflow_id": "wf-1"},  # source/message 無し → skip
+        {"dedupe_key": "k2", "source": "x", "workflow_id": "wf-1"},  # message 無し
+        {"dedupe_key": "k3", "message": "m", "workflow_id": "wf-1"},  # source 無し
+        {"dedupe_key": "k4", "source": "x", "message": "m"},  # 両方あり → 永続化
+    ]
+    n = persist_review_issue_payloads(store, payloads)
+    assert n == 1
+    assert [r["dedupe_key"] for r in store.list_review_issues()] == ["k4"]
+
+
 def test_persist_work_item_payloads_computes_dedupe_key(store):
     from hokusai.integrations.notion_dashboard.work_items_db import (
         build_dedupe_key,
@@ -183,7 +197,7 @@ def test_persist_work_item_payloads_computes_dedupe_key(store):
 
     payloads = [
         {"workflow_id": "wf-1", "title": "認証", "phase": 4, "status": "pending"},
-        {"workflow_id": "wf-1"},  # title 無し → skip
+        {"workflow_id": "wf-1"},  # 明示 key も title も無し → skip
     ]
     n = persist_work_item_payloads(store, payloads)
     assert n == 1
@@ -194,6 +208,22 @@ def test_persist_work_item_payloads_computes_dedupe_key(store):
     assert rows[0]["title"] == "認証"
 
 
+def test_persist_work_item_prefers_explicit_dedupe_key(store):
+    """明示 dedupe_key があれば再計算せずそれを使う (Notion identity と一致)。
+
+    PR #147 Copilot Round 2: status/claim/lease イベントが custom key を渡す
+    契約に合わせる。
+    """
+    payloads = [
+        {"dedupe_key": "custom-key", "workflow_id": "wf-1", "title": "認証",
+         "phase": 5, "status": "done"},
+    ]
+    n = persist_work_item_payloads(store, payloads)
+    assert n == 1
+    rows = store.list_work_items()
+    assert rows[0]["dedupe_key"] == "custom-key"  # 再計算しない
+
+
 def test_persist_helpers_are_best_effort_on_store_error():
     class _BoomStore:
         def upsert_review_issue(self, **kwargs):
@@ -202,8 +232,10 @@ def test_persist_helpers_are_best_effort_on_store_error():
         def upsert_work_item(self, **kwargs):
             raise RuntimeError("db down")
 
-    # 例外は握りつぶし、永続化件数 0 を返す（drain 本体を止めない）
+    # 例外は握りつぶし、永続化件数 0 を返す（drain 本体を止めない）。
+    # review は guard を通すため source/message を持たせる。
     assert persist_review_issue_payloads(
-        _BoomStore(), [{"dedupe_key": "k1"}]) == 0
+        _BoomStore(),
+        [{"dedupe_key": "k1", "source": "x", "message": "m"}]) == 0
     assert persist_work_item_payloads(
         _BoomStore(), [{"title": "x", "workflow_id": "wf-1", "phase": 4}]) == 0

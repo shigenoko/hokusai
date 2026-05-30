@@ -24,11 +24,14 @@ def persist_review_issue_payloads(
 
     payload は dispatcher の review_issue_raised 形式
     (`dedupe_key` / `workflow_id` / `source` / `rule` / `file` / `message` /
-     `repository` / `severity` / `status`)。`dedupe_key` が無い payload も
-    skip せず、dispatch (`_prepare_review_issue_dispatch`) と**同じ fallback**
-    `build_dedupe_key(source, rule, file, message, repository, workflow_id)` で
-    決定的に算出する（fallback で dispatch される payload が永続化されず
-    transient に残らないようにする。PR #147 Copilot Round 1）。
+     `repository` / `severity` / `status`)。
+
+    dispatcher (`_handle_review_issue_raised`) は **source と message の両方**を
+    必須とし、欠ける payload は skip する。ここでも同じ guard をかけ、dispatch
+    されない malformed payload を durable table に残さない（PR #147 Copilot
+    Round 2）。`dedupe_key` は明示があればそれを優先し、無い場合のみ dispatch
+    (`_prepare_review_issue_dispatch`) と**同じ fallback**で算出する
+    （fallback dispatch される payload も永続化する。Round 1）。
 
     Returns:
         永続化に成功した件数。
@@ -38,6 +41,9 @@ def persist_review_issue_payloads(
     persisted = 0
     for payload in payloads or []:
         if not isinstance(payload, dict):
+            continue
+        # dispatcher guard を mirror: source / message が無ければ dispatch されない
+        if not payload.get("source") or not payload.get("message"):
             continue
         dedupe_key = payload.get("dedupe_key")
         if not dedupe_key:
@@ -74,9 +80,14 @@ def persist_work_item_payloads(
     """`pending_work_items` の payload 群を `work_items` へ upsert する。
 
     payload は work_item_upsert 形式 (`workflow_id` / `title` / `phase` /
-    `status` / `description`、内部 marker `_event` 等)。`dedupe_key` は payload
-    に無いため、dispatch と同じ `build_dedupe_key(workflow_id, phase, title)`
-    で決定的に算出する。title が無い payload は skip する。
+    `status` / `description`、内部 marker `_event` 等)。
+
+    `dedupe_key` は dispatch (`_prepare_work_item_dispatch`) と同じ優先順位で
+    決定する: **明示 `dedupe_key` があればそれを優先**し（status/claim/
+    lease_release 等が custom key を渡す契約）、無い場合のみ
+    `build_dedupe_key(workflow_id, phase, title)` で算出する。これにより durable
+    row が Notion/outbox の identity と乖離しない（PR #147 Copilot Round 2）。
+    明示 key も title も無い payload は同定できないため skip する。
 
     Returns:
         永続化に成功した件数。
@@ -88,14 +99,17 @@ def persist_work_item_payloads(
         if not isinstance(payload, dict):
             continue
         title = payload.get("title")
-        if not title:
-            continue
         workflow_id = payload.get("workflow_id")
         phase = payload.get("phase")
-        try:
+        dedupe_key = payload.get("dedupe_key")
+        if not dedupe_key:
+            if not title:
+                # 明示 key も title も無ければ同定できない
+                continue
             dedupe_key = build_dedupe_key(
                 workflow_id=workflow_id, phase=phase, title=title
             )
+        try:
             store.upsert_work_item(
                 dedupe_key=dedupe_key,
                 workflow_id=workflow_id,
