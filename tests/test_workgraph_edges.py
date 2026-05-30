@@ -196,6 +196,48 @@ def test_clear_edges_for_workflow(store):
     assert [r["workflow_id"] for r in remaining] == ["wf-2"]
 
 
+def test_replace_edges_is_atomic_success(store):
+    """replace で旧 edge を消して新 edge に置換する（正常系）。"""
+    store.upsert_workgraph_edge(
+        src_type="workflow", src_id="wf-1", edge_type="has_pr",
+        dst_type="pull_request", dst_id="old", workflow_id="wf-1",
+    )
+    n = store.replace_workgraph_edges_for_workflow(
+        "wf-1",
+        [
+            {"src_type": "workflow", "src_id": "wf-1", "edge_type": "has_pr",
+             "dst_type": "pull_request", "dst_id": "new", "metadata": {"number": 2}},
+        ],
+    )
+    assert n == 1
+    rows = store.list_workgraph_edges(workflow_id="wf-1")
+    assert [r["dst_id"] for r in rows] == ["new"]
+
+
+def test_replace_edges_rolls_back_on_failure(store):
+    """INSERT 途中で失敗したら DELETE も rollback され旧 edge が保持される。
+
+    PR #144 Copilot Round 3: clear だけ走って空になる中間状態を作らない。
+    2 本目の edge dict に必須キーを欠かせて KeyError を起こし、
+    1 本目の INSERT と冒頭の DELETE がまとめて巻き戻ることを確認する。
+    """
+    store.upsert_workgraph_edge(
+        src_type="workflow", src_id="wf-1", edge_type="has_pr",
+        dst_type="pull_request", dst_id="old", workflow_id="wf-1",
+    )
+    bad_edges = [
+        {"src_type": "workflow", "src_id": "wf-1", "edge_type": "has_pr",
+         "dst_type": "pull_request", "dst_id": "new1"},
+        {"src_type": "workflow", "src_id": "wf-1"},  # 必須キー欠落 → KeyError
+    ]
+    with pytest.raises(KeyError):
+        store.replace_workgraph_edges_for_workflow("wf-1", bad_edges)
+
+    # 旧 edge が保持され、部分適用 (new1) も残っていない
+    rows = store.list_workgraph_edges(workflow_id="wf-1")
+    assert [r["dst_id"] for r in rows] == ["old"]
+
+
 def test_workgraph_edges_cascade_on_workflow_gc(tmp_path):
     """delete_old_completed_workflows で workgraph_edges も cascade される。
 

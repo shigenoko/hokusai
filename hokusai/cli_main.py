@@ -1722,19 +1722,23 @@ def _handle_graph(args, config) -> int:
                     f"{e.dst_type}:{e.dst_id}"
                 )
             return 0
-        # 再抽出の冪等化: この workflow 由来の既存 edge を一旦消してから入れ直す
-        # (state が変わって消えた関係を残さない)。
-        store.clear_workgraph_edges_for_workflow(workflow_id)
-        for e in edges:
-            store.upsert_workgraph_edge(
-                src_type=e.src_type,
-                src_id=e.src_id,
-                edge_type=e.edge_type,
-                dst_type=e.dst_type,
-                dst_id=e.dst_id,
-                workflow_id=workflow_id,
-                metadata=e.metadata,
-            )
+        # 再抽出の冪等化: この workflow 由来の既存 edge を単一トランザクションで
+        # 置換する (state が変わって消えた関係を残さない。途中失敗時は旧 edge
+        # set を保持。PR #144 Copilot Round 3 指摘)。
+        store.replace_workgraph_edges_for_workflow(
+            workflow_id,
+            [
+                {
+                    "src_type": e.src_type,
+                    "src_id": e.src_id,
+                    "edge_type": e.edge_type,
+                    "dst_type": e.dst_type,
+                    "dst_id": e.dst_id,
+                    "metadata": e.metadata,
+                }
+                for e in edges
+            ],
+        )
         print(f"✓ {workflow_id} から {len(edges)} 本の edge を抽出しました")
         for e in edges:
             print(

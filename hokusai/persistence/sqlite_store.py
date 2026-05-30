@@ -1658,6 +1658,49 @@ class SQLiteStore:
 
     # === Workgraph Edges (Step 5 / Local Workgraph Edges) ===
 
+    @staticmethod
+    def _insert_edge_row(
+        conn: sqlite3.Connection,
+        *,
+        src_type: str,
+        src_id: str,
+        edge_type: str,
+        dst_type: str,
+        dst_id: str,
+        workflow_id: str | None,
+        metadata: dict[str, Any] | None,
+        now: str,
+    ) -> None:
+        """渡された接続上で 1 本の edge を冪等 INSERT する（commit はしない）。
+
+        upsert / bulk replace の双方から呼ぶ共通の INSERT ロジック。
+        UNIQUE (src_type, src_id, edge_type, dst_type, dst_id) で重複を抑止し、
+        衝突時は metadata / workflow_id / updated_at のみ更新する
+        (created_at は初回値を維持)。
+        """
+        metadata_json = (
+            json.dumps(metadata, ensure_ascii=False, default=str)
+            if metadata is not None
+            else None
+        )
+        conn.execute(
+            """
+            INSERT INTO workgraph_edges (
+                src_type, src_id, edge_type, dst_type, dst_id,
+                workflow_id, metadata_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(src_type, src_id, edge_type, dst_type, dst_id)
+            DO UPDATE SET
+                workflow_id = excluded.workflow_id,
+                metadata_json = excluded.metadata_json,
+                updated_at = excluded.updated_at
+            """,
+            (
+                src_type, src_id, edge_type, dst_type, dst_id,
+                workflow_id, metadata_json, now, now,
+            ),
+        )
+
     def upsert_workgraph_edge(
         self,
         *,
@@ -1671,36 +1714,54 @@ class SQLiteStore:
     ) -> None:
         """`workgraph_edges` に 1 本の typed edge を冪等 upsert する。
 
-        UNIQUE (src_type, src_id, edge_type, dst_type, dst_id) で重複を抑止し、
-        再抽出時は metadata / workflow_id / updated_at のみ更新する
-        (created_at は初回値を維持)。抽出は決定的なので同じ edge を何度
-        upsert しても結果は変わらない。
+        抽出は決定的なので同じ edge を何度 upsert しても結果は変わらない。
         """
         now = datetime.now().isoformat()
-        metadata_json = (
-            json.dumps(metadata, ensure_ascii=False, default=str)
-            if metadata is not None
-            else None
-        )
         with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO workgraph_edges (
-                    src_type, src_id, edge_type, dst_type, dst_id,
-                    workflow_id, metadata_json, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(src_type, src_id, edge_type, dst_type, dst_id)
-                DO UPDATE SET
-                    workflow_id = excluded.workflow_id,
-                    metadata_json = excluded.metadata_json,
-                    updated_at = excluded.updated_at
-                """,
-                (
-                    src_type, src_id, edge_type, dst_type, dst_id,
-                    workflow_id, metadata_json, now, now,
-                ),
+            self._insert_edge_row(
+                conn,
+                src_type=src_type, src_id=src_id, edge_type=edge_type,
+                dst_type=dst_type, dst_id=dst_id, workflow_id=workflow_id,
+                metadata=metadata, now=now,
             )
             conn.commit()
+
+    def replace_workgraph_edges_for_workflow(
+        self,
+        workflow_id: str,
+        edges: list[dict[str, Any]],
+    ) -> int:
+        """指定 workflow 由来の edge を**単一トランザクション**で置換する。
+
+        DELETE + 全 INSERT を 1 つの接続・1 commit で行う。途中の INSERT が
+        失敗すると `with` ブロックが例外で抜けて rollback され、DELETE も
+        巻き戻るため、旧 edge set は保持される（clear だけ走って空になる
+        中間状態を作らない。PR #144 Copilot Round 3 指摘の atomicity 担保）。
+
+        Args:
+            workflow_id: 置換対象の抽出元 workflow_id
+            edges: edge dict のリスト。各 dict は src_type / src_id / edge_type
+                / dst_type / dst_id（必須）と metadata（任意）を持つ。
+
+        Returns:
+            INSERT した edge 本数。
+        """
+        now = datetime.now().isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM workgraph_edges WHERE workflow_id = ?",
+                (workflow_id,),
+            )
+            for e in edges:
+                self._insert_edge_row(
+                    conn,
+                    src_type=e["src_type"], src_id=e["src_id"],
+                    edge_type=e["edge_type"], dst_type=e["dst_type"],
+                    dst_id=e["dst_id"], workflow_id=workflow_id,
+                    metadata=e.get("metadata"), now=now,
+                )
+            conn.commit()
+        return len(edges)
 
     def list_workgraph_edges(
         self,
