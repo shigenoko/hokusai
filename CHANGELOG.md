@@ -12,6 +12,21 @@ HOKUSAI のすべての特筆すべき変更をこのファイルに記録する
 
 ## [Unreleased]
 
+---
+
+## [0.7.0] - 2026-05-30
+
+GBrain 調査から起こした **v0.6 ロードマップ** の Step 2 / Step 3 / Step 5 と Prime v2 の仕上げを束ねた minor リリース。蓄積した運用ヘルス可視化・Operation Registry・Local Workgraph Edges を一括で提供する。設計議論は [docs/roadmap-gbrain-inspirations.md](docs/roadmap-gbrain-inspirations.md)。
+
+このリリースの軸は **「既に蓄積している workflow 履歴・review issue・gate・運用状態を、SQLite-backed で決定的に検査・可視化する」** こと。新機能はすべて additive で、新フラグ / 新サブコマンド未指定時の既存挙動は不変（`profile doctor` の text 出力は完全後方互換、新コマンド `operations` / `graph` の追加のみ）。
+
+主な内容:
+
+- **Step 2 (Doctor/Status 一画面化)** — `hokusai profile doctor <name> --deep` に runtime 運用ヘルス検査 (Notion sync outbox の滞留 / 運用ギャップを SQLite から集約)、`--output json` で stable schema 化、Operations Console と共通の純関数 `compute_runtime_health()` 化。CLI / Console / 機械処理で検出ロジックを一本化 (#140 / #141 / #142)。
+- **Step 3 (Operation Registry) 第 1 スライス** — operation 名・説明・scope・入力 schema・handler を 1 箇所へ集約する read-only registry (`hokusai operations list / run`)。CLI / Dashboard / 将来の MCP・HTTP admin が同じ handler を呼ぶ単一経路。read-only op は副作用なしの `ReadOnlyStore` (`mode=ro` 接続) で実行 (#143)。
+- **Step 5 (Local Workgraph Edges) 第 1 スライス** — SQLite `workgraph_edges` テーブル + LLM 不要・決定的な extractor (`workflow -> supersedes -> workflow` / `workflow -> has_pr -> pull_request`)。CLI `hokusai graph build / list`。`build` は単一トランザクションの atomic replace + `--dry-run` 非 mutate (#144)。
+- **Prime v2 MVP-5** — `hokusai prime --include-gaps` に Notion 非依存の決定的 gap 検出 2 種 (`phase4_plan_missing` / `supersedes_chain_broken`) を追加 (#139)。
+
 ### Added
 
 - **Step 5 (Local Workgraph Edges) 第 1 スライス: SQLite edge table + 決定的 extractor**: HOKUSAI の Workgraph をローカルに graph query できる形へ寄せる土台。SQLite に `workgraph_edges` テーブル (`src_type/src_id/edge_type/dst_type/dst_id` + `workflow_id` + `metadata_json`、`UNIQUE(src_type,src_id,edge_type,dst_type,dst_id)` で冪等) を追加し、`SQLiteStore` に `upsert_workgraph_edge()` / `list_workgraph_edges()` (workflow_id / edge_type / src フィルタ + `limit<1` を ValueError reject) / `clear_workgraph_edges_for_workflow()` を実装 (`_WORKFLOW_DEPENDENT_TABLES` にも追加し completed workflow の cascade-delete 対象に)。抽出は **LLM なし・決定的** な純関数 `hokusai/workgraph_edges.py::extract_edges_from_state(state)` で、ローカル state のみから 2 種の edge を生成: `workflow -> supersedes -> workflow` (`state["supersedes_workflow_id"]`) と `workflow -> has_pr -> pull_request` (`state["pull_requests"][].url` + number/repo/status を metadata に)。CLI `hokusai graph build <workflow-id>` (state から抽出 → `replace_workgraph_edges_for_workflow()` で該当 workflow の既存 edge を**単一トランザクション**で置換。途中失敗時は rollback で旧 edge set を保持し、clear だけ走って空になる中間状態を作らない。`--dry-run` 時は SQLite を mutate せず preview のみ) と `hokusai graph list [--workflow-id] [--edge-type] [--output text|json]` を追加。Notion DB relation / review comment 由来の edge (`resolved_by` / `duplicates` / `touches_file`) や recurring review issue 検出は後続スライス。公開フィルタ (`workflow_id` / `edge_type`) と clear / workflow GC が full-scan しないよう `workgraph_edges(workflow_id)` / `(edge_type)` に index を張る。回帰防止テスト 17 件 (`tests/test_workgraph_edges.py`: extractor 6 種 + 永続化/GC cascade/index/atomic replace 10 種 + CLI `--dry-run` 非 mutate 1 種、`Operation` 同様 `Edge` も unhashable)。設計: [docs/roadmap-gbrain-inspirations.md §P1 / Step 5](docs/roadmap-gbrain-inspirations.md)。
