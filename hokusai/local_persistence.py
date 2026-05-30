@@ -24,19 +24,32 @@ def persist_review_issue_payloads(
 
     payload は dispatcher の review_issue_raised 形式
     (`dedupe_key` / `workflow_id` / `source` / `rule` / `file` / `message` /
-     `repository` / `severity` / `status`)。`dedupe_key` が無い payload は
-    同定キーが作れないため skip する。
+     `repository` / `severity` / `status`)。`dedupe_key` が無い payload も
+    skip せず、dispatch (`_prepare_review_issue_dispatch`) と**同じ fallback**
+    `build_dedupe_key(source, rule, file, message, repository, workflow_id)` で
+    決定的に算出する（fallback で dispatch される payload が永続化されず
+    transient に残らないようにする。PR #147 Copilot Round 1）。
 
     Returns:
         永続化に成功した件数。
     """
+    from .integrations.notion_dashboard.review_issues_db import build_dedupe_key
+
     persisted = 0
     for payload in payloads or []:
         if not isinstance(payload, dict):
             continue
         dedupe_key = payload.get("dedupe_key")
         if not dedupe_key:
-            continue
+            # dispatch と同一の fallback で stable key を生成（skip しない）
+            dedupe_key = build_dedupe_key(
+                source=str(payload.get("source") or ""),
+                rule=payload.get("rule"),
+                file=payload.get("file"),
+                message=str(payload.get("message") or ""),
+                repository=payload.get("repository"),
+                workflow_id=payload.get("workflow_id") or None,
+            )
         try:
             store.upsert_review_issue(
                 dedupe_key=dedupe_key,

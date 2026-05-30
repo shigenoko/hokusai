@@ -94,6 +94,35 @@ def test_work_item_upsert_updates_status(store):
     assert rows[0]["phase"] == 5
 
 
+def test_work_item_upsert_preserves_fields_on_omitted(store):
+    """後続 lifecycle イベントが省略したフィールドを NULL で消さない。
+
+    status="done" の後に status 無し (lease_release 相当) が来ても "done" を
+    維持する (PR #147 Copilot Round 1 の COALESCE 回帰防止)。
+    """
+    store.upsert_work_item(dedupe_key="d1", workflow_id="wf-1", title="認証",
+                           phase=4, status="done", description="desc")
+    # lease_release 相当: status / title / description を省略
+    store.upsert_work_item(dedupe_key="d1", workflow_id="wf-1")
+    rows = store.list_work_items()
+    assert len(rows) == 1
+    assert rows[0]["status"] == "done"       # 維持
+    assert rows[0]["title"] == "認証"         # 維持
+    assert rows[0]["description"] == "desc"   # 維持
+    assert rows[0]["phase"] == 4              # 維持
+
+
+def test_review_issue_upsert_preserves_fields_on_omitted(store):
+    """review issue も省略フィールドを NULL で消さない (COALESCE)。"""
+    store.upsert_review_issue(dedupe_key="k1", workflow_id="wf-1",
+                              message="boom", status="open")
+    store.upsert_review_issue(dedupe_key="k1", status="resolved")
+    rows = store.list_review_issues()
+    assert len(rows) == 1
+    assert rows[0]["status"] == "resolved"
+    assert rows[0]["message"] == "boom"  # 維持
+
+
 # --- cascade -------------------------------------------------------------
 
 
@@ -125,16 +154,26 @@ def test_review_issues_and_work_items_cascade_on_gc(tmp_path):
 
 
 def test_persist_review_issue_payloads(store):
+    from hokusai.integrations.notion_dashboard.review_issues_db import (
+        build_dedupe_key,
+    )
+
     payloads = [
         {"dedupe_key": "k1", "workflow_id": "wf-1", "source": "x",
          "message": "m1", "status": "open"},
-        {"workflow_id": "wf-1", "message": "no dedupe key"},  # skip
+        # dedupe_key 無し → dispatch と同じ fallback で算出して永続化（skip しない）
+        {"workflow_id": "wf-1", "source": "verification_failure",
+         "rule": "npm test", "message": "boom", "repository": "Backend"},
         "not-a-dict",  # skip
     ]
     n = persist_review_issue_payloads(store, payloads)
-    assert n == 1
-    rows = store.list_review_issues()
-    assert [r["dedupe_key"] for r in rows] == ["k1"]
+    assert n == 2
+    expected_fallback = build_dedupe_key(
+        source="verification_failure", rule="npm test", file=None,
+        message="boom", repository="Backend", workflow_id="wf-1",
+    )
+    keys = {r["dedupe_key"] for r in store.list_review_issues()}
+    assert keys == {"k1", expected_fallback}
 
 
 def test_persist_work_item_payloads_computes_dedupe_key(store):

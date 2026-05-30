@@ -1949,6 +1949,10 @@ class SQLiteStore:
 
         再 drain で同じ Review Issue が来ても重複行を作らず、status / message /
         updated_at を最新化する（created_at は初回値を維持）。
+
+        後続イベントが optional フィールドを省略した場合に既存値を NULL で
+        上書きしないよう、各列は `COALESCE(excluded.x, review_issues.x)` で
+        「来た値があれば更新、無ければ現状維持」とする（PR #147 Copilot Round 1）。
         """
         now = datetime.now().isoformat()
         with self._connect() as conn:
@@ -1959,14 +1963,17 @@ class SQLiteStore:
                     repository, severity, status, created_at, updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(dedupe_key) DO UPDATE SET
-                    workflow_id = excluded.workflow_id,
-                    source = excluded.source,
-                    rule = excluded.rule,
-                    file = excluded.file,
-                    message = excluded.message,
-                    repository = excluded.repository,
-                    severity = excluded.severity,
-                    status = excluded.status,
+                    workflow_id = COALESCE(excluded.workflow_id,
+                                           review_issues.workflow_id),
+                    source = COALESCE(excluded.source, review_issues.source),
+                    rule = COALESCE(excluded.rule, review_issues.rule),
+                    file = COALESCE(excluded.file, review_issues.file),
+                    message = COALESCE(excluded.message, review_issues.message),
+                    repository = COALESCE(excluded.repository,
+                                          review_issues.repository),
+                    severity = COALESCE(excluded.severity,
+                                        review_issues.severity),
+                    status = COALESCE(excluded.status, review_issues.status),
                     updated_at = excluded.updated_at
                 """,
                 (dedupe_key, workflow_id, source, rule, file, message,
@@ -2017,6 +2024,12 @@ class SQLiteStore:
 
         再 drain / status_change で同じ Work Item が来ても重複行を作らず、
         status / phase / updated_at を最新化する。
+
+        Phase 5 の lifecycle イベント（status_change → lease_release 等）は
+        同一 dedupe_key で来るが optional フィールドを省略することがある。
+        省略フィールドで既存値を NULL 上書きしないよう、各列は
+        `COALESCE(excluded.x, work_items.x)` で更新する（例: status="done" の後に
+        status 無しの lease_release が来ても "done" を維持。PR #147 Copilot Round 1）。
         """
         now = datetime.now().isoformat()
         with self._connect() as conn:
@@ -2027,11 +2040,13 @@ class SQLiteStore:
                     description, created_at, updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(dedupe_key) DO UPDATE SET
-                    workflow_id = excluded.workflow_id,
-                    title = excluded.title,
-                    phase = excluded.phase,
-                    status = excluded.status,
-                    description = excluded.description,
+                    workflow_id = COALESCE(excluded.workflow_id,
+                                           work_items.workflow_id),
+                    title = COALESCE(excluded.title, work_items.title),
+                    phase = COALESCE(excluded.phase, work_items.phase),
+                    status = COALESCE(excluded.status, work_items.status),
+                    description = COALESCE(excluded.description,
+                                           work_items.description),
                     updated_at = excluded.updated_at
                 """,
                 (dedupe_key, workflow_id, title, phase, status,
