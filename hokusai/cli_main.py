@@ -1707,6 +1707,21 @@ def _handle_graph(args, config) -> int:
             print(f"✗ workflow が見つかりません: {workflow_id}", file=sys.stderr)
             return 1
         edges = extract_edges_from_state(state)
+        # --dry-run 時は SQLite を一切 mutate せず preview だけ出す
+        # (他経路の dry-run 規約と整合。例: prime_index backfill も dry-run で
+        #  skip する。PR #144 Copilot Round 1 指摘)。
+        dry_run = getattr(args, "dry_run", False)
+        if dry_run:
+            print(
+                f"[dry-run] {workflow_id} から {len(edges)} 本の edge を"
+                f"抽出します（SQLite には書き込みません）"
+            )
+            for e in edges:
+                print(
+                    f"  {e.src_type}:{e.src_id} --{e.edge_type}--> "
+                    f"{e.dst_type}:{e.dst_id}"
+                )
+            return 0
         # 再抽出の冪等化: この workflow 由来の既存 edge を一旦消してから入れ直す
         # (state が変わって消えた関係を残さない)。
         store.clear_workgraph_edges_for_workflow(workflow_id)

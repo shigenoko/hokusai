@@ -176,3 +176,78 @@ def test_clear_edges_for_workflow(store):
     assert deleted == 1
     remaining = store.list_workgraph_edges()
     assert [r["workflow_id"] for r in remaining] == ["wf-2"]
+
+
+def test_workgraph_edges_cascade_on_workflow_gc(tmp_path):
+    """delete_old_completed_workflows で workgraph_edges も cascade される。
+
+    `_WORKFLOW_DEPENDENT_TABLES` に workgraph_edges を追加したので、completed
+    workflow の cleanup 時に edge が孤児化しない (PR #144 Copilot Round 1)。
+    """
+    from datetime import datetime, timedelta
+
+    store = SQLiteStore(tmp_path / "workflow.db")
+
+    # 古い completed workflow (current_phase>=10) を直接書き込む
+    old_ts = (datetime.now() - timedelta(days=120)).isoformat()
+    with store._connect() as conn:
+        conn.execute(
+            "INSERT INTO workflows "
+            "(workflow_id, task_url, task_title, branch_name, "
+            "current_phase, state_json, created_at, updated_at, profile_name) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ("wf-old", "https://example/1", "old task", "feat/old",
+             10, "{}", old_ts, old_ts, None),
+        )
+        conn.commit()
+
+    store.upsert_workgraph_edge(
+        src_type="workflow", src_id="wf-old", edge_type="has_pr",
+        dst_type="pull_request", dst_id="u-orphan", workflow_id="wf-old",
+    )
+    assert len(store.list_workgraph_edges(workflow_id="wf-old")) == 1
+
+    counts = store.delete_old_completed_workflows(retention_days=90)
+
+    # cascade で edge も消え、削除件数辞書にも計上される
+    assert counts["workflows"] == 1
+    assert counts["workgraph_edges"] == 1
+    assert store.list_workgraph_edges(workflow_id="wf-old") == []
+
+
+# --- CLI: graph build の --dry-run 抑止 (PR #144 Copilot Round 1) ---------
+
+
+def test_graph_build_dry_run_does_not_mutate(tmp_path, capsys):
+    """--dry-run 時は preview のみ・SQLite を mutate しない。"""
+    import argparse
+
+    from hokusai.cli_main import _handle_graph
+
+    db = tmp_path / "wf.db"
+    store = SQLiteStore(db)
+    # PR を持つ workflow を保存（has_pr edge が抽出されるはず）
+    store.save_workflow(
+        "wf-1",
+        {
+            "workflow_id": "wf-1",
+            "task_url": "u",
+            "task_title": "t",
+            "current_phase": 7,
+            "pull_requests": [{"url": "https://gh/o/r/pull/9", "number": 9}],
+        },
+    )
+
+    class _Cfg:
+        database_path = db
+
+    args = argparse.Namespace(
+        graph_subcommand="build", workflow_id="wf-1", dry_run=True
+    )
+    rc = _handle_graph(args, _Cfg())
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "dry-run" in out
+    assert "has_pr" in out
+    # SQLite には書き込まれていない
+    assert store.list_workgraph_edges() == []
