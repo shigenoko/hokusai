@@ -726,7 +726,11 @@ Notion / GitHub Issue / Jira / Linear 連携の最小機能セット。
 - SQLite による checkpoint / outbox 永続化
 - Worktree ベースの並行ワークフロー実行
 
-[Unreleased]: https://github.com/shigenoko/hokusai/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/shigenoko/hokusai/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/shigenoko/hokusai/compare/v0.6.0...v0.7.0
+[0.6.0]: https://github.com/shigenoko/hokusai/compare/v0.5.1...v0.6.0
+[0.5.1]: https://github.com/shigenoko/hokusai/compare/v0.5.0...v0.5.1
+[0.5.0]: https://github.com/shigenoko/hokusai/compare/v0.2.0...v0.5.0
 [0.3.0]: https://github.com/shigenoko/hokusai/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/shigenoko/hokusai/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/shigenoko/hokusai/releases/tag/v0.1.0
