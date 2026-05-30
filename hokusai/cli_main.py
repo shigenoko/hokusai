@@ -718,6 +718,30 @@ def _build_parser():
         help="出力形式（既定 text）",
     )
 
+    graph_recurring_parser = graph_subparsers.add_parser(
+        "recurring",
+        help="複数 workflow で再発している Review Issue を検出（Step 5 第4）",
+        parents=[shared_options],
+    )
+    graph_recurring_parser.add_argument(
+        "--min-workflows",
+        type=_positive_int,
+        default=2,
+        help="再発とみなす最小の異なる workflow 数（>=2、既定 2）",
+    )
+    graph_recurring_parser.add_argument(
+        "--limit",
+        type=_positive_int,
+        default=100,
+        help="取得上限（>=1、既定 100）",
+    )
+    graph_recurring_parser.add_argument(
+        "--output",
+        choices=("text", "json"),
+        default="text",
+        help="出力形式（既定 text）",
+    )
+
     return parser, profile_parser, connect_parser
 
 
@@ -1797,12 +1821,54 @@ def _handle_graph(args, config) -> int:
             _print_graph_status_text(status)
         return 0
 
+    if subcommand == "recurring":
+        try:
+            recurring = store.find_recurring_review_issues(
+                min_workflows=getattr(args, "min_workflows", 2),
+                limit=getattr(args, "limit", 100),
+            )
+        except ValueError as e:
+            print(f"✗ {e}", file=sys.stderr)
+            return 1
+        output = getattr(args, "output", "text")
+        if output == "json":
+            print(json.dumps(
+                {"recurring_review_issues": recurring},
+                ensure_ascii=False, indent=2,
+            ))
+        else:
+            _print_graph_recurring_text(
+                recurring, getattr(args, "min_workflows", 2)
+            )
+        return 0
+
     # subcommand 未指定 → usage
-    print("使い方: hokusai graph {build|list|status} ...", file=sys.stderr)
+    print("使い方: hokusai graph {build|list|status|recurring} ...",
+          file=sys.stderr)
     print("  build <workflow_id>   state から edge を抽出", file=sys.stderr)
     print("  list [--workflow-id]  登録済み edge を一覧", file=sys.stderr)
     print("  status                edge を集約して運用状態を表示", file=sys.stderr)
+    print("  recurring             複数 workflow で再発する Review Issue を検出",
+          file=sys.stderr)
     return 1
+
+
+def _print_graph_recurring_text(recurring: list, min_workflows: int) -> None:
+    """`find_recurring_review_issues` の結果を人間向け text で出力する。"""
+    if not recurring:
+        print(f"再発している Review Issue はありません（{min_workflows} workflow 以上）")
+        return
+    print(f"再発している Review Issue（{min_workflows} workflow 以上で発生）:")
+    for r in recurring:
+        rule = r.get("rule") or "-"
+        repo = r.get("repository") or "-"
+        msg = (r.get("message") or "").splitlines()[0] if r.get("message") else ""
+        print(f"  [{r.get('source') or '-'}] {rule} — \"{msg}\" ({repo})")
+        wf_ids = ", ".join(r["workflow_ids"])
+        print(
+            f"    {r['workflow_count']} workflow / "
+            f"{r['occurrence_count']} 件: {wf_ids}"
+        )
 
 
 # supersedes チェーン一覧の表示 cap。件数系は SQL 集約で正確なので、

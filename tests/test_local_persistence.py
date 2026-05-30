@@ -69,6 +69,100 @@ def test_list_review_issues_rejects_bad_limit(store):
         store.list_review_issues(limit=0)
 
 
+# --- recurring review issue 検出 (Step 5 第4) ----------------------------
+
+
+def _add_ri(store, dedupe_key, workflow_id, **kw):
+    store.upsert_review_issue(
+        dedupe_key=dedupe_key, workflow_id=workflow_id,
+        source=kw.get("source", "verification_failure"),
+        rule=kw.get("rule", "npm test"),
+        file=kw.get("file"),
+        message=kw.get("message", "boom"),
+        repository=kw.get("repository", "Backend"),
+        status=kw.get("status", "open"),
+    )
+
+
+def test_find_recurring_review_issues_across_workflows(store):
+    # 同一 content (rule/message/repo) が 3 workflow で発生 → recurring
+    _add_ri(store, "k1", "wf-1")
+    _add_ri(store, "k2", "wf-2")
+    _add_ri(store, "k3", "wf-3")
+    # 別 content (1 workflow のみ) → recurring ではない
+    _add_ri(store, "k4", "wf-1", rule="pytest", message="other")
+
+    recurring = store.find_recurring_review_issues(min_workflows=2)
+    assert len(recurring) == 1
+    r = recurring[0]
+    assert r["rule"] == "npm test"
+    assert r["workflow_count"] == 3
+    assert r["occurrence_count"] == 3
+    assert r["workflow_ids"] == ["wf-1", "wf-2", "wf-3"]
+
+
+def test_find_recurring_counts_distinct_workflows_not_rows(store):
+    # 同一 content signature (file=None で全て同一) が wf-1 で 2 row（別
+    # dedupe_key）→ COUNT(DISTINCT workflow_id)=1 なので min_workflows=2 では
+    # 検出されない（同一 workflow 内の複数 row は再発扱いしない）
+    _add_ri(store, "k1", "wf-1")
+    _add_ri(store, "k2", "wf-1")  # 同一 signature・同一 workflow・別 row
+    assert store.find_recurring_review_issues(min_workflows=2) == []
+
+    # wf-2 を足すと 2 workflow にまたがる。row は計 3 だが workflow_count は
+    # DISTINCT で 2、occurrence_count は 3（DISTINCT が row 数と別物であること）
+    _add_ri(store, "k3", "wf-2")
+    result = store.find_recurring_review_issues(min_workflows=2)
+    assert len(result) == 1
+    assert result[0]["workflow_count"] == 2  # 3 row ではなく DISTINCT workflow 2
+    assert result[0]["occurrence_count"] == 3
+
+
+def test_find_recurring_is_deterministic_for_equal_rank(store):
+    """同順位 (同 workflow_count / occurrence) の group は signature 順で安定。
+
+    PR #148 Copilot Round 1: tie-breaker が無いと LIMIT 結果が plan/run で
+    揺れるため、signature 列で決定的に並ぶことを確認する。
+    """
+    # 2 つの異なる rule がそれぞれ 2 workflow で発生（同順位）
+    for wf in ("wf-1", "wf-2"):
+        _add_ri(store, f"z-{wf}", wf, rule="zzz")
+        _add_ri(store, f"a-{wf}", wf, rule="aaa")
+    result = store.find_recurring_review_issues(min_workflows=2)
+    # rule 昇順で安定（aaa が先）
+    assert [r["rule"] for r in result] == ["aaa", "zzz"]
+
+
+def test_find_recurring_rejects_bad_args(store):
+    with pytest.raises(ValueError, match="2 以上"):
+        store.find_recurring_review_issues(min_workflows=1)
+    with pytest.raises(ValueError, match="1 以上"):
+        store.find_recurring_review_issues(limit=0)
+
+
+def test_handle_graph_recurring_json(store, capsys):
+    import argparse
+    import json
+
+    from hokusai.cli_main import _handle_graph
+
+    _add_ri(store, "k1", "wf-1")
+    _add_ri(store, "k2", "wf-2")
+
+    class _Cfg:
+        database_path = store.db_path
+
+    args = argparse.Namespace(
+        graph_subcommand="recurring", min_workflows=2, limit=100, output="json"
+    )
+    rc = _handle_graph(args, _Cfg())
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    items = payload["recurring_review_issues"]
+    assert len(items) == 1
+    assert items[0]["workflow_count"] == 2
+
+
 def test_dedupe_key_is_not_null_enforced(store):
     """dedupe_key NULL は schema レベルで reject される (PR #147 Copilot Round 3)。
 

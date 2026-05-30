@@ -2014,6 +2014,61 @@ class SQLiteStore:
             ).fetchall()
         return [dict(zip(keys, row)) for row in rows]
 
+    def find_recurring_review_issues(
+        self, *, min_workflows: int = 2, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        """複数 workflow で再発している review issue を検出する（Step 5 第4）。
+
+        content signature (`source` / `rule` / `file` / `message` /
+        `repository`) が `min_workflows` 件以上の**異なる workflow** で出現した
+        ものを返す。`dedupe_key` は workflow_id を内包するため同種指摘でも別
+        row だが、content が一致すれば「同じ指摘が複数 workflow で繰り返し
+        発生している」= 再発の signal になる（recurring review issue 検出）。
+
+        Args:
+            min_workflows: 再発とみなす最小の異なる workflow 数（既定 2、>=2）。
+            limit: 返却上限（既定 100、>=1）。
+
+        Returns:
+            `{source, rule, file, message, repository, workflow_count,
+              occurrence_count, workflow_ids: [...]}` のリスト。
+            workflow_count（異なる workflow 数）降順、次に occurrence 降順。
+        """
+        if min_workflows < 2:
+            raise ValueError("min_workflows は 2 以上を指定してください")
+        if limit < 1:
+            raise ValueError("limit は 1 以上を指定してください")
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT source, rule, file, message, repository,
+                       COUNT(DISTINCT workflow_id) AS wf_count,
+                       COUNT(*) AS occ,
+                       group_concat(DISTINCT workflow_id) AS wf_ids
+                FROM review_issues
+                WHERE workflow_id IS NOT NULL
+                GROUP BY source, rule, file, message, repository
+                HAVING wf_count >= ?
+                ORDER BY wf_count DESC, occ DESC,
+                         source, rule, file, message, repository
+                LIMIT ?
+                """,
+                (min_workflows, limit),
+            ).fetchall()
+        return [
+            {
+                "source": row[0],
+                "rule": row[1],
+                "file": row[2],
+                "message": row[3],
+                "repository": row[4],
+                "workflow_count": int(row[5]),
+                "occurrence_count": int(row[6]),
+                "workflow_ids": sorted((row[7] or "").split(",")),
+            }
+            for row in rows
+        ]
+
     def upsert_work_item(
         self,
         *,
