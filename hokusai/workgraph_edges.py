@@ -125,3 +125,81 @@ def extract_edges_from_state(state: dict[str, Any]) -> list[Edge]:
         ))
 
     return edges
+
+
+def extract_durable_edges(
+    workflow_id: str,
+    *,
+    work_items: list[dict[str, Any]],
+    review_issues: list[dict[str, Any]],
+    pr_urls: list[str],
+) -> list[Edge]:
+    """durable な SQLite table（work_items / review_issues）から edge を抽出する。
+
+    第3スライスで永続化した durable データを使うため、drain 後も失われない
+    （state-based の `has_work_item` が transient だった問題を解消する。Step 5
+    第5スライス）。決定的・I/O なし（store から取得済みの list を受け取る）。
+
+    抽出する edge:
+    - `workflow -> has_work_item -> work_item` (dst_id=title。durable 版)
+    - `workflow -> has_review_issue -> review_issue` (dst_id=dedupe_key)
+    - `review_issue -> resolved_by -> pull_request`: status="resolved" の
+      review issue を、その workflow が産んだ各 PR に結ぶ。これは
+      **workflow 単位の関連付け**（特定 issue ↔ 特定 PR の厳密な対応では
+      ない）で、解決済み指摘がどの PR を伴う workflow で片付いたかを辿る用途。
+
+    Args:
+        workflow_id: 抽出元 workflow。
+        work_items: `store.list_work_items(workflow_id=...)` の結果。
+        review_issues: `store.list_review_issues(workflow_id=...)` の結果。
+        pr_urls: 当該 workflow の PR URL 群（state の pull_requests 由来）。
+
+    Returns:
+        Edge のリスト（重複なし・安定順序）。
+    """
+    edges: list[Edge] = []
+    seen: set[tuple[str, ...]] = set()
+
+    def _add(edge: Edge) -> None:
+        key = (edge.src_type, edge.src_id, edge.edge_type,
+               edge.dst_type, edge.dst_id)
+        if key not in seen:
+            seen.add(key)
+            edges.append(edge)
+
+    for wi in work_items or []:
+        title = wi.get("title")
+        if not title:
+            continue
+        meta = {
+            k: wi.get(k) for k in ("phase", "status") if wi.get(k) is not None
+        }
+        _add(Edge(
+            "workflow", workflow_id, "has_work_item", "work_item", str(title),
+            meta or None,
+        ))
+
+    for ri in review_issues or []:
+        dedupe_key = ri.get("dedupe_key")
+        if not dedupe_key:
+            continue
+        meta = {
+            k: ri.get(k)
+            for k in ("source", "rule", "status")
+            if ri.get(k) is not None
+        }
+        _add(Edge(
+            "workflow", workflow_id, "has_review_issue", "review_issue",
+            str(dedupe_key), meta or None,
+        ))
+        # 解決済み review issue → workflow の各 PR (resolved_by)
+        if ri.get("status") == "resolved":
+            for url in pr_urls or []:
+                if not url:
+                    continue
+                _add(Edge(
+                    "review_issue", str(dedupe_key), "resolved_by",
+                    "pull_request", str(url), None,
+                ))
+
+    return edges

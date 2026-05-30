@@ -1748,7 +1748,33 @@ def _handle_graph(args, config) -> int:
         if state is None:
             print(f"✗ workflow が見つかりません: {workflow_id}", file=sys.stderr)
             return 1
-        edges = extract_edges_from_state(state)
+        edges = list(extract_edges_from_state(state))
+        # durable な SQLite table (work_items / review_issues) からも edge を
+        # 抽出して合流する (Step 5 第5スライス)。state-based has_work_item は
+        # drain で消えるため、durable 版で補完し has_review_issue / resolved_by
+        # も追加する。同一 edge は upsert 時に dedup される。
+        from .workgraph_edges import extract_durable_edges
+        pr_urls = [
+            pr.get("url")
+            for pr in (state.get("pull_requests") or [])
+            if isinstance(pr, dict) and pr.get("url")
+        ]
+        edges.extend(extract_durable_edges(
+            workflow_id,
+            work_items=store.list_work_items(workflow_id=workflow_id),
+            review_issues=store.list_review_issues(workflow_id=workflow_id),
+            pr_urls=pr_urls,
+        ))
+        # state-based と durable で has_work_item が重複し得るため、5-tuple で
+        # dedup する（先勝ち。upsert は冪等だが件数表示と preview を正確化）。
+        _seen_edge_keys: set = set()
+        _deduped = []
+        for e in edges:
+            k = (e.src_type, e.src_id, e.edge_type, e.dst_type, e.dst_id)
+            if k not in _seen_edge_keys:
+                _seen_edge_keys.add(k)
+                _deduped.append(e)
+        edges = _deduped
         # --dry-run 時は SQLite を一切 mutate せず preview だけ出す
         # (他経路の dry-run 規約と整合。例: prime_index backfill も dry-run で
         #  skip する。PR #144 Copilot Round 1 指摘)。
