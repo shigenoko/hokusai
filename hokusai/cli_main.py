@@ -1805,28 +1805,31 @@ def _handle_graph(args, config) -> int:
     return 1
 
 
+# supersedes チェーン一覧の表示 cap。件数系は SQL 集約で正確なので、
+# この cap は「一覧の長さ」だけに効く（超過時は truncated フラグで明示）。
+_GRAPH_STATUS_CHAIN_CAP = 1000
+
+
 def _build_graph_status(store, *, workflow_id: str | None) -> dict:
     """`workgraph_edges` を集約して graph 運用状態の構造化 dict を返す。
 
     決定的・SQLite-backed（live API 呼び出しなし）。集約内容:
-    - `edge_type_counts`: edge 種別ごとの本数
+    - `edge_type_counts`: edge 種別ごとの本数（SQL GROUP BY、正確）
     - `total_edges`: 総 edge 数
-    - `supersedes_chains`: workflow -> supersedes -> workflow の (src, dst) 一覧
-    - `pr_status_counts`: has_pr edge の github_status 別件数
-      (metadata に github_status が無い場合は "unknown" に集計)
+    - `supersedes_chains`: workflow -> supersedes -> workflow の (from, to) 一覧
+    - `supersedes_chains_truncated`: chains が cap で切り詰められたか
+    - `pr_status_counts`: has_pr edge の github_status 別件数（SQL 集約、cap なし）
+
+    件数系（total / edge_type_counts / pr_status_counts）は SQL 集約で常に正確。
+    一覧の `supersedes_chains` のみ表示上の cap を持ち、超過時は truncated フラグ
+    で明示する（PR #146 Copilot Round 1: 件数と一覧の silent な不整合を防ぐ）。
     """
     counts = store.count_workgraph_edges_by_type(workflow_id=workflow_id)
     supersedes = store.list_workgraph_edges(
-        workflow_id=workflow_id, edge_type="supersedes", limit=1000
+        workflow_id=workflow_id, edge_type="supersedes",
+        limit=_GRAPH_STATUS_CHAIN_CAP,
     )
-    pr_edges = store.list_workgraph_edges(
-        workflow_id=workflow_id, edge_type="has_pr", limit=1000
-    )
-    pr_status: dict[str, int] = {}
-    for e in pr_edges:
-        meta = e.get("metadata") or {}
-        key = meta.get("github_status") or "unknown"
-        pr_status[key] = pr_status.get(key, 0) + 1
+    supersedes_total = counts.get("supersedes", 0)
     return {
         "workflow_id": workflow_id,
         "total_edges": sum(counts.values()),
@@ -1834,7 +1837,10 @@ def _build_graph_status(store, *, workflow_id: str | None) -> dict:
         "supersedes_chains": [
             {"from": e["src_id"], "to": e["dst_id"]} for e in supersedes
         ],
-        "pr_status_counts": dict(sorted(pr_status.items())),
+        "supersedes_chains_truncated": supersedes_total > len(supersedes),
+        "pr_status_counts": store.count_workgraph_pr_status(
+            workflow_id=workflow_id
+        ),
     }
 
 
@@ -1853,7 +1859,10 @@ def _print_graph_status_text(status: dict) -> None:
             print(f"    {k}: {v}")
     chains = status["supersedes_chains"]
     if chains:
-        print(f"  Supersedes チェーン（{len(chains)} 本）:")
+        label = f"  Supersedes チェーン（{len(chains)} 本"
+        if status.get("supersedes_chains_truncated"):
+            label += f"、{_GRAPH_STATUS_CHAIN_CAP} 件で表示打ち切り"
+        print(label + "）:")
         for c in chains:
             print(f"    {c['from']} ⟶ {c['to']}")
     pr_status = status["pr_status_counts"]

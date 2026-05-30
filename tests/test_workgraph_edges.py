@@ -381,7 +381,28 @@ def test_build_graph_status_aggregates(store):
     assert status["total_edges"] == 4
     assert status["edge_type_counts"] == {"has_pr": 3, "supersedes": 1}
     assert status["supersedes_chains"] == [{"from": "wf-2", "to": "wf-1"}]
+    assert status["supersedes_chains_truncated"] is False
+    # pr_status_counts は SQL 集約（cap なし・正確）
     assert status["pr_status_counts"] == {"merged": 1, "open": 1, "unknown": 1}
+
+
+def test_count_workgraph_pr_status_sql_aggregate(store):
+    """has_pr の github_status 集計は SQL（json_extract）で cap なし・正確。"""
+    for i, st in enumerate(["open", "open", "merged", None]):
+        meta = {"github_status": st} if st else None
+        store.upsert_workgraph_edge(
+            src_type="workflow", src_id="wf-1", edge_type="has_pr",
+            dst_type="pull_request", dst_id=f"u{i}", workflow_id="wf-1",
+            metadata=meta,
+        )
+    # supersedes も混ぜて has_pr のみ拾うことを確認
+    store.upsert_workgraph_edge(
+        src_type="workflow", src_id="wf-1", edge_type="supersedes",
+        dst_type="workflow", dst_id="wf-0", workflow_id="wf-1",
+    )
+    assert store.count_workgraph_pr_status() == {
+        "merged": 1, "open": 2, "unknown": 1
+    }
 
 
 def test_handle_graph_status_json(store, tmp_path, capsys):
