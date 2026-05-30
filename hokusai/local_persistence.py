@@ -45,18 +45,21 @@ def persist_review_issue_payloads(
         # dispatcher guard を mirror: source / message が無ければ dispatch されない
         if not payload.get("source") or not payload.get("message"):
             continue
-        dedupe_key = payload.get("dedupe_key")
-        if not dedupe_key:
-            # dispatch と同一の fallback で stable key を生成（skip しない）
-            dedupe_key = build_dedupe_key(
-                source=str(payload.get("source") or ""),
-                rule=payload.get("rule"),
-                file=payload.get("file"),
-                message=str(payload.get("message") or ""),
-                repository=payload.get("repository"),
-                workflow_id=payload.get("workflow_id") or None,
-            )
         try:
+            dedupe_key = payload.get("dedupe_key")
+            if not dedupe_key:
+                # dispatch と同一の fallback で stable key を生成（skip しない）。
+                # build_dedupe_key も per-payload try の内側に置き、1 件の
+                # malformed payload が他の永続化や drain を止めないようにする
+                # (PR #147 Copilot Round 4)。
+                dedupe_key = build_dedupe_key(
+                    source=str(payload.get("source") or ""),
+                    rule=payload.get("rule"),
+                    file=payload.get("file"),
+                    message=str(payload.get("message") or ""),
+                    repository=payload.get("repository"),
+                    workflow_id=payload.get("workflow_id") or None,
+                )
             store.upsert_review_issue(
                 dedupe_key=dedupe_key,
                 workflow_id=payload.get("workflow_id"),
@@ -102,14 +105,18 @@ def persist_work_item_payloads(
         workflow_id = payload.get("workflow_id")
         phase = payload.get("phase")
         dedupe_key = payload.get("dedupe_key")
-        if not dedupe_key:
-            if not title:
-                # 明示 key も title も無ければ同定できない
-                continue
-            dedupe_key = build_dedupe_key(
-                workflow_id=workflow_id, phase=phase, title=title
-            )
+        if not dedupe_key and not title:
+            # 明示 key も title も無ければ同定できない
+            continue
         try:
+            if not dedupe_key:
+                # build_dedupe_key は per-payload try の内側に置く。dispatcher
+                # (`_prepare_work_item_dispatch`) と同じく title を str cast して
+                # から hash し、非 str title の `.strip()` 例外が drain 全体を
+                # 止めないようにする (PR #147 Copilot Round 4)。
+                dedupe_key = build_dedupe_key(
+                    workflow_id=workflow_id, phase=phase, title=str(title)
+                )
             store.upsert_work_item(
                 dedupe_key=dedupe_key,
                 workflow_id=workflow_id,

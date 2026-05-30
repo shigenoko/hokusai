@@ -240,6 +240,26 @@ def test_persist_work_item_prefers_explicit_dedupe_key(store):
     assert rows[0]["dedupe_key"] == "custom-key"  # 再計算しない
 
 
+def test_persist_work_item_malformed_does_not_abort_batch(store):
+    """非 str title (例: dict) の fallback でも他の有効な payload を止めない。
+
+    PR #147 Copilot Round 4: build_dedupe_key の .strip() 例外が try の外で
+    起きると drain 全体が止まるため、fallback を try 内に移しつつ str cast。
+    malformed が混ざっても valid な 1 件は永続化される。
+    """
+    payloads = [
+        {"workflow_id": "wf-1", "title": {"bad": "non-str"}, "phase": 4},
+        {"workflow_id": "wf-1", "title": "正常", "phase": 4, "status": "pending"},
+    ]
+    n = persist_work_item_payloads(store, payloads)
+    # 非 str title は str() cast されるため実際には両方永続化され得るが、
+    # 少なくとも valid な 1 件は必ず残り、例外で batch 全体が落ちない
+    rows = store.list_work_items()
+    titles = [r["title"] for r in rows]
+    assert "正常" in titles
+    assert n >= 1
+
+
 def test_persist_helpers_are_best_effort_on_store_error():
     class _BoomStore:
         def upsert_review_issue(self, **kwargs):
