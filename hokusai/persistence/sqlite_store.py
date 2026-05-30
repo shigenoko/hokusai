@@ -424,6 +424,39 @@ class SQLiteStore:
                 )
             """)
 
+            # Step 5 (Local Workgraph Edges): workflow / PR / work_item /
+            # review_issue 等のローカル typed graph を SQLite に持つ。抽出は
+            # LLM ではなく既存 state / PR metadata から決定的に行う
+            # (docs/roadmap-gbrain-inspirations.md §P1 / Step 5)。
+            # UNIQUE 制約で再抽出時の冪等 upsert を担保する。
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS workgraph_edges (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    src_type TEXT NOT NULL,
+                    src_id TEXT NOT NULL,
+                    edge_type TEXT NOT NULL,
+                    dst_type TEXT NOT NULL,
+                    dst_id TEXT NOT NULL,
+                    workflow_id TEXT,
+                    metadata_json TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE (src_type, src_id, edge_type, dst_type, dst_id)
+                )
+            """)
+            # 公開フィルタ (workflow_id / edge_type) と clear / workflow GC が
+            # full-scan しないよう index を張る。UNIQUE 制約が
+            # (src_type, src_id, ...) の prefix scan を兼ねるため src 系は不要
+            # (PR #144 Copilot Round 2 指摘)。
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_workgraph_edges_workflow "
+                "ON workgraph_edges(workflow_id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_workgraph_edges_edge_type "
+                "ON workgraph_edges(edge_type)"
+            )
+
             conn.commit()
 
     def save_workflow(self, workflow_id: str, state: dict[str, Any]) -> None:
@@ -1623,6 +1656,190 @@ class SQLiteStore:
             conn.commit()
             return deleted
 
+    # === Workgraph Edges (Step 5 / Local Workgraph Edges) ===
+
+    @staticmethod
+    def _insert_edge_row(
+        conn: sqlite3.Connection,
+        *,
+        src_type: str,
+        src_id: str,
+        edge_type: str,
+        dst_type: str,
+        dst_id: str,
+        workflow_id: str | None,
+        metadata: dict[str, Any] | None,
+        now: str,
+    ) -> None:
+        """渡された接続上で 1 本の edge を冪等 INSERT する（commit はしない）。
+
+        upsert / bulk replace の双方から呼ぶ共通の INSERT ロジック。
+        UNIQUE (src_type, src_id, edge_type, dst_type, dst_id) で重複を抑止し、
+        衝突時は metadata / workflow_id / updated_at のみ更新する
+        (created_at は初回値を維持)。
+        """
+        metadata_json = (
+            json.dumps(metadata, ensure_ascii=False, default=str)
+            if metadata is not None
+            else None
+        )
+        conn.execute(
+            """
+            INSERT INTO workgraph_edges (
+                src_type, src_id, edge_type, dst_type, dst_id,
+                workflow_id, metadata_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(src_type, src_id, edge_type, dst_type, dst_id)
+            DO UPDATE SET
+                workflow_id = excluded.workflow_id,
+                metadata_json = excluded.metadata_json,
+                updated_at = excluded.updated_at
+            """,
+            (
+                src_type, src_id, edge_type, dst_type, dst_id,
+                workflow_id, metadata_json, now, now,
+            ),
+        )
+
+    def upsert_workgraph_edge(
+        self,
+        *,
+        src_type: str,
+        src_id: str,
+        edge_type: str,
+        dst_type: str,
+        dst_id: str,
+        workflow_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """`workgraph_edges` に 1 本の typed edge を冪等 upsert する。
+
+        抽出は決定的なので同じ edge を何度 upsert しても結果は変わらない。
+        """
+        now = datetime.now().isoformat()
+        with self._connect() as conn:
+            self._insert_edge_row(
+                conn,
+                src_type=src_type, src_id=src_id, edge_type=edge_type,
+                dst_type=dst_type, dst_id=dst_id, workflow_id=workflow_id,
+                metadata=metadata, now=now,
+            )
+            conn.commit()
+
+    def replace_workgraph_edges_for_workflow(
+        self,
+        workflow_id: str,
+        edges: list[dict[str, Any]],
+    ) -> int:
+        """指定 workflow 由来の edge を**単一トランザクション**で置換する。
+
+        DELETE + 全 INSERT を 1 つの接続・1 commit で行う。途中の INSERT が
+        失敗すると `with` ブロックが例外で抜けて rollback され、DELETE も
+        巻き戻るため、旧 edge set は保持される（clear だけ走って空になる
+        中間状態を作らない。PR #144 Copilot Round 3 指摘の atomicity 担保）。
+
+        Args:
+            workflow_id: 置換対象の抽出元 workflow_id
+            edges: edge dict のリスト。各 dict は src_type / src_id / edge_type
+                / dst_type / dst_id（必須）と metadata（任意）を持つ。
+
+        Returns:
+            INSERT した edge 本数。
+        """
+        now = datetime.now().isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM workgraph_edges WHERE workflow_id = ?",
+                (workflow_id,),
+            )
+            for e in edges:
+                self._insert_edge_row(
+                    conn,
+                    src_type=e["src_type"], src_id=e["src_id"],
+                    edge_type=e["edge_type"], dst_type=e["dst_type"],
+                    dst_id=e["dst_id"], workflow_id=workflow_id,
+                    metadata=e.get("metadata"), now=now,
+                )
+            conn.commit()
+        return len(edges)
+
+    def list_workgraph_edges(
+        self,
+        *,
+        workflow_id: str | None = None,
+        edge_type: str | None = None,
+        src_type: str | None = None,
+        src_id: str | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """`workgraph_edges` をフィルタして返す（最新 updated_at 順）。
+
+        Args:
+            workflow_id / edge_type / src_type / src_id: 指定すれば一致行のみ。
+            limit: 取得上限（既定 200、必ず 1 以上）。SQLite は negative LIMIT を
+                「no limit」と解釈するため、`limit < 1` は ValueError で reject。
+
+        Returns:
+            edge dict のリスト（metadata は parsed JSON）。
+        """
+        if limit < 1:
+            raise ValueError(
+                f"limit は 1 以上を指定してください（指定値={limit}）"
+            )
+        clauses: list[str] = []
+        params: list[Any] = []
+        for col, val in (
+            ("workflow_id", workflow_id),
+            ("edge_type", edge_type),
+            ("src_type", src_type),
+            ("src_id", src_id),
+        ):
+            if val is not None:
+                clauses.append(f"{col} = ?")
+                params.append(val)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        params.append(limit)
+        with self._connect() as conn:
+            cursor = conn.execute(
+                f"""
+                SELECT id, src_type, src_id, edge_type, dst_type, dst_id,
+                       workflow_id, metadata_json, created_at, updated_at
+                FROM workgraph_edges
+                {where}
+                ORDER BY updated_at DESC, id DESC
+                LIMIT ?
+                """,
+                params,
+            )
+            return [
+                {
+                    "id": row[0],
+                    "src_type": row[1],
+                    "src_id": row[2],
+                    "edge_type": row[3],
+                    "dst_type": row[4],
+                    "dst_id": row[5],
+                    "workflow_id": row[6],
+                    "metadata": json.loads(row[7]) if row[7] else None,
+                    "created_at": row[8],
+                    "updated_at": row[9],
+                }
+                for row in cursor.fetchall()
+            ]
+
+    def clear_workgraph_edges_for_workflow(self, workflow_id: str) -> int:
+        """指定 workflow_id 由来の edge を削除する（再抽出前の冪等化用）。
+
+        返り値は削除行数。
+        """
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "DELETE FROM workgraph_edges WHERE workflow_id = ?",
+                (workflow_id,),
+            )
+            conn.commit()
+            return cursor.rowcount
+
     # workflow_id をキーに持つ依存テーブル（M2.5 / #100 cascade-delete 用）。
     # workflows テーブル自体を含めず、cascade 対象の dependent table のみ列挙。
     # レガシー DB でテーブル不在の場合は skip するため try/except で個別に処理。
@@ -1638,6 +1855,7 @@ class SQLiteStore:
         "design_writeback_idempotency",
         "prime_index",
         "prime_index_meta",
+        "workgraph_edges",
     )
 
     def delete_old_completed_workflows(

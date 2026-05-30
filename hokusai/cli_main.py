@@ -649,6 +649,57 @@ def _build_parser():
         help="operation 入力パラメータ（複数指定可: --param workflow_id=wf-xxx）",
     )
 
+    # graph コマンド: Local Workgraph Edges（Step 5 第1スライス）。
+    # workflow state からローカル決定的に typed edge を抽出して SQLite に持ち、
+    # CLI から graph query できるようにする。
+    graph_parser = subparsers.add_parser(
+        "graph",
+        help="Local Workgraph Edges を抽出・一覧する（決定的・LLM 不要）",
+        parents=[shared_options],
+    )
+    graph_subparsers = graph_parser.add_subparsers(
+        dest="graph_subcommand",
+        help="graph サブコマンド",
+    )
+
+    graph_build_parser = graph_subparsers.add_parser(
+        "build",
+        help="workflow state から edge を抽出し SQLite に冪等 upsert",
+        parents=[shared_options],
+    )
+    graph_build_parser.add_argument(
+        "workflow_id",
+        help="抽出元のワークフローID（state から決定的に edge 化）",
+    )
+
+    graph_list_parser = graph_subparsers.add_parser(
+        "list",
+        help="登録済み edge を一覧表示（フィルタ可）",
+        parents=[shared_options],
+    )
+    graph_list_parser.add_argument(
+        "--workflow-id",
+        default=None,
+        help="抽出元 workflow_id で絞り込む",
+    )
+    graph_list_parser.add_argument(
+        "--edge-type",
+        default=None,
+        help="edge_type で絞り込む（例 supersedes / has_pr）",
+    )
+    graph_list_parser.add_argument(
+        "--limit",
+        type=_positive_int,
+        default=200,
+        help="取得上限（>=1、既定 200）",
+    )
+    graph_list_parser.add_argument(
+        "--output",
+        choices=("text", "json"),
+        default="text",
+        help="出力形式（既定 text）",
+    )
+
     return parser, profile_parser, connect_parser
 
 
@@ -965,6 +1016,10 @@ def main():
     # operations コマンド: Operation Registry（Step 3 第1スライス）
     if args.command == "operations":
         sys.exit(_handle_operations(args, config))
+
+    # graph コマンド: Local Workgraph Edges（Step 5 第1スライス）
+    if args.command == "graph":
+        sys.exit(_handle_graph(args, config))
 
     # llm-gateway-setup コマンド: 現 LLM Gateway 設定を診断 + 推奨設定提示
     # （F2 / PR #125）。
@@ -1625,6 +1680,99 @@ def _parse_operation_params(raw_params: list[str] | None) -> dict[str, str]:
             raise ValueError(f"--param の KEY が重複しています: {key!r}")
         parsed[key] = value
     return parsed
+
+
+def _handle_graph(args, config) -> int:
+    """`hokusai graph ...` のハンドラ（Step 5 第1スライス）。
+
+    `build`: workflow state からローカル決定的に edge を抽出し、再抽出前に
+    その workflow 由来の edge を clear してから冪等 upsert する。
+    `list`: 登録済み edge をフィルタして text / json で表示する。
+
+    Returns:
+        0: 正常 / 1: workflow_id が SQLite に無い・未知サブコマンド等
+    """
+    import json
+
+    from .persistence import SQLiteStore
+    from .workgraph_edges import extract_edges_from_state
+
+    subcommand = getattr(args, "graph_subcommand", None)
+    store = SQLiteStore(config.database_path)
+
+    if subcommand == "build":
+        workflow_id = args.workflow_id
+        state = store.load_workflow(workflow_id)
+        if state is None:
+            print(f"✗ workflow が見つかりません: {workflow_id}", file=sys.stderr)
+            return 1
+        edges = extract_edges_from_state(state)
+        # --dry-run 時は SQLite を一切 mutate せず preview だけ出す
+        # (他経路の dry-run 規約と整合。例: prime_index backfill も dry-run で
+        #  skip する。PR #144 Copilot Round 1 指摘)。
+        dry_run = getattr(args, "dry_run", False)
+        if dry_run:
+            print(
+                f"[dry-run] {workflow_id} から {len(edges)} 本の edge を"
+                f"抽出します（SQLite には書き込みません）"
+            )
+            for e in edges:
+                print(
+                    f"  {e.src_type}:{e.src_id} --{e.edge_type}--> "
+                    f"{e.dst_type}:{e.dst_id}"
+                )
+            return 0
+        # 再抽出の冪等化: この workflow 由来の既存 edge を単一トランザクションで
+        # 置換する (state が変わって消えた関係を残さない。途中失敗時は旧 edge
+        # set を保持。PR #144 Copilot Round 3 指摘)。
+        store.replace_workgraph_edges_for_workflow(
+            workflow_id,
+            [
+                {
+                    "src_type": e.src_type,
+                    "src_id": e.src_id,
+                    "edge_type": e.edge_type,
+                    "dst_type": e.dst_type,
+                    "dst_id": e.dst_id,
+                    "metadata": e.metadata,
+                }
+                for e in edges
+            ],
+        )
+        print(f"✓ {workflow_id} から {len(edges)} 本の edge を抽出しました")
+        for e in edges:
+            print(
+                f"  {e.src_type}:{e.src_id} --{e.edge_type}--> "
+                f"{e.dst_type}:{e.dst_id}"
+            )
+        return 0
+
+    if subcommand == "list":
+        rows = store.list_workgraph_edges(
+            workflow_id=getattr(args, "workflow_id", None),
+            edge_type=getattr(args, "edge_type", None),
+            limit=getattr(args, "limit", 200),
+        )
+        output = getattr(args, "output", "text")
+        if output == "json":
+            print(json.dumps({"edges": rows}, ensure_ascii=False, indent=2))
+        else:
+            if not rows:
+                print("edge は登録されていません")
+            else:
+                print(f"登録 edge: {len(rows)} 本")
+                for r in rows:
+                    print(
+                        f"  {r['src_type']}:{r['src_id']} "
+                        f"--{r['edge_type']}--> {r['dst_type']}:{r['dst_id']}"
+                    )
+        return 0
+
+    # subcommand 未指定 → usage
+    print("使い方: hokusai graph {build|list} ...", file=sys.stderr)
+    print("  build <workflow_id>   state から edge を抽出", file=sys.stderr)
+    print("  list [--workflow-id]  登録済み edge を一覧", file=sys.stderr)
+    return 1
 
 
 def _handle_operations(args, config) -> int:
