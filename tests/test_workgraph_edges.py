@@ -163,6 +163,24 @@ def test_list_rejects_nonpositive_limit(store):
         store.list_workgraph_edges(limit=0)
 
 
+def test_workgraph_edges_indexes_exist(store):
+    """公開フィルタ用の index が張られている (PR #144 Copilot Round 2)。
+
+    workflow_id / edge_type での list / clear / GC が full-scan しないよう
+    index を確認する。
+    """
+    with store._connect() as conn:
+        names = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' "
+                "AND tbl_name='workgraph_edges'"
+            ).fetchall()
+        }
+    assert "idx_workgraph_edges_workflow" in names
+    assert "idx_workgraph_edges_edge_type" in names
+
+
 def test_clear_edges_for_workflow(store):
     store.upsert_workgraph_edge(
         src_type="workflow", src_id="wf-1", edge_type="has_pr",

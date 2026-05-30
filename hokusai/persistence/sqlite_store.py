@@ -444,6 +444,18 @@ class SQLiteStore:
                     UNIQUE (src_type, src_id, edge_type, dst_type, dst_id)
                 )
             """)
+            # 公開フィルタ (workflow_id / edge_type) と clear / workflow GC が
+            # full-scan しないよう index を張る。UNIQUE 制約が
+            # (src_type, src_id, ...) の prefix scan を兼ねるため src 系は不要
+            # (PR #144 Copilot Round 2 指摘)。
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_workgraph_edges_workflow "
+                "ON workgraph_edges(workflow_id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_workgraph_edges_edge_type "
+                "ON workgraph_edges(edge_type)"
+            )
 
             conn.commit()
 
