@@ -464,9 +464,13 @@ class SQLiteStore:
             # resolved_by edge 等を後続スライスで構築できる土台にする。
             # dedupe_key (workflow_id を内包する決定的 hash) を主キーに採用し、
             # 再 drain での重複を冪等 upsert で抑止する。
+            # dedupe_key は NOT NULL を明示する。SQLite は非 INTEGER の
+            # PRIMARY KEY に対し NOT NULL を自動付与しない（legacy 互換挙動）ため、
+            # 明示しないと dedupe_key=None の行が複数挿入でき ON CONFLICT が
+            # 効かず idempotency が壊れる（PR #147 Copilot Round 3）。
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS review_issues (
-                    dedupe_key TEXT PRIMARY KEY,
+                    dedupe_key TEXT NOT NULL PRIMARY KEY,
                     workflow_id TEXT,
                     source TEXT,
                     rule TEXT,
@@ -489,7 +493,7 @@ class SQLiteStore:
             )
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS work_items (
-                    dedupe_key TEXT PRIMARY KEY,
+                    dedupe_key TEXT NOT NULL PRIMARY KEY,
                     workflow_id TEXT,
                     title TEXT,
                     phase INTEGER,

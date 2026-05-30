@@ -69,6 +69,22 @@ def test_list_review_issues_rejects_bad_limit(store):
         store.list_review_issues(limit=0)
 
 
+def test_dedupe_key_is_not_null_enforced(store):
+    """dedupe_key NULL は schema レベルで reject される (PR #147 Copilot Round 3)。
+
+    SQLite は非 INTEGER PRIMARY KEY の NOT NULL を明示しないと NULL を許すため、
+    DDL で NOT NULL を付けたことの回帰防止。NULL key の行が複数挿入できて
+    idempotency が壊れるのを防ぐ。
+    """
+    import sqlite3
+
+    with pytest.raises(sqlite3.IntegrityError):
+        store.upsert_review_issue(dedupe_key=None, workflow_id="wf-1",
+                                  source="x", message="m")
+    with pytest.raises(sqlite3.IntegrityError):
+        store.upsert_work_item(dedupe_key=None, workflow_id="wf-1", title="x")
+
+
 # --- work_items ----------------------------------------------------------
 
 
