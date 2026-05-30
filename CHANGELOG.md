@@ -12,6 +12,21 @@ HOKUSAI のすべての特筆すべき変更をこのファイルに記録する
 
 ## [Unreleased]
 
+---
+
+## [0.8.0] - 2026-05-31
+
+GBrain ロードマップ **Step 5: Local Workgraph Edges** を一通り形にした minor リリース。HOKUSAI の Workgraph を「Notion 上の governance view」から「**ローカルに graph query できる typed graph**」へ広げ、蓄積した review issue / work item を durable に永続化して再発検出まで通した。すべて決定的・SQLite-backed（LLM / live API 呼び出しなし）。設計議論は [docs/roadmap-gbrain-inspirations.md](docs/roadmap-gbrain-inspirations.md)。
+
+すべて additive。新コマンド `hokusai graph status / recurring`・新 edge 種別・新 durable table を追加するのみで、既存コマンドの挙動は不変。既存 DB は起動時 migration（`CREATE TABLE IF NOT EXISTS`）で前方互換。
+
+主な内容:
+
+- **graph status 集約ビュー** — `hokusai graph status` で `workgraph_edges` を集約し、edge 種別ごとの本数 / supersedes チェーン / has_pr edge の github_status 別件数を表示。件数系は SQL 集約で常に正確 (#146)。
+- **review issue / work item の durable ローカル永続化** — drain layer が clear する前に `review_issues` / `work_items` テーブルへ冪等 upsert。dispatcher 契約 (guard / dedupe_key / lifecycle の COALESCE) を mirror。recurring 検出・durable edge の土台 (#147)。
+- **recurring review issue 検出** — `hokusai graph recurring` で content signature が複数 workflow にまたがって再発した Review Issue を `COUNT(DISTINCT workflow_id)` で検出 (#148)。
+- **has_work_item edge** — `workflow -> has_work_item -> work_item` を state からローカル決定的に抽出 (#146)。
+
 ### Added
 
 - **Step 5 (Local Workgraph Edges) 第 4 スライス: recurring review issue 検出**: 第 3 スライスで durable 化した `review_issues` テーブルを活用し、Step 5 ロードマップの目玉「recurring review issue 検出」を実装。`SQLiteStore.find_recurring_review_issues(*, min_workflows=2, limit=100)` を追加し、content signature（`source` / `rule` / `file` / `message` / `repository`）が **min_workflows 件以上の異なる workflow** で出現したものを SQL の `GROUP BY ... HAVING COUNT(DISTINCT workflow_id) >= ?` (同順位は signature 列で決定的にソートし LIMIT 結果を安定化) で検出する（`dedupe_key` は workflow_id を内包するため同種指摘でも別 row だが、content 一致で「同じ指摘が複数 workflow で再発」の signal になる）。CLI `hokusai graph recurring [--min-workflows N] [--limit N] [--output text|json]` を追加し、再発指摘を「N workflow / M 件: wf-... 」形式で表示。json は stable schema (`{recurring_review_issues: [{source, rule, file, message, repository, workflow_count, occurrence_count, workflow_ids}]}`)。`min_workflows<2` / `limit<1` は ValueError で reject（CLI は stderr + exit 1）。同一 workflow 内の複数 row は workflow_count に二重計上しない（DISTINCT）。回帰防止テスト 5 件追加 (`tests/test_local_persistence.py`: 複数 workflow 再発検出 / DISTINCT workflow カウント / 同順位の決定的順序 / bad args reject / `graph recurring --output json`)。設計: [docs/roadmap-gbrain-inspirations.md §P1 / Step 5](docs/roadmap-gbrain-inspirations.md)。
@@ -734,7 +749,8 @@ Notion / GitHub Issue / Jira / Linear 連携の最小機能セット。
 - SQLite による checkpoint / outbox 永続化
 - Worktree ベースの並行ワークフロー実行
 
-[Unreleased]: https://github.com/shigenoko/hokusai/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/shigenoko/hokusai/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/shigenoko/hokusai/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/shigenoko/hokusai/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/shigenoko/hokusai/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/shigenoko/hokusai/compare/v0.5.0...v0.5.1
