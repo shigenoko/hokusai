@@ -117,10 +117,15 @@ def persist_work_item_payloads(
                 dedupe_key = build_dedupe_key(
                     workflow_id=workflow_id, phase=phase, title=str(title)
                 )
+            # 保存 title も dispatch と同じく str 正規化する。非 str title
+            # (dict 等) を生のまま渡すと sqlite3 が bind できず行が skip され
+            # transient に残るため (PR #147 Copilot Round 5)。明示 key のみで
+            # title が無い event は None を維持する。
+            normalized_title = None if title is None else str(title)
             store.upsert_work_item(
                 dedupe_key=dedupe_key,
                 workflow_id=workflow_id,
-                title=title,
+                title=normalized_title,
                 phase=phase,
                 status=payload.get("status"),
                 description=payload.get("description"),

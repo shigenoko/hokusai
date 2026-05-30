@@ -252,12 +252,25 @@ def test_persist_work_item_malformed_does_not_abort_batch(store):
         {"workflow_id": "wf-1", "title": "正常", "phase": 4, "status": "pending"},
     ]
     n = persist_work_item_payloads(store, payloads)
-    # 非 str title は str() cast されるため実際には両方永続化され得るが、
-    # 少なくとも valid な 1 件は必ず残り、例外で batch 全体が落ちない
     rows = store.list_work_items()
     titles = [r["title"] for r in rows]
+    # valid な 1 件は必ず残り、batch 全体が落ちない
     assert "正常" in titles
-    assert n >= 1
+    # 非 str title も str 正規化されて永続化される（transient に残らない、
+    # PR #147 Copilot Round 5）。sqlite には str 化された値が入る
+    assert n == 2
+    assert str({"bad": "non-str"}) in titles
+
+
+def test_persist_work_item_explicit_key_without_title_keeps_none(store):
+    """明示 dedupe_key のみ・title 無しの event は title=None で永続化される。"""
+    n = persist_work_item_payloads(
+        store, [{"dedupe_key": "k1", "workflow_id": "wf-1", "status": "done"}]
+    )
+    assert n == 1
+    rows = store.list_work_items()
+    assert rows[0]["title"] is None
+    assert rows[0]["status"] == "done"
 
 
 def test_persist_helpers_are_best_effort_on_store_error():
