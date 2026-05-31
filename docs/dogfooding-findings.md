@@ -511,6 +511,36 @@ v0.5.1 で F1-F4 が解消され Phase 2 enforcement の配線が 3 段階で検
 
 ---
 
+## 11. v0.7–v0.10 新コマンド (operations / graph / eval) の実環境 dogfooding (2026-05-31)
+
+v0.7.0–v0.10.0 で追加した **Step 2/3/4/5** の CLI（`operations` / `graph` / `eval` と `profile doctor --deep`）を、HOKUSAI 本体 profile (`hokusai`) の既存 DB に対して実行して観察した。**コード変更なしの観察ログ**。叩いたコマンドは [Appendix A.3](#appendix-a3-11-で叩いたコマンド-2026-05-31) を参照。
+
+### 観察手順
+
+| Step | 操作 |
+|---|---|
+| 1 | `hokusai operations list` / `operations run runtime.health` / `operations run notion.outbox_status` |
+| 2 | `hokusai graph status` / `graph recurring` |
+| 3 | `hokusai eval list` / `eval export > baseline.json` / `eval gate --baseline baseline.json` |
+| 4 | `hokusai profile doctor hokusai --deep`（Step 2 の runtime ヘルス統合）|
+| 5 | 実 DB に v0.8–v0.10 の新テーブル（`workgraph_edges` / `review_issues` / `work_items` / `eval_captures`）が migration されているか確認 |
+
+### 実観察結果
+
+- ✅ **新テーブル 4 種すべてが既存 DB に前方互換で migration された**: MVP-1（prime_index）と同様、`SQLiteStore.__init__` 起動時に `workgraph_edges` / `review_issues` / `work_items` / `eval_captures` が `CREATE TABLE IF NOT EXISTS` で作成された。既存ユーザー DB を壊さずに v0.8–v0.10 機能が乗ることを実証。
+- ✅ **runtime ヘルスの検出ロジックが CLI 横断で一貫**: `operations run runtime.health`（Step 3）/ `profile doctor --deep`（Step 2）/ Operations Console が**同一の `notion_outbox_pending` gap（pending 12 件）を返す**。Step 2 第3スライスで導入した共通 handler `compute_runtime_health()` が単一の真実源として効いていることを実環境で確認。`operations run` の stdout は JSON 専用（warning は stderr）で pipe 可能、未知 operation は stderr + 案内表示も確認。
+- ✅ **eval export → gate サイクルが実 audit データで完結**: `eval list` は LLM Gateway が `audit_logs` に残した 5 件の `llm_call` fixture を phase / purpose / decision 別に集約表示。`eval export > baseline.json`（5 fixtures）→ `eval gate --baseline baseline.json` で「regressions 0 / improvements 0」を得た。**LLM Gateway audit が既にある環境では追加配線なしで即座に eval gate が回る**。
+- ⚠ **graph / recurring / eval-verification は「既存 workflow」では空**: `graph status` は `has_work_item: 38` のみ（`has_pr` / `supersedes` / `has_review_issue` / `resolved_by` は 0）、`graph recurring` は空、`eval list` の `verification` capture も 0 件。これは **durable な `review_issues` / `work_items` / `eval_captures` への永続化が drain hook（v0.8 第3 / v0.10 第2）に依存**するため。drain は新規 workflow 実行時にしか走らず、**それ以前に完了/保存された既存 workflow の state JSON はこれらの durable テーブルにバックフィルされない**。`has_work_item` だけ 38 件あるのは、`graph build` が state の `pending_work_items` からも抽出する経路（v0.8 第2）を持つため（Notion 未配線でこの workflow は drain されず pending が state に残存）。
+
+### 評価 + 次のアクション候補
+
+- **SQLite-backed な運用可視化（operations / doctor --deep / eval gate）は Notion 接続なしで即値**。outbox 滞留・運用ギャップ・LLM 呼び出し fixture を 1 コマンドで可視化でき、CI 退行 gate（`eval gate --fail-on-regression`）も既存 audit で回る。Step 2/3/4 の「既存配線を活かす」方針が実環境で結実している。
+- ⚠ **最大の運用ギャップ = 既存データのバックフィル不在**: v0.8–v0.10 の durable テーブル（review_issues / work_items / eval_captures）は**前向き（forward-only）**にしか埋まらない。既存ユーザーが `graph recurring` / durable な `has_review_issue` / `resolved_by` / verification capture の価値を得るには、(a) 新規 workflow を回す、または (b) **`workflows.state_json` から一括バックフィルする one-shot コマンド**が要る。後者は決定的・SQLite-backed・既存配線（`extract_*` 純関数の再利用）で 1 PR に収まる、**次スライスの有力候補**。
+- ⚠ **Notion-backed な edge / gap は引き続き §1 運用穴に依存**: `has_pr` edge（state の `pull_requests`）/ `unresolved_review_issue_open` gap / `--query` 検索は Notion DB 配線・PR 実績が前提。dogfooding 環境ではこれらが空のままなのは §10 と同じ構造。
+- **次マイルストーン候補**: (a) 上記**バックフィルコマンド**（`hokusai graph backfill` / `eval backfill` 等、既存 workflow の state から durable テーブルを再構築）、(b) `operations` registry の mutating operation 解禁・read-only MCP/HTTP 化（Step 3 後続）、(c) Step 4 の phase 入出力 capture 拡張（verification 以外の Phase 2/3/4/7/8）。
+
+---
+
 ## Appendix A: 観察用に叩いたコマンド
 
 ```bash
@@ -615,6 +645,39 @@ sqlite3 ~/.hokusai/profiles/hokusai/workflow.db \
   "SELECT details_json FROM audit_logs
    WHERE json_extract(details_json, '\$.context.purpose')='dogfood_observation_step2_block'
    ORDER BY id DESC LIMIT 1;" | python3 -m json.tool
+```
+
+### Appendix A.3: §11 で叩いたコマンド (2026-05-31)
+
+```bash
+# Step 3: Operation Registry
+uv run hokusai operations list
+uv run hokusai operations run runtime.health
+uv run hokusai operations run notion.outbox_status
+uv run hokusai operations run no.such          # 未知 op → stderr + exit 1
+
+# Step 5: Local Workgraph Edges
+uv run hokusai graph status
+uv run hokusai graph recurring
+
+# Step 4: Eval Capture
+uv run hokusai eval list
+uv run hokusai eval export > /tmp/df_base.json
+uv run hokusai eval gate --baseline /tmp/df_base.json
+
+# Step 2: Doctor/Status 統合
+uv run hokusai profile doctor hokusai --deep
+
+# 新テーブルの migration 確認
+uv run python -c "
+from hokusai.config import create_config_from_env_and_file
+import sqlite3
+cfg=create_config_from_env_and_file(profile_name='hokusai')
+conn=sqlite3.connect(cfg.database_path)
+want=['workgraph_edges','review_issues','work_items','eval_captures']
+have=[r[0] for r in conn.execute(\"SELECT name FROM sqlite_master WHERE type='table'\")]
+print({t:(t in have) for t in want})
+"
 ```
 
 ## Appendix B: 参照したコード位置
