@@ -2438,39 +2438,44 @@ def _handle_operations(args, config) -> int:
 
     if subcommand == "run":
         name = args.name
-        op = registry.get(name)
-        if op is None:
+        # 共通 sink（lookup → scope guard → read-only store 解決 → handler の
+        # 単一経路を CLI / Dashboard / 将来 MCP で共有。Step 3 第3スライス）を
+        # guard と実行の 2 段で使う。guard を `--param` 形式検証より前に通すこと
+        # で「未知 / scope 違反を param エラーより先に報告する」従来挙動を保つ
+        # （PR #164 Copilot Round 2）。store 解決も sink 側が担い、副作用なしの
+        # ReadOnlyStore を構築する（SQLiteStore は WAL PRAGMA / CREATE / DB
+        # 新規作成の副作用があり read-only 契約に反する。PR #143 Round 5）。
+        from .operations import (
+            ScopeViolationError,
+            UnknownOperationError,
+            invoke_operation,
+            resolve_read_only_operation,
+        )
+
+        try:
+            op = resolve_read_only_operation(registry, name)
+        except UnknownOperationError:
             available = ", ".join(registry.names()) or "(なし)"
             print(f"✗ 未知の operation: {name}", file=sys.stderr)
             print(f"  利用可能: {available}", file=sys.stderr)
             return 1
-        # 第1スライスでは mutating operation を CLI から実行させない
-        # （read-only 経路の単一化が目的。副作用つきは後続スライスで
-        #  確認フロー込みで解禁する）。
-        if not op.is_read_only:
+        except ScopeViolationError as e:
+            # 第3スライスでも read-only のみ実行可（mutating は後続）。
+            print(f"✗ {e}", file=sys.stderr)
             print(
-                f"✗ operation '{name}' は scope={op.scope} のため run できません",
-                file=sys.stderr,
-            )
-            print(
-                "  第1スライスでは read-only operation のみ実行可能です",
+                "  read-only operation のみ実行可能です",
                 file=sys.stderr,
             )
             return 1
+
         try:
             params = _parse_operation_params(getattr(args, "params", None))
         except ValueError as e:
             print(f"✗ {e}", file=sys.stderr)
             return 1
 
-        # read-only operation なので、副作用なしの ReadOnlyStore を使う
-        # (SQLiteStore は WAL PRAGMA / CREATE / ALTER / DB 新規作成の副作用が
-        #  あり read-only 契約に反する。PR #143 Copilot Round 5 指摘)。
-        from .operations import ReadOnlyStore
-
-        store = ReadOnlyStore(config.database_path)
         try:
-            result = op.handler(params, store=store, config=config)
+            result = invoke_operation(op, params, config=config)
         except ValueError as e:
             # handler の入力検証エラー (必須 param 欠落 / 不正 limit 等) は
             # stderr + exit 1 にし、stdout は JSON 専用のまま保つ。

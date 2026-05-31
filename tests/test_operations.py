@@ -15,12 +15,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from hokusai.cli_main import _parse_operation_params
 from hokusai.operations import (
+    MUTATING,
     READ_ONLY,
     Operation,
     OperationRegistry,
     ReadOnlyStore,
+    ScopeViolationError,
+    UnknownOperationError,
     build_default_registry,
     default_registry,
+    execute_operation,
+    invoke_operation,
+    resolve_read_only_operation,
 )
 
 
@@ -274,6 +280,101 @@ def test_handle_operations_run_handler_value_error_to_stderr(capsys, monkeypatch
     assert rc == 1
     assert captured.out == ""
     assert "workflow_id" in captured.err
+
+
+# --- 第3スライス: execute_operation 共通 sink ----------------------------
+
+
+def test_execute_operation_runs_read_only_handler():
+    reg = build_default_registry()
+    result = execute_operation(
+        reg, "notion.outbox_status", {},
+        store=_FakeStore(pending=2, errors=1), config=_FakeConfig(),
+    )
+    assert result == {"outbox_pending": 2, "outbox_errors": 1}
+
+
+def test_execute_operation_unknown_raises():
+    reg = build_default_registry()
+    # store を渡さず、database_path を持たない config を渡す。lookup guard が
+    # store 解決より前なら DB に一切触れず例外になる（後なら config.database_path
+    # への AttributeError になり、この差で「無効 op では DB を触らない」契約を
+    # 回帰防止できる。PR #164 Copilot Round 1）。
+    with pytest.raises(UnknownOperationError) as ei:
+        execute_operation(reg, "no.such.op", {}, config=object())
+    assert ei.value.name == "no.such.op"
+
+
+def test_execute_operation_scope_violation_raises():
+    reg = OperationRegistry()
+    reg.register(
+        Operation(
+            name="danger.do", summary="", scope=MUTATING,
+            input_schema={"type": "object", "properties": {}, "required": []},
+            handler=lambda params, *, store, config: {},
+        )
+    )
+    # 同上: store 無し・database_path 無し config で、scope guard が store 解決
+    # より前であること（scope 違反でも DB を触らない）を担保する。
+    with pytest.raises(ScopeViolationError) as ei:
+        execute_operation(reg, "danger.do", {}, config=object())
+    assert ei.value.scope == MUTATING
+
+
+def test_execute_operation_propagates_handler_value_error():
+    reg = build_default_registry()
+    # workflow.status は workflow_id 必須 → ValueError を伝播
+    with pytest.raises(ValueError, match="workflow_id"):
+        execute_operation(
+            reg, "workflow.status", {},
+            store=_FakeStore(), config=_FakeConfig(),
+        )
+
+
+def test_resolve_read_only_operation_guards():
+    reg = build_default_registry()
+    # 正常: read-only op を返す
+    op = resolve_read_only_operation(reg, "workflow.list")
+    assert op.name == "workflow.list"
+    # 未知
+    with pytest.raises(UnknownOperationError):
+        resolve_read_only_operation(reg, "no.such")
+    # scope 違反
+    reg2 = OperationRegistry()
+    reg2.register(Operation(
+        name="m.do", summary="", scope=MUTATING,
+        input_schema={"type": "object", "properties": {}, "required": []},
+        handler=lambda params, *, store, config: {},
+    ))
+    with pytest.raises(ScopeViolationError):
+        resolve_read_only_operation(reg2, "m.do")
+
+
+def test_invoke_operation_runs_handler():
+    reg = build_default_registry()
+    op = resolve_read_only_operation(reg, "notion.outbox_status")
+    result = invoke_operation(
+        op, {}, store=_FakeStore(pending=5, errors=2), config=_FakeConfig()
+    )
+    assert result == {"outbox_pending": 5, "outbox_errors": 2}
+
+
+def test_handle_operations_run_unknown_before_param_error(capsys):
+    """未知 operation は --param 形式エラーより先に報告する（順序回帰防止。
+    PR #164 Copilot Round 2）。"""
+    from hokusai.cli_main import _handle_operations
+
+    rc = _handle_operations(
+        _ns(operations_subcommand="run", name="no.such.op",
+            params=["malformed_no_equals"]),
+        _FakeConfig(),
+    )
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert captured.out == ""
+    # param エラー(KEY=VALUE)でなく未知 operation が先に出る
+    assert "未知の operation" in captured.err
+    assert "KEY=VALUE" not in captured.err
 
 
 # --- 第2スライス: ReadOnlyStore の新 SELECT メソッド (実 DB) --------------
