@@ -12,6 +12,24 @@ HOKUSAI のすべての特筆すべき変更をこのファイルに記録する
 
 ## [Unreleased]
 
+---
+
+## [0.10.0] - 2026-05-31
+
+**Step 4: Eval Capture** を `eval gate`（退行検出）まで仕上げ、export → capture → gate が一通り揃った minor リリース。これで GBrain ロードマップ全 5 Step の主要機能が形になった。すべて決定的・SQLite-backed（保存は本文を持たず hash/length/metadata のみ）。設計議論は [docs/roadmap-gbrain-inspirations.md](docs/roadmap-gbrain-inspirations.md)。
+
+すべて additive。新サブコマンド `hokusai eval gate` を追加するのみで、既存コマンドの挙動は不変。
+
+主な内容:
+
+- **eval gate（Step 4 第3）** — `eval export` で保存した baseline fixture と現 DB の fixture を決定的に diff し、新たな失敗（regressions）/ 解消された失敗（improvements）を検出。`hokusai eval gate --baseline <file> [--fail-on-regression]` で CI / pre-release の退行 gate に使える。`--limit` truncation 由来の偽陽性は `out_of_window` に分離。
+
+```bash
+hokusai eval export > baseline.json   # ある時点の fixture を保存
+# ... prompt / review rule を変更、workflow を回す ...
+hokusai eval gate --baseline baseline.json --fail-on-regression  # 新たな失敗があれば exit 1
+```
+
 ### Added
 
 - **Step 4 (Eval Capture) 第 3 スライス: eval gate（退行検出）**: 第 1/第 2 スライスで export / capture した eval fixture を使い、**保存済み baseline と現状を決定的に diff して退行を検出**する。実 LLM を再実行する replay は侵襲的なため、`eval export` で保存した baseline fixture セット（JSON）と現 DB の fixture を比較する非侵襲な gate として実装。`hokusai/eval_capture.py` に純関数 `fixture_identity(fixture)`（capture は `capture_key`、llm_call は `audit_id` で同定。出力が変われば別 identity）+ `build_eval_gate_result(baseline, current, *, window_start)`（`added` / `removed` と、`status="fail"` の added=**regressions** / removed=**improvements** を算出。`--limit` truncation で現側ウィンドウから外れた古い baseline fixture は `out_of_window` に分離し improvements の偽陽性を防ぐ）を実装。CLI `hokusai eval gate --baseline <file> [--workflow-id] [--limit] [--fail-on-regression] [--output text|json]` を追加。baseline は `eval export` の `{"fixtures":[...]}` 形式または bare list を受け付け、`--fail-on-regression` 指定時のみ regression があれば exit 1（CI / pre-release gate 用）。決定的・SQLite-backed（live API なし）。回帰防止テスト 7 件追加 (`tests/test_eval_capture.py`: fixture_identity / gate 退行+解消検出 / stable で退行なし / out_of_window 偽陽性防止 / baseline ローダ 2 形式 + 不正 / `eval gate --fail-on-regression` exit / baseline 不在エラー)。これで Step 4 の export → capture → gate が一通り揃った。設計: [docs/roadmap-gbrain-inspirations.md §P1 / Step 4](docs/roadmap-gbrain-inspirations.md)。
@@ -775,7 +793,8 @@ Notion / GitHub Issue / Jira / Linear 連携の最小機能セット。
 - SQLite による checkpoint / outbox 永続化
 - Worktree ベースの並行ワークフロー実行
 
-[Unreleased]: https://github.com/shigenoko/hokusai/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/shigenoko/hokusai/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/shigenoko/hokusai/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/shigenoko/hokusai/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/shigenoko/hokusai/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/shigenoko/hokusai/compare/v0.6.0...v0.7.0
