@@ -15,12 +15,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from hokusai.cli_main import _parse_operation_params
 from hokusai.operations import (
+    MUTATING,
     READ_ONLY,
     Operation,
     OperationRegistry,
     ReadOnlyStore,
+    ScopeViolationError,
+    UnknownOperationError,
     build_default_registry,
     default_registry,
+    execute_operation,
 )
 
 
@@ -274,6 +278,53 @@ def test_handle_operations_run_handler_value_error_to_stderr(capsys, monkeypatch
     assert rc == 1
     assert captured.out == ""
     assert "workflow_id" in captured.err
+
+
+# --- 第3スライス: execute_operation 共通 sink ----------------------------
+
+
+def test_execute_operation_runs_read_only_handler():
+    reg = build_default_registry()
+    result = execute_operation(
+        reg, "notion.outbox_status", {},
+        store=_FakeStore(pending=2, errors=1), config=_FakeConfig(),
+    )
+    assert result == {"outbox_pending": 2, "outbox_errors": 1}
+
+
+def test_execute_operation_unknown_raises():
+    reg = build_default_registry()
+    with pytest.raises(UnknownOperationError) as ei:
+        execute_operation(
+            reg, "no.such.op", {}, store=_FakeStore(), config=_FakeConfig()
+        )
+    assert ei.value.name == "no.such.op"
+
+
+def test_execute_operation_scope_violation_raises():
+    reg = OperationRegistry()
+    reg.register(
+        Operation(
+            name="danger.do", summary="", scope=MUTATING,
+            input_schema={"type": "object", "properties": {}, "required": []},
+            handler=lambda params, *, store, config: {},
+        )
+    )
+    with pytest.raises(ScopeViolationError) as ei:
+        execute_operation(
+            reg, "danger.do", {}, store=_FakeStore(), config=_FakeConfig()
+        )
+    assert ei.value.scope == MUTATING
+
+
+def test_execute_operation_propagates_handler_value_error():
+    reg = build_default_registry()
+    # workflow.status は workflow_id 必須 → ValueError を伝播
+    with pytest.raises(ValueError, match="workflow_id"):
+        execute_operation(
+            reg, "workflow.status", {},
+            store=_FakeStore(), config=_FakeConfig(),
+        )
 
 
 # --- 第2スライス: ReadOnlyStore の新 SELECT メソッド (実 DB) --------------

@@ -32,6 +32,29 @@ READ_ONLY = "read_only"
 MUTATING = "mutating"
 
 
+class OperationError(Exception):
+    """operation 実行の契約違反（共通 sink `execute_operation` が送出）。"""
+
+
+class UnknownOperationError(OperationError):
+    """登録されていない operation 名を実行しようとした。"""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        super().__init__(f"未知の operation: {name}")
+
+
+class ScopeViolationError(OperationError):
+    """read-only でない operation を read-only 経路で実行しようとした。"""
+
+    def __init__(self, name: str, scope: str) -> None:
+        self.name = name
+        self.scope = scope
+        super().__init__(
+            f"operation '{name}' は scope={scope} のため実行できません"
+        )
+
+
 @dataclass(frozen=True)
 class Operation:
     """1 つの operation の contract。
@@ -554,3 +577,42 @@ def default_registry() -> OperationRegistry:
     if _DEFAULT_REGISTRY is None:
         _DEFAULT_REGISTRY = build_default_registry()
     return _DEFAULT_REGISTRY
+
+
+def execute_operation(
+    registry: OperationRegistry,
+    name: str,
+    params: dict[str, Any],
+    *,
+    config: Any,
+    store: Any = None,
+) -> dict[str, Any]:
+    """read-only operation を「単一経路」で実行する共通 sink。
+
+    CLI (`operations run`) / Dashboard / 将来の read-only MCP・HTTP admin が
+    **同じ lookup → scope guard → store 解決 → handler 呼び出し** の契約を
+    共有するための実行関数。各呼び出し側で重複しがちな「未知 operation /
+    scope 違反 / read-only store 解決 / 入力検証」の扱いを 1 箇所に集約する
+    （Step 3 第3スライス）。
+
+    契約:
+    - 未知の operation 名 → `UnknownOperationError`
+    - read-only でない operation → `ScopeViolationError`（第3スライスでも
+      read-only のみ実行可。mutating は確認フロー込みで後続スライス）
+    - handler の入力検証エラーは handler が送出する `ValueError` をそのまま
+      伝播（呼び出し側が利用者向けに整形する）
+
+    scope guard を **store 解決より前** に通すことで、未知 / scope 違反の
+    operation では DB に一切触れない（無効入力で副作用や DB 接続を起こさない）。
+    `store` 未指定時は read-only 契約を守る `ReadOnlyStore(config.database_path)`
+    を構築する（test 等で明示 store を渡せば優先）。戻り値は JSON 直列化可能な
+    dict。
+    """
+    op = registry.get(name)
+    if op is None:
+        raise UnknownOperationError(name)
+    if not op.is_read_only:
+        raise ScopeViolationError(name, op.scope)
+    if store is None:
+        store = ReadOnlyStore(config.database_path)
+    return op.handler(params, store=store, config=config)
