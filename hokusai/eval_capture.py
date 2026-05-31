@@ -187,6 +187,8 @@ def fixture_identity(fixture: dict[str, Any]) -> str:
 def build_eval_gate_result(
     baseline: list[dict[str, Any]],
     current: list[dict[str, Any]],
+    *,
+    window_start: str | None = None,
 ) -> dict[str, Any]:
     """baseline fixture 集合と現 fixture 集合を diff して退行を検出する。
 
@@ -195,19 +197,40 @@ def build_eval_gate_result(
     `added` を **regressions**（新たな失敗）、`status="fail"` の `removed` を
     **improvements**（解消された失敗）とする。決定的・I/O なし。
 
+    `window_start` (ISO) を渡すと、現側集合が `--limit` truncation 等で
+    観測ウィンドウ下限を持つ場合に、それより古い baseline fixture を `removed`/
+    `improvements` から除外し `out_of_window` に分類する。これにより「単に
+    limit で現側に現れなかっただけ」の fixture を「解消された失敗」と
+    誤検知しない（PR #154 Copilot Round 1）。
+
     Returns:
         {baseline_count, current_count, added, removed, regressions,
-         improvements}
+         improvements, out_of_window}
     """
     base_by = {fixture_identity(f): f for f in baseline or []}
     cur_by = {fixture_identity(f): f for f in current or []}
     added = [cur_by[k] for k in cur_by if k not in base_by]
-    removed = [base_by[k] for k in base_by if k not in cur_by]
+
+    removed: list[dict[str, Any]] = []
+    out_of_window: list[dict[str, Any]] = []
+    for k in base_by:
+        if k in cur_by:
+            continue
+        f = base_by[k]
+        created = f.get("created_at")
+        # 観測ウィンドウ下限より古い baseline fixture は「現側に現れなかった」
+        # ことが limit truncation 由来かもしれず、解消/削除と断定できない。
+        if window_start is not None and created is not None \
+                and created < window_start:
+            out_of_window.append(f)
+        else:
+            removed.append(f)
     return {
         "baseline_count": len(base_by),
         "current_count": len(cur_by),
         "added": added,
         "removed": removed,
+        "out_of_window": out_of_window,
         "regressions": [f for f in added if f.get("status") == "fail"],
         "improvements": [f for f in removed if f.get("status") == "fail"],
     }

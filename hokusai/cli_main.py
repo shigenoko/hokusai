@@ -1904,7 +1904,14 @@ def _handle_eval(args, config) -> int:
     # 意味とズレるため、合流後に created_at 降順で並べてから全体で limit を
     # 適用する（PR #152 Copilot Round 1）。
     fixtures.sort(key=lambda f: f.get("created_at") or "", reverse=True)
+    _truncated = len(fixtures) > limit
     fixtures = fixtures[:limit]
+    # truncation が起きた場合、現側に現れた最古 fixture の created_at が観測
+    # ウィンドウ下限。gate でこれより古い baseline fixture を out_of_window に
+    # 分類し improvements の偽陽性を防ぐ（PR #154 Copilot Round 1）。
+    _window_start = (
+        fixtures[-1].get("created_at") if (_truncated and fixtures) else None
+    )
 
     if subcommand == "export":
         output = getattr(args, "output", "json")
@@ -1926,7 +1933,9 @@ def _handle_eval(args, config) -> int:
         except (OSError, ValueError) as e:
             print(f"✗ baseline 読み込み失敗: {e}", file=sys.stderr)
             return 1
-        result = build_eval_gate_result(baseline, fixtures)
+        result = build_eval_gate_result(
+            baseline, fixtures, window_start=_window_start
+        )
         if getattr(args, "output", "text") == "json":
             print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
         else:
@@ -1940,6 +1949,12 @@ def _handle_eval(args, config) -> int:
             for f in result["regressions"]:
                 print(f"    + [{f.get('kind')}] {f.get('label') or f.get('purpose') or '-'}")
             print(f"  ✓ 解消 (improvements): {len(result['improvements'])}")
+            oow = result.get("out_of_window") or []
+            if oow:
+                print(
+                    f"  ・観測ウィンドウ外 (out_of_window): {len(oow)}"
+                    "（--limit truncation により判断保留）"
+                )
         # --fail-on-regression 指定時のみ regression で exit 1（CI gate 用）
         if getattr(args, "fail_on_regression", False) and result["regressions"]:
             return 1

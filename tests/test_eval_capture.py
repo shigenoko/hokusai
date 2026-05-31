@@ -439,6 +439,24 @@ def test_build_eval_gate_result_no_regression_when_stable():
     assert r["removed"] == []
 
 
+def test_build_eval_gate_result_out_of_window_not_improvement():
+    """window_start より古い baseline fail は improvements でなく out_of_window
+    に分類される（--limit truncation の偽陽性防止、PR #154 Copilot Round 1）。"""
+    old_fail = {"kind": "verification", "capture_key": "ck-old",
+                "status": "fail", "created_at": "2026-01-01T00:00:00"}
+    recent_fail = {"kind": "verification", "capture_key": "ck-recent",
+                   "status": "fail", "created_at": "2026-05-31T00:00:00"}
+    baseline = [old_fail, recent_fail]
+    current = []  # 現側ウィンドウには何も無い（truncation 想定）
+    r = build_eval_gate_result(
+        baseline, current, window_start="2026-03-01T00:00:00"
+    )
+    # 古い方は out_of_window（improvements に入れない）
+    assert [f["capture_key"] for f in r["out_of_window"]] == ["ck-old"]
+    # window 内の recent は removed → improvements
+    assert [f["capture_key"] for f in r["improvements"]] == ["ck-recent"]
+
+
 def test_load_baseline_fixtures(tmp_path):
     import json
 
