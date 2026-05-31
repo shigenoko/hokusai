@@ -294,10 +294,12 @@ def test_execute_operation_runs_read_only_handler():
 
 def test_execute_operation_unknown_raises():
     reg = build_default_registry()
+    # store を渡さず、database_path を持たない config を渡す。lookup guard が
+    # store 解決より前なら DB に一切触れず例外になる（後なら config.database_path
+    # への AttributeError になり、この差で「無効 op では DB を触らない」契約を
+    # 回帰防止できる。PR #164 Copilot Round 1）。
     with pytest.raises(UnknownOperationError) as ei:
-        execute_operation(
-            reg, "no.such.op", {}, store=_FakeStore(), config=_FakeConfig()
-        )
+        execute_operation(reg, "no.such.op", {}, config=object())
     assert ei.value.name == "no.such.op"
 
 
@@ -310,10 +312,10 @@ def test_execute_operation_scope_violation_raises():
             handler=lambda params, *, store, config: {},
         )
     )
+    # 同上: store 無し・database_path 無し config で、scope guard が store 解決
+    # より前であること（scope 違反でも DB を触らない）を担保する。
     with pytest.raises(ScopeViolationError) as ei:
-        execute_operation(
-            reg, "danger.do", {}, store=_FakeStore(), config=_FakeConfig()
-        )
+        execute_operation(reg, "danger.do", {}, config=object())
     assert ei.value.scope == MUTATING
 
 
