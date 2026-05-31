@@ -24,10 +24,6 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# 行数カウント用の十分大きな limit（list_* の取得上限を超える DB でも正確に
-# unique key を数えるため。count_* は SQL COUNT を使うので影響しない）。
-_COUNT_LIMIT = 1_000_000
-
 
 def backfill_workflow(
     store: Any, workflow_id: str, state: dict[str, Any]
@@ -55,24 +51,26 @@ def backfill_workflow(
         edge_to_replace_dict,
     )
 
-    ri_before = store.count_review_issues()
-    wi_before = store.count_work_items()
+    # 件数は **この workflow** の row 増分に絞る（count_* の workflow_id
+    # フィルタを使う。全テーブル差分だと payload に別 workflow_id が混入した
+    # 場合や並列 backfill で誤値になる。PR #159 Copilot Round 1）。
+    ri_before = store.count_review_issues(workflow_id=workflow_id)
+    wi_before = store.count_work_items(workflow_id=workflow_id)
     persist_review_issue_payloads(
         store, state.get("pending_review_issues") or []
     )
     persist_work_item_payloads(
         store, state.get("pending_work_items") or []
     )
-    ri_added = store.count_review_issues() - ri_before
-    wi_added = store.count_work_items() - wi_before
+    ri_added = store.count_review_issues(workflow_id=workflow_id) - ri_before
+    wi_added = store.count_work_items(workflow_id=workflow_id) - wi_before
 
+    # edge 構築は全 row 必要なので limit=None（全件、truncation 回避）。
     edges = collect_all_workflow_edges(
         workflow_id, state,
-        work_items=store.list_work_items(
-            workflow_id=workflow_id, limit=_COUNT_LIMIT
-        ),
+        work_items=store.list_work_items(workflow_id=workflow_id, limit=None),
         review_issues=store.list_review_issues(
-            workflow_id=workflow_id, limit=_COUNT_LIMIT
+            workflow_id=workflow_id, limit=None
         ),
     )
     store.replace_workgraph_edges_for_workflow(
@@ -126,21 +124,22 @@ def preview_workflow(
     persist_work_item_payloads(
         collector, state.get("pending_work_items") or []
     )
+    # 既存 key は **この workflow** 分で十分（dedupe_key は workflow_id を
+    # 内包するので別 workflow と衝突しない）。limit=None で全件取得し
+    # silent truncation を避ける（PR #159 Copilot Round 1）。
     existing_ri = {
         r["dedupe_key"]
-        for r in store.list_review_issues(limit=_COUNT_LIMIT)
+        for r in store.list_review_issues(workflow_id=workflow_id, limit=None)
     }
     existing_wi = {
         w["dedupe_key"]
-        for w in store.list_work_items(limit=_COUNT_LIMIT)
+        for w in store.list_work_items(workflow_id=workflow_id, limit=None)
     }
     edges = collect_all_workflow_edges(
         workflow_id, state,
-        work_items=store.list_work_items(
-            workflow_id=workflow_id, limit=_COUNT_LIMIT
-        ),
+        work_items=store.list_work_items(workflow_id=workflow_id, limit=None),
         review_issues=store.list_review_issues(
-            workflow_id=workflow_id, limit=_COUNT_LIMIT
+            workflow_id=workflow_id, limit=None
         ),
     )
     return {

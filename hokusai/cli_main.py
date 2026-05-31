@@ -2121,8 +2121,12 @@ def _handle_graph(args, config) -> int:
         )
         edges = collect_all_workflow_edges(
             workflow_id, state,
-            work_items=store.list_work_items(workflow_id=workflow_id),
-            review_issues=store.list_review_issues(workflow_id=workflow_id),
+            # limit=None で全 row（has_work_item / has_review_issue edge を
+            # default 200 で取りこぼさない。PR #159 Copilot Round 1）。
+            work_items=store.list_work_items(workflow_id=workflow_id, limit=None),
+            review_issues=store.list_review_issues(
+                workflow_id=workflow_id, limit=None
+            ),
         )
         # --dry-run 時は SQLite を一切 mutate せず preview だけ出す
         # (他経路の dry-run 規約と整合。例: prime_index backfill も dry-run で

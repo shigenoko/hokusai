@@ -2050,10 +2050,15 @@ class SQLiteStore:
         *,
         workflow_id: str | None = None,
         status: str | None = None,
-        limit: int = 200,
+        limit: int | None = 200,
     ) -> list[dict[str, Any]]:
-        """`review_issues` をフィルタして返す（最新 updated_at 順）。"""
-        if limit < 1:
+        """`review_issues` をフィルタして返す（最新 updated_at 順）。
+
+        `limit=None` で **全件**（LIMIT 句なし）。backfill のように全 row を
+        正確に走査したい用途では None を渡す（hard cap による silent
+        truncation を避ける。PR #159 Copilot Round 1）。
+        """
+        if limit is not None and limit < 1:
             raise ValueError("limit は 1 以上を指定してください")
         clauses: list[str] = []
         params: list[Any] = []
@@ -2062,14 +2067,17 @@ class SQLiteStore:
                 clauses.append(f"{col} = ?")
                 params.append(val)
         where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
-        params.append(limit)
+        limit_sql = ""
+        if limit is not None:
+            limit_sql = " LIMIT ?"
+            params.append(limit)
         keys = ("dedupe_key", "workflow_id", "source", "rule", "file",
                 "message", "repository", "severity", "status",
                 "created_at", "updated_at")
         with self._connect() as conn:
             rows = conn.execute(
                 f"SELECT {', '.join(keys)} FROM review_issues {where} "
-                f"ORDER BY updated_at DESC LIMIT ?",
+                f"ORDER BY updated_at DESC{limit_sql}",
                 params,
             ).fetchall()
         return [dict(zip(keys, row)) for row in rows]
@@ -2194,22 +2202,29 @@ class SQLiteStore:
             conn.commit()
 
     def list_work_items(
-        self, *, workflow_id: str | None = None, limit: int = 200
+        self, *, workflow_id: str | None = None, limit: int | None = 200
     ) -> list[dict[str, Any]]:
-        """`work_items` をフィルタして返す（最新 updated_at 順）。"""
-        if limit < 1:
+        """`work_items` をフィルタして返す（最新 updated_at 順）。
+
+        `limit=None` で **全件**（LIMIT 句なし。silent truncation 回避。
+        PR #159 Copilot Round 1）。
+        """
+        if limit is not None and limit < 1:
             raise ValueError("limit は 1 以上を指定してください")
         where = "WHERE workflow_id = ?" if workflow_id is not None else ""
         params: list[Any] = []
         if workflow_id is not None:
             params.append(workflow_id)
-        params.append(limit)
+        limit_sql = ""
+        if limit is not None:
+            limit_sql = " LIMIT ?"
+            params.append(limit)
         keys = ("dedupe_key", "workflow_id", "title", "phase", "status",
                 "description", "created_at", "updated_at")
         with self._connect() as conn:
             rows = conn.execute(
                 f"SELECT {', '.join(keys)} FROM work_items {where} "
-                f"ORDER BY updated_at DESC LIMIT ?",
+                f"ORDER BY updated_at DESC{limit_sql}",
                 params,
             ).fetchall()
         return [dict(zip(keys, row)) for row in rows]

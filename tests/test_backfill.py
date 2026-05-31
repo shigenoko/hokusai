@@ -112,6 +112,32 @@ def test_backfill_counts_unique_rows_not_payloads(store):
     assert counts2["work_items"] == 1  # 3 payload → 1 unique
 
 
+def test_list_limit_none_returns_all_rows(store):
+    """limit=None で LIMIT 句なしの全件取得（hard cap 回避、PR #159 Round 1）。"""
+    for i in range(250):  # default limit(200) を超える件数
+        store.upsert_work_item(dedupe_key=f"d{i}", workflow_id="wf-1",
+                               title=f"t{i}", phase=4)
+    assert len(store.list_work_items(workflow_id="wf-1")) == 200  # default cap
+    assert len(store.list_work_items(workflow_id="wf-1", limit=None)) == 250
+
+
+def test_count_scoped_by_workflow(store):
+    """backfill の件数は workflow_id で絞られ、他 workflow の row を含まない
+    (PR #159 Copilot Round 1)。"""
+    # 別 workflow に既存 row があっても、対象 workflow の増分のみ数える
+    store.upsert_review_issue(dedupe_key="other", workflow_id="wf-other",
+                              source="x", message="m", status="open")
+    state = {
+        "workflow_id": "wf-1",
+        "pending_review_issues": [
+            {"dedupe_key": "k1", "workflow_id": "wf-1", "source": "x",
+             "message": "m"},
+        ],
+    }
+    counts = backfill_workflow(store, "wf-1", state)
+    assert counts["review_issues"] == 1  # wf-other は数えない
+
+
 def test_backfill_idempotent_rerun_adds_zero(store):
     """冪等な再実行は実 row 増分 0 を返す（§12 件数=増分の意味）。"""
     state = _state_with_pending()
