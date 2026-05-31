@@ -41,6 +41,21 @@ class _FakeStore:
     def list_active_workflows(self):
         return self._workflows
 
+    # 第2スライス (read-only operation 拡充) 用の薄いダブル。
+    def get_workflow(self, workflow_id):
+        return {"workflow_id": workflow_id, "current_phase": 5}
+
+    def list_open_review_issues(self, *, workflow_id=None, limit=50):
+        self.last_call = {"workflow_id": workflow_id, "limit": limit}
+        return [{"dedupe_key": "ri-1", "status": "open"}]
+
+    def list_open_work_items(self, *, workflow_id=None, limit=50):
+        self.last_call = {"workflow_id": workflow_id, "limit": limit}
+        return [{"dedupe_key": "wi-1", "status": "in_progress"}]
+
+    def audit_summary(self, *, workflow_id=None):
+        return {"total": 3, "by_action": {"x": 3}, "by_status": {"log": 3}}
+
 
 class _FakeConfig:
     """llm_gateway.enabled だけ持つ config ダブル。"""
@@ -166,6 +181,186 @@ def test_op_runtime_health_delegates_to_compute(monkeypatch):
     assert result == {"ran": True, "gaps": []}
     assert captured["wf"] == "wf-9"
     assert captured["llm"] is False
+
+
+# --- 第2スライス: read-only operation 拡充 (registry / handler) ----------
+
+
+def test_build_default_registry_seeds_expanded_ops():
+    """拡充した read-only operation が登録され、全て read-only である。"""
+    reg = build_default_registry()
+    names = set(reg.names())
+    assert {
+        "workflow.status",
+        "review_issues.list_open",
+        "workgraph.list_open_items",
+        "llm_gateway.audit_summary",
+    } <= names
+    assert all(op.is_read_only for op in reg.list())
+
+
+def test_op_workflow_status_requires_workflow_id():
+    reg = build_default_registry()
+    op = reg.get("workflow.status")
+    with pytest.raises(ValueError, match="workflow_id は必須"):
+        op.handler({}, store=_FakeStore(), config=_FakeConfig())
+
+
+def test_op_workflow_status_returns_workflow():
+    reg = build_default_registry()
+    op = reg.get("workflow.status")
+    result = op.handler(
+        {"workflow_id": "wf-7"}, store=_FakeStore(), config=_FakeConfig()
+    )
+    assert result == {"workflow": {"workflow_id": "wf-7", "current_phase": 5}}
+
+
+def test_op_review_issues_list_open_passes_filters():
+    reg = build_default_registry()
+    op = reg.get("review_issues.list_open")
+    store = _FakeStore()
+    result = op.handler(
+        {"workflow_id": "wf-1", "limit": "10"}, store=store, config=_FakeConfig()
+    )
+    assert result == {"review_issues": [{"dedupe_key": "ri-1", "status": "open"}]}
+    # limit は str → int に正規化して store へ渡る
+    assert store.last_call == {"workflow_id": "wf-1", "limit": 10}
+
+
+def test_op_workgraph_list_open_items_default_limit():
+    reg = build_default_registry()
+    op = reg.get("workgraph.list_open_items")
+    store = _FakeStore()
+    op.handler({}, store=store, config=_FakeConfig())
+    # limit 未指定なら 50、workflow_id 未指定なら None
+    assert store.last_call == {"workflow_id": None, "limit": 50}
+
+
+def test_op_list_open_rejects_bad_limit():
+    reg = build_default_registry()
+    op = reg.get("review_issues.list_open")
+    with pytest.raises(ValueError, match="limit"):
+        op.handler({"limit": "0"}, store=_FakeStore(), config=_FakeConfig())
+    with pytest.raises(ValueError, match="limit"):
+        op.handler({"limit": "abc"}, store=_FakeStore(), config=_FakeConfig())
+
+
+def test_op_audit_summary_returns_aggregate():
+    reg = build_default_registry()
+    op = reg.get("llm_gateway.audit_summary")
+    result = op.handler({}, store=_FakeStore(), config=_FakeConfig())
+    assert result == {
+        "total": 3, "by_action": {"x": 3}, "by_status": {"log": 3}
+    }
+
+
+def test_handle_operations_run_handler_value_error_to_stderr(capsys, monkeypatch):
+    """handler の入力検証エラー (必須 param 欠落) は stderr + exit 1・stdout 空。"""
+    import hokusai.operations as operations_mod
+    from hokusai.cli_main import _handle_operations
+
+    monkeypatch.setattr(
+        operations_mod, "ReadOnlyStore", lambda *a, **k: _FakeStore()
+    )
+
+    class _Cfg(_FakeConfig):
+        database_path = ":memory:"
+
+    rc = _handle_operations(
+        _ns(operations_subcommand="run", name="workflow.status", params=None),
+        _Cfg(),
+    )
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert captured.out == ""
+    assert "workflow_id" in captured.err
+
+
+# --- 第2スライス: ReadOnlyStore の新 SELECT メソッド (実 DB) --------------
+
+
+def _seed_readonly_db(tmp_path):
+    """SQLiteStore で review_issues / work_items / workflows / audit を populate。"""
+    from hokusai.persistence.sqlite_store import SQLiteStore
+
+    db = tmp_path / "wf.db"
+    s = SQLiteStore(db)
+    s.save_workflow("wf-1", {
+        "task_url": "u", "task_title": "t", "branch_name": "b",
+        "current_phase": 5, "profile_name": "p",
+    })
+    # review issues: 未解決 2 / 解決済 1
+    s.upsert_review_issue(dedupe_key="ri-open", workflow_id="wf-1",
+                          source="final_review", message="m1", status="open")
+    s.upsert_review_issue(dedupe_key="ri-null", workflow_id="wf-1",
+                          source="final_review", message="m2")
+    s.upsert_review_issue(dedupe_key="ri-done", workflow_id="wf-1",
+                          source="final_review", message="m3", status="resolved")
+    # work items: 未完了 1 / 完了 1
+    s.upsert_work_item(dedupe_key="wi-open", workflow_id="wf-1",
+                       title="A", phase=5, status="in_progress")
+    s.upsert_work_item(dedupe_key="wi-done", workflow_id="wf-1",
+                       title="B", phase=5, status="done")
+    # audit logs
+    s.add_audit_log("wf-1", 2, "llm_gateway_decision", "log", {"a": 1})
+    s.add_audit_log("wf-1", 3, "phase_transition", "ok", {})
+    return db
+
+
+def test_read_only_store_get_workflow(tmp_path):
+    db = _seed_readonly_db(tmp_path)
+    store = ReadOnlyStore(db)
+    wf = store.get_workflow("wf-1")
+    assert wf["workflow_id"] == "wf-1"
+    assert wf["current_phase"] == 5
+    assert wf["profile_name"] == "p"
+    assert store.get_workflow("missing") is None
+
+
+def test_read_only_store_list_open_review_issues(tmp_path):
+    db = _seed_readonly_db(tmp_path)
+    store = ReadOnlyStore(db)
+    keys = {r["dedupe_key"] for r in store.list_open_review_issues()}
+    # status=open と status=NULL は open、resolved は除外
+    assert keys == {"ri-open", "ri-null"}
+
+
+def test_read_only_store_list_open_work_items(tmp_path):
+    db = _seed_readonly_db(tmp_path)
+    store = ReadOnlyStore(db)
+    keys = {w["dedupe_key"] for w in store.list_open_work_items()}
+    assert keys == {"wi-open"}  # done は除外
+
+
+def test_read_only_store_audit_summary(tmp_path):
+    db = _seed_readonly_db(tmp_path)
+    store = ReadOnlyStore(db)
+    summary = store.audit_summary()
+    assert summary["total"] == 2
+    assert summary["by_action"] == {
+        "llm_gateway_decision": 1, "phase_transition": 1
+    }
+    assert summary["by_status"] == {"log": 1, "ok": 1}
+
+
+def test_read_only_store_open_lists_reject_bad_limit(tmp_path):
+    db = _seed_readonly_db(tmp_path)
+    store = ReadOnlyStore(db)
+    with pytest.raises(ValueError, match="limit"):
+        store.list_open_review_issues(limit=0)
+    with pytest.raises(ValueError, match="limit"):
+        store.list_open_work_items(limit=0)
+
+
+def test_read_only_store_new_methods_safe_on_missing_db(tmp_path):
+    """DB 不在でも新メソッドは安全側の既定値を返す (read-only 契約)。"""
+    store = ReadOnlyStore(tmp_path / "nope.db")
+    assert store.get_workflow("wf-x") is None
+    assert store.list_open_review_issues() == []
+    assert store.list_open_work_items() == []
+    assert store.audit_summary() == {
+        "total": 0, "by_action": {}, "by_status": {}
+    }
 
 
 # --- --param パーサ ------------------------------------------------------

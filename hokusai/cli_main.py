@@ -2382,7 +2382,13 @@ def _handle_operations(args, config) -> int:
         from .operations import ReadOnlyStore
 
         store = ReadOnlyStore(config.database_path)
-        result = op.handler(params, store=store, config=config)
+        try:
+            result = op.handler(params, store=store, config=config)
+        except ValueError as e:
+            # handler の入力検証エラー (必須 param 欠落 / 不正 limit 等) は
+            # stderr + exit 1 にし、stdout は JSON 専用のまま保つ。
+            print(f"✗ {e}", file=sys.stderr)
+            return 1
         print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
         return 0
 
