@@ -134,3 +134,34 @@ def persist_work_item_payloads(
         except Exception as e:  # best-effort
             logger.debug(f"work_item のローカル永続化を抑制: {e}")
     return persisted
+
+
+def persist_verification_captures(
+    store: Any, workflow_id: str | None, verification_errors: list[dict[str, Any]]
+) -> int:
+    """Phase 6 verification 失敗を eval_captures へ best-effort 永続化する。
+
+    `build_verification_captures` で capture dict を作り `record_eval_capture`
+    へ流す。1 件の失敗が drain 本体を止めない（Step 4 第2スライス）。
+
+    workflow_id が無い場合は永続化しない（capture_key が workflow 間で衝突し得る
+    + workflow GC の cascade-delete 対象外になり孤児レコードが残るため。
+    PR #152 Copilot Round 1）。
+    """
+    from .eval_capture import build_verification_captures
+
+    if not workflow_id:
+        return 0
+    persisted = 0
+    try:
+        captures = build_verification_captures(workflow_id, verification_errors)
+    except Exception as e:
+        logger.debug(f"verification capture の構築を抑制: {e}")
+        return 0
+    for capture in captures:
+        try:
+            store.record_eval_capture(**capture)
+            persisted += 1
+        except Exception as e:  # best-effort
+            logger.debug(f"eval_capture の永続化を抑制: {e}")
+    return persisted

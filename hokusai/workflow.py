@@ -264,8 +264,19 @@ class WorkflowRunner:
             # clear 前にローカル SQLite へ durable 永続化する (Step 5 第3スライス)。
             # Notion 配線/dispatch の成否に関わらず、recurring 検出等の土台として
             # review_issues table に残す。best-effort で drain 本体を止めない。
-            from .local_persistence import persist_review_issue_payloads
+            from .local_persistence import (
+                persist_review_issue_payloads,
+                persist_verification_captures,
+            )
             persist_review_issue_payloads(self.store, pending)
+            # Phase 6 verification 失敗を eval_captures へ明示 capture する
+            # (Step 4 第2スライス)。state の verification_errors を退行検知用の
+            # fixture として残す。best-effort で drain 本体を止めない。
+            persist_verification_captures(
+                self.store,
+                state_values.get("workflow_id"),
+                state_values.get("verification_errors") or [],
+            )
             operator = state_values.get("operator")
             if not operator and self.notion_dispatcher.is_configured():
                 operator = resolve_operator_name()

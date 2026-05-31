@@ -508,6 +508,45 @@ class SQLiteStore:
                 "ON work_items(workflow_id)"
             )
 
+            # Step 4 第2スライス: eval fixture の明示 capture（phase 入出力 /
+            # verification 結果）を保存する。prompt/出力本文は持たず hash/length/
+            # metadata のみ（LLM Gateway と同方針、secret/PII を fixture に
+            # こぼさない）。capture_key（workflow_id + phase + kind + label +
+            # output_hash の決定的 hash）を主キーにし、retry での同一観測を冪等
+            # upsert で 1 行にまとめる（出力が変われば別 fixture = 失敗→修正の
+            # 履歴が別行で残る）。
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS eval_captures (
+                    capture_key TEXT NOT NULL PRIMARY KEY,
+                    workflow_id TEXT NOT NULL,
+                    phase INTEGER,
+                    kind TEXT,
+                    label TEXT,
+                    input_hash TEXT,
+                    input_length INTEGER,
+                    output_hash TEXT,
+                    output_length INTEGER,
+                    status TEXT,
+                    metadata_json TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+            """)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_eval_captures_workflow "
+                "ON eval_captures(workflow_id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_eval_captures_kind "
+                "ON eval_captures(kind)"
+            )
+            # list_eval_captures は phase フィルタも持つため index を張る
+            # (件数増で full scan にならないように。PR #152 Copilot Round 2)。
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_eval_captures_phase "
+                "ON eval_captures(phase)"
+            )
+
             conn.commit()
 
     def save_workflow(self, workflow_id: str, state: dict[str, Any]) -> None:
@@ -2141,6 +2180,120 @@ class SQLiteStore:
             ).fetchall()
         return [dict(zip(keys, row)) for row in rows]
 
+    # === Eval Captures (Step 4 第2スライス) ===
+
+    def record_eval_capture(
+        self,
+        *,
+        capture_key: str,
+        workflow_id: str | None = None,
+        phase: int | None = None,
+        kind: str | None = None,
+        label: str | None = None,
+        input_hash: str | None = None,
+        input_length: int | None = None,
+        output_hash: str | None = None,
+        output_length: int | None = None,
+        status: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """`eval_captures` に 1 件を冪等 upsert する（capture_key 主キー）。
+
+        retry で同一観測 (同 capture_key) が来ても重複行を作らず updated_at を
+        最新化する（created_at は初回値を維持）。本文は保存せず hash/length のみ。
+        """
+        # capture_key は workflow_id を内包する設計のため、workflow_id 無しの
+        # 保存は (1) workflow 間 capture_key 衝突、(2) workflow GC の cascade
+        # 対象外＝孤児レコード を招く。Store API として弾く (PR #152 Copilot
+        # Round 3。呼び出し側 guard とは別に API レベルでも防ぐ)。
+        if not workflow_id:
+            raise ValueError("record_eval_capture には workflow_id が必須です")
+        now = datetime.now().isoformat()
+        metadata_json = (
+            json.dumps(metadata, ensure_ascii=False, default=str)
+            if metadata is not None
+            else None
+        )
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO eval_captures (
+                    capture_key, workflow_id, phase, kind, label,
+                    input_hash, input_length, output_hash, output_length,
+                    status, metadata_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(capture_key) DO UPDATE SET
+                    workflow_id = COALESCE(excluded.workflow_id,
+                                           eval_captures.workflow_id),
+                    phase = COALESCE(excluded.phase, eval_captures.phase),
+                    kind = COALESCE(excluded.kind, eval_captures.kind),
+                    label = COALESCE(excluded.label, eval_captures.label),
+                    input_hash = COALESCE(excluded.input_hash,
+                                          eval_captures.input_hash),
+                    input_length = COALESCE(excluded.input_length,
+                                            eval_captures.input_length),
+                    output_hash = COALESCE(excluded.output_hash,
+                                           eval_captures.output_hash),
+                    output_length = COALESCE(excluded.output_length,
+                                             eval_captures.output_length),
+                    status = COALESCE(excluded.status, eval_captures.status),
+                    metadata_json = COALESCE(excluded.metadata_json,
+                                             eval_captures.metadata_json),
+                    updated_at = excluded.updated_at
+                """,
+                (capture_key, workflow_id, phase, kind, label,
+                 input_hash, input_length, output_hash, output_length,
+                 status, metadata_json, now, now),
+            )
+            conn.commit()
+
+    def list_eval_captures(
+        self,
+        *,
+        workflow_id: str | None = None,
+        kind: str | None = None,
+        phase: int | None = None,
+        since: str | None = None,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        """`eval_captures` をフィルタして返す（最新 `created_at` 順）。
+
+        並びは `created_at DESC`。CLI の `eval export` は audit fixture と合流後に
+        `created_at` で並べて `--limit` を適用するため、ここも `created_at` 基準に
+        揃える（`updated_at` 順だと top-N の取りこぼしで --limit の意味が崩れる。
+        PR #152 Copilot Round 3）。
+        """
+        if limit < 1:
+            raise ValueError("limit は 1 以上を指定してください")
+        clauses: list[str] = []
+        params: list[Any] = []
+        for col, val in (("workflow_id", workflow_id), ("kind", kind),
+                         ("phase", phase)):
+            if val is not None:
+                clauses.append(f"{col} = ?")
+                params.append(val)
+        if since is not None:
+            clauses.append("created_at >= ?")
+            params.append(since)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        params.append(limit)
+        keys = ("capture_key", "workflow_id", "phase", "kind", "label",
+                "input_hash", "input_length", "output_hash", "output_length",
+                "status", "metadata_json", "created_at", "updated_at")
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"SELECT {', '.join(keys)} FROM eval_captures {where} "
+                f"ORDER BY created_at DESC LIMIT ?",
+                params,
+            ).fetchall()
+        out = []
+        for row in rows:
+            d = dict(zip(keys, row))
+            mj = d.pop("metadata_json")
+            d["metadata"] = json.loads(mj) if mj else None
+            out.append(d)
+        return out
+
     # workflow_id をキーに持つ依存テーブル（M2.5 / #100 cascade-delete 用）。
     # workflows テーブル自体を含めず、cascade 対象の dependent table のみ列挙。
     # レガシー DB でテーブル不在の場合は skip するため try/except で個別に処理。
@@ -2159,6 +2312,7 @@ class SQLiteStore:
         "workgraph_edges",
         "review_issues",
         "work_items",
+        "eval_captures",
     )
 
     def delete_old_completed_workflows(

@@ -81,3 +81,102 @@ def audit_rows_to_fixtures(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if fixture is not None:
             out.append(fixture)
     return out
+
+
+def build_capture_key(
+    *,
+    workflow_id: str | None,
+    phase: int | None,
+    kind: str,
+    label: str,
+    output_hash: str,
+) -> str:
+    """eval capture の決定的 dedupe key を生成する（sha256 16 桁 hex）。
+
+    同一 (workflow / phase / kind / label / output) の観測を 1 行にまとめ、
+    出力が変われば別 key = 別 fixture（失敗→修正の履歴が別行で残る）。
+    """
+    parts = "\x1f".join((
+        workflow_id or "",
+        "" if phase is None else str(phase),
+        kind or "",
+        label or "",
+        output_hash or "",
+    ))
+    return hashlib.sha256(parts.encode("utf-8")).hexdigest()[:16]
+
+
+def build_verification_captures(
+    workflow_id: str | None,
+    verification_errors: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Phase 6 の `verification_errors` を eval capture dict 群へ変換する。
+
+    各失敗エントリ（`repository` / `command` / `error_output` /
+    `full_output_hash`）から 1 capture を作る。入力＝command、出力＝error_output
+    の digest（本文非保存、`full_output_hash` があれば優先）。status="fail"。
+    `record_eval_capture(**capture)` にそのまま渡せる dict を返す。
+
+    注意: `VerificationErrorEntry.command` は実コマンド文字列ではなく
+    **コマンド種別**（build / test / lint）である（hokusai/state.py 参照）。
+    label / input digest もこの種別文字列に基づく。
+    """
+    captures: list[dict[str, Any]] = []
+    for entry in verification_errors or []:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("success"):
+            continue
+        repo = entry.get("repository") or ""
+        command = entry.get("command") or ""
+        error_output = entry.get("error_output") or ""
+        label = f"{repo}:{command}" if repo else str(command)
+        # output digest は full_output_hash（truncate 前の全文 hash）を優先。
+        # その場合 length は手元に全文が無く不明なので None にする（hash 対象 =
+        # 全文、length = truncate 後 という不整合を避ける。PR #152 Copilot
+        # Round 2）。full_output_hash が無ければ error_output 自身から hash +
+        # length を取り、両者を整合させる。
+        full_hash = entry.get("full_output_hash")
+        if full_hash:
+            output_hash = full_hash
+            output_length = None
+        else:
+            out_digest = compute_content_digest(error_output)
+            output_hash = out_digest["hash"]
+            output_length = out_digest["length"]
+        in_digest = compute_content_digest(command)
+        captures.append({
+            "capture_key": build_capture_key(
+                workflow_id=workflow_id, phase=6, kind="verification",
+                label=label, output_hash=output_hash,
+            ),
+            "workflow_id": workflow_id,
+            "phase": 6,
+            "kind": "verification",
+            "label": label,
+            "input_hash": in_digest["hash"],
+            "input_length": in_digest["length"],
+            "output_hash": output_hash,
+            "output_length": output_length,
+            "status": "fail",
+            "metadata": {"repository": repo, "command": command},
+        })
+    return captures
+
+
+def eval_capture_to_fixture(row: dict[str, Any]) -> dict[str, Any]:
+    """`list_eval_captures` の 1 行を export 用 fixture 形へ整形する。"""
+    return {
+        "kind": row.get("kind"),
+        "capture_key": row.get("capture_key"),
+        "workflow_id": row.get("workflow_id"),
+        "phase": row.get("phase"),
+        "label": row.get("label"),
+        "input_hash": row.get("input_hash"),
+        "input_length": row.get("input_length"),
+        "output_hash": row.get("output_hash"),
+        "output_length": row.get("output_length"),
+        "status": row.get("status"),
+        "metadata": row.get("metadata"),
+        "created_at": row.get("created_at"),
+    }

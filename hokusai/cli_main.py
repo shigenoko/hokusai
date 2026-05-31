@@ -1839,14 +1839,27 @@ def _handle_eval(args, config) -> int:
         print(f"✗ {e}", file=sys.stderr)
         return 1
 
+    from .eval_capture import eval_capture_to_fixture
+
     store = SQLiteStore(config.database_path)
+    workflow_id = getattr(args, "workflow_id", None)
+    limit = getattr(args, "limit", 1000)
+    # LLM Gateway audit 由来 (kind=llm_call) と 明示 eval_captures
+    # (kind=verification 等) を合流して 1 つの fixture 集合にする。
     rows = store.list_audit_logs(
-        action=LLM_DECISION_ACTION,
-        workflow_id=getattr(args, "workflow_id", None),
-        since=since,
-        limit=getattr(args, "limit", 1000),
+        action=LLM_DECISION_ACTION, workflow_id=workflow_id,
+        since=since, limit=limit,
     )
     fixtures = audit_rows_to_fixtures(rows)
+    capture_rows = store.list_eval_captures(
+        workflow_id=workflow_id, since=since, limit=limit,
+    )
+    fixtures.extend(eval_capture_to_fixture(r) for r in capture_rows)
+    # 個別 source ごとに limit を掛けると合流後に最大 2*limit になり --limit の
+    # 意味とズレるため、合流後に created_at 降順で並べてから全体で limit を
+    # 適用する（PR #152 Copilot Round 1）。
+    fixtures.sort(key=lambda f: f.get("created_at") or "", reverse=True)
+    fixtures = fixtures[:limit]
 
     if subcommand == "export":
         output = getattr(args, "output", "json")
@@ -1865,9 +1878,10 @@ def _handle_eval(args, config) -> int:
     if getattr(args, "output", "text") == "json":
         print(json.dumps(summary, ensure_ascii=False, indent=2, default=str))
     else:
-        print(f"eval capture: {summary['total']} 件（LLM 呼び出し）")
+        print(f"eval capture: {summary['total']} 件")
         for dim, label in (
-            ("by_phase", "phase"), ("by_purpose", "purpose"),
+            ("by_kind", "kind"), ("by_phase", "phase"),
+            ("by_purpose", "purpose"), ("by_status", "status"),
             ("by_decision", "decision"),
         ):
             counts = summary[dim]
@@ -1879,10 +1893,12 @@ def _handle_eval(args, config) -> int:
 
 
 def _summarize_eval_fixtures(fixtures: list) -> dict:
-    """eval fixture を phase / purpose / decision 別に集計する。"""
+    """eval fixture を kind / phase / purpose / status / decision 別に集計する。"""
     def _tally(key):
         out: dict = {}
         for f in fixtures:
+            if key not in f:
+                continue  # その dimension を持たない fixture は除外
             k = f.get(key)
             k = "(なし)" if k is None else str(k)
             out[k] = out.get(k, 0) + 1
@@ -1890,8 +1906,10 @@ def _summarize_eval_fixtures(fixtures: list) -> dict:
 
     return {
         "total": len(fixtures),
+        "by_kind": _tally("kind"),
         "by_phase": _tally("phase"),
         "by_purpose": _tally("purpose"),
+        "by_status": _tally("status"),
         "by_decision": _tally("decision"),
     }
 
