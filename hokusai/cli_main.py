@@ -797,6 +797,31 @@ def _build_parser():
         help="出力形式（既定 text）",
     )
 
+    eval_gate_parser = eval_subparsers.add_parser(
+        "gate",
+        help="保存済み baseline fixture と現状を diff して退行を検出（Step 4）",
+        parents=[shared_options],
+    )
+    eval_gate_parser.add_argument(
+        "--baseline", required=True,
+        help="baseline fixture の JSON ファイル（`eval export` の出力）",
+    )
+    eval_gate_parser.add_argument(
+        "--workflow-id", default=None, help="現側 fixture を workflow_id で絞る"
+    )
+    eval_gate_parser.add_argument(
+        "--limit", type=_positive_int, default=10000,
+        help="現側 fixture の取得上限（>=1、既定 10000）",
+    )
+    eval_gate_parser.add_argument(
+        "--fail-on-regression", action="store_true",
+        help="新たな失敗 (regression) があれば exit 1（CI gate 用）",
+    )
+    eval_gate_parser.add_argument(
+        "--output", choices=("text", "json"), default="text",
+        help="出力形式（既定 text）",
+    )
+
     return parser, profile_parser, connect_parser
 
 
@@ -1811,6 +1836,25 @@ def _parse_since(value: str | None) -> str | None:
         raise ValueError(f"--since の値が大きすぎます: {value!r}") from e
 
 
+def _load_baseline_fixtures(path: str) -> list:
+    """baseline fixture JSON を読み込んで fixture list を返す。
+
+    `eval export` の出力形式 `{"fixtures": [...]}` と、bare list `[...]` の
+    両方を受け付ける。それ以外の形 / 不正 JSON は ValueError。
+    """
+    import json
+
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    if isinstance(data, dict) and isinstance(data.get("fixtures"), list):
+        return data["fixtures"]
+    if isinstance(data, list):
+        return data
+    raise ValueError(
+        "baseline は {\"fixtures\": [...]} か [...] 形式である必要があります"
+    )
+
+
 def _handle_eval(args, config) -> int:
     """`hokusai eval ...` のハンドラ（Step 4 第1スライス）。
 
@@ -1827,10 +1871,11 @@ def _handle_eval(args, config) -> int:
     from .persistence import SQLiteStore
 
     subcommand = getattr(args, "eval_subcommand", None)
-    if subcommand not in ("export", "list"):
-        print("使い方: hokusai eval {export|list} ...", file=sys.stderr)
+    if subcommand not in ("export", "list", "gate"):
+        print("使い方: hokusai eval {export|list|gate} ...", file=sys.stderr)
         print("  export [--since 30d] [--output json|jsonl]", file=sys.stderr)
         print("  list   [--since 30d] 集約サマリ", file=sys.stderr)
+        print("  gate   --baseline <file> 退行検出", file=sys.stderr)
         return 1
 
     try:
@@ -1871,6 +1916,33 @@ def _handle_eval(args, config) -> int:
                 {"fixtures": fixtures}, ensure_ascii=False, indent=2,
                 default=str,
             ))
+        return 0
+
+    if subcommand == "gate":
+        from .eval_capture import build_eval_gate_result
+
+        try:
+            baseline = _load_baseline_fixtures(args.baseline)
+        except (OSError, ValueError) as e:
+            print(f"✗ baseline 読み込み失敗: {e}", file=sys.stderr)
+            return 1
+        result = build_eval_gate_result(baseline, fixtures)
+        if getattr(args, "output", "text") == "json":
+            print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+        else:
+            print(
+                f"eval gate: baseline {result['baseline_count']} 件 / "
+                f"current {result['current_count']} 件"
+            )
+            print(f"  追加 {len(result['added'])} / 削除 "
+                  f"{len(result['removed'])}")
+            print(f"  ⚠ 退行 (regressions): {len(result['regressions'])}")
+            for f in result["regressions"]:
+                print(f"    + [{f.get('kind')}] {f.get('label') or f.get('purpose') or '-'}")
+            print(f"  ✓ 解消 (improvements): {len(result['improvements'])}")
+        # --fail-on-regression 指定時のみ regression で exit 1（CI gate 用）
+        if getattr(args, "fail_on_regression", False) and result["regressions"]:
+            return 1
         return 0
 
     # list: 集約サマリ

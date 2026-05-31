@@ -17,8 +17,10 @@ from hokusai.eval_capture import (
     audit_row_to_fixture,
     audit_rows_to_fixtures,
     build_capture_key,
+    build_eval_gate_result,
     build_verification_captures,
     compute_content_digest,
+    fixture_identity,
 )
 from hokusai.persistence import SQLiteStore
 
@@ -399,6 +401,120 @@ def test_eval_export_limit_applies_after_merge(store, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert rc == 0
     assert len(payload["fixtures"]) == 2  # 4 ではなく limit=2
+
+
+# --- eval gate (Step 4 第3スライス) --------------------------------------
+
+
+def _cap_fixture(capture_key, status="fail", label="Backend:test"):
+    return {"kind": "verification", "capture_key": capture_key,
+            "label": label, "status": status}
+
+
+def test_fixture_identity():
+    assert fixture_identity({"capture_key": "ck1"}) == "capture:ck1"
+    assert fixture_identity({"audit_id": 5}) == "audit:5"
+    # capture_key も audit_id も無い → 合成キー（落ちない）
+    assert fixture_identity({"kind": "x"}).startswith("fx:")
+
+
+def test_build_eval_gate_result_detects_regression_and_improvement():
+    baseline = [_cap_fixture("ck-old-fail"), _cap_fixture("ck-stable")]
+    current = [_cap_fixture("ck-stable"), _cap_fixture("ck-new-fail")]
+    r = build_eval_gate_result(baseline, current)
+    assert r["baseline_count"] == 2
+    assert r["current_count"] == 2
+    # ck-new-fail が added かつ status=fail → regression
+    assert [f["capture_key"] for f in r["regressions"]] == ["ck-new-fail"]
+    # ck-old-fail が removed かつ status=fail → improvement
+    assert [f["capture_key"] for f in r["improvements"]] == ["ck-old-fail"]
+
+
+def test_build_eval_gate_result_no_regression_when_stable():
+    fx = [_cap_fixture("ck1"), _cap_fixture("ck2")]
+    r = build_eval_gate_result(fx, fx)
+    assert r["regressions"] == []
+    assert r["improvements"] == []
+    assert r["added"] == []
+    assert r["removed"] == []
+
+
+def test_load_baseline_fixtures(tmp_path):
+    import json
+
+    from hokusai.cli_main import _load_baseline_fixtures
+
+    # {"fixtures": [...]} 形式
+    p1 = tmp_path / "b1.json"
+    p1.write_text(json.dumps({"fixtures": [{"capture_key": "ck1"}]}))
+    assert _load_baseline_fixtures(str(p1)) == [{"capture_key": "ck1"}]
+    # bare list 形式
+    p2 = tmp_path / "b2.json"
+    p2.write_text(json.dumps([{"capture_key": "ck2"}]))
+    assert _load_baseline_fixtures(str(p2)) == [{"capture_key": "ck2"}]
+    # 不正形式
+    p3 = tmp_path / "b3.json"
+    p3.write_text(json.dumps({"bad": 1}))
+    with pytest.raises(ValueError, match="形式である必要"):
+        _load_baseline_fixtures(str(p3))
+
+
+def test_handle_eval_gate_fail_on_regression(store, tmp_path, capsys):
+    import argparse
+    import json
+
+    from hokusai.cli_main import _handle_eval
+
+    # baseline は空、現状に verification fail が 1 件 → regression
+    baseline = tmp_path / "base.json"
+    baseline.write_text(json.dumps({"fixtures": []}))
+    store.record_eval_capture(
+        capture_key="ck1", workflow_id="wf-1", phase=6, kind="verification",
+        label="Backend:test", output_hash="oh", status="fail",
+    )
+
+    class _Cfg:
+        database_path = store.db_path
+
+    # --fail-on-regression あり → exit 1
+    rc = _handle_eval(
+        argparse.Namespace(eval_subcommand="gate", baseline=str(baseline),
+                           workflow_id=None, limit=10000,
+                           fail_on_regression=True, output="json"),
+        _Cfg(),
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert len(payload["regressions"]) == 1
+
+    # --fail-on-regression なし → exit 0（報告のみ）
+    rc2 = _handle_eval(
+        argparse.Namespace(eval_subcommand="gate", baseline=str(baseline),
+                           workflow_id=None, limit=10000,
+                           fail_on_regression=False, output="json"),
+        _Cfg(),
+    )
+    capsys.readouterr()
+    assert rc2 == 0
+
+
+def test_handle_eval_gate_missing_baseline(store, capsys):
+    import argparse
+
+    from hokusai.cli_main import _handle_eval
+
+    class _Cfg:
+        database_path = store.db_path
+
+    rc = _handle_eval(
+        argparse.Namespace(eval_subcommand="gate",
+                           baseline="/nonexistent/base.json",
+                           workflow_id=None, limit=10000,
+                           fail_on_regression=False, output="text"),
+        _Cfg(),
+    )
+    assert rc == 1
+    assert "baseline 読み込み失敗" in capsys.readouterr().err
 
 
 def test_eval_export_includes_captures(store, capsys):

@@ -164,6 +164,55 @@ def build_verification_captures(
     return captures
 
 
+def fixture_identity(fixture: dict[str, Any]) -> str:
+    """fixture の安定した同定キーを返す（eval gate の diff 用）。
+
+    - capture（verification 等）は `capture_key`（workflow + phase + label +
+      output_hash を内包）→ 出力が変われば別 identity = add/remove で現れる。
+    - llm_call は `audit_id`。
+    - どちらも無い場合は kind/workflow/phase/input_hash の合成。
+    """
+    ck = fixture.get("capture_key")
+    if ck:
+        return f"capture:{ck}"
+    aid = fixture.get("audit_id")
+    if aid is not None:
+        return f"audit:{aid}"
+    return "fx:" + "\x1f".join(
+        str(fixture.get(k))
+        for k in ("kind", "workflow_id", "phase", "input_hash")
+    )
+
+
+def build_eval_gate_result(
+    baseline: list[dict[str, Any]],
+    current: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """baseline fixture 集合と現 fixture 集合を diff して退行を検出する。
+
+    `fixture_identity` で両者を索引し、現側のみに在る fixture を `added`、
+    baseline 側のみに在るものを `removed` とする。`status="fail"` の
+    `added` を **regressions**（新たな失敗）、`status="fail"` の `removed` を
+    **improvements**（解消された失敗）とする。決定的・I/O なし。
+
+    Returns:
+        {baseline_count, current_count, added, removed, regressions,
+         improvements}
+    """
+    base_by = {fixture_identity(f): f for f in baseline or []}
+    cur_by = {fixture_identity(f): f for f in current or []}
+    added = [cur_by[k] for k in cur_by if k not in base_by]
+    removed = [base_by[k] for k in base_by if k not in cur_by]
+    return {
+        "baseline_count": len(base_by),
+        "current_count": len(cur_by),
+        "added": added,
+        "removed": removed,
+        "regressions": [f for f in added if f.get("status") == "fail"],
+        "improvements": [f for f in removed if f.get("status") == "fail"],
+    }
+
+
 def eval_capture_to_fixture(row: dict[str, Any]) -> dict[str, Any]:
     """`list_eval_captures` の 1 行を export 用 fixture 形へ整形する。"""
     return {

@@ -12,6 +12,10 @@ HOKUSAI のすべての特筆すべき変更をこのファイルに記録する
 
 ## [Unreleased]
 
+### Added
+
+- **Step 4 (Eval Capture) 第 3 スライス: eval gate（退行検出）**: 第 1/第 2 スライスで export / capture した eval fixture を使い、**保存済み baseline と現状を決定的に diff して退行を検出**する。実 LLM を再実行する replay は侵襲的なため、`eval export` で保存した baseline fixture セット（JSON）と現 DB の fixture を比較する非侵襲な gate として実装。`hokusai/eval_capture.py` に純関数 `fixture_identity(fixture)`（capture は `capture_key`、llm_call は `audit_id` で同定。出力が変われば別 identity）+ `build_eval_gate_result(baseline, current)`（`added` / `removed` と、`status="fail"` の added=**regressions**（新たな失敗）/ removed=**improvements**（解消された失敗）を算出）を実装。CLI `hokusai eval gate --baseline <file> [--workflow-id] [--limit] [--fail-on-regression] [--output text|json]` を追加。baseline は `eval export` の `{"fixtures":[...]}` 形式または bare list を受け付け、`--fail-on-regression` 指定時のみ regression があれば exit 1（CI / pre-release gate 用）。決定的・SQLite-backed（live API なし）。回帰防止テスト 6 件追加 (`tests/test_eval_capture.py`: fixture_identity / gate 退行+解消検出 / stable で退行なし / baseline ローダ 2 形式 + 不正 / `eval gate --fail-on-regression` exit / baseline 不在エラー)。これで Step 4 の export → capture → gate が一通り揃った。設計: [docs/roadmap-gbrain-inspirations.md §P1 / Step 4](docs/roadmap-gbrain-inspirations.md)。
+
 ---
 
 ## [0.9.0] - 2026-05-31
