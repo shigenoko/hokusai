@@ -579,6 +579,45 @@ def default_registry() -> OperationRegistry:
     return _DEFAULT_REGISTRY
 
 
+def resolve_read_only_operation(
+    registry: OperationRegistry, name: str
+) -> Operation:
+    """operation を引き、read-only であることを検証して返す共通 guard。
+
+    `execute_operation` の lookup → scope guard 部分を切り出したもの。CLI は
+    `--param` の形式検証より**前**にこの guard を通すことで「未知 / scope 違反
+    を param エラーより先に報告する」従来挙動を保てる（PR #164 Copilot
+    Round 2）。
+
+    - 未知の operation 名 → `UnknownOperationError`
+    - read-only でない operation → `ScopeViolationError`
+    """
+    op = registry.get(name)
+    if op is None:
+        raise UnknownOperationError(name)
+    if not op.is_read_only:
+        raise ScopeViolationError(name, op.scope)
+    return op
+
+
+def invoke_operation(
+    op: Operation,
+    params: dict[str, Any],
+    *,
+    config: Any,
+    store: Any = None,
+) -> dict[str, Any]:
+    """検証済み read-only operation を実行する（store 解決 + handler 呼び出し）。
+
+    `store` 未指定時は read-only 契約を守る `ReadOnlyStore(config.database_path)`
+    を構築する（test 等で明示 store を渡せば優先）。handler の入力検証エラー
+    （`ValueError`）はそのまま伝播する。
+    """
+    if store is None:
+        store = ReadOnlyStore(config.database_path)
+    return op.handler(params, store=store, config=config)
+
+
 def execute_operation(
     registry: OperationRegistry,
     name: str,
@@ -607,12 +646,10 @@ def execute_operation(
     `store` 未指定時は read-only 契約を守る `ReadOnlyStore(config.database_path)`
     を構築する（test 等で明示 store を渡せば優先）。戻り値は JSON 直列化可能な
     dict。
+
+    Dashboard / MCP のように params が既に dict で揃っている one-shot 呼び出し
+    向けの便宜関数。CLI のように guard と param parse の順序を制御したい場合は
+    `resolve_read_only_operation` + `invoke_operation` を個別に使う。
     """
-    op = registry.get(name)
-    if op is None:
-        raise UnknownOperationError(name)
-    if not op.is_read_only:
-        raise ScopeViolationError(name, op.scope)
-    if store is None:
-        store = ReadOnlyStore(config.database_path)
-    return op.handler(params, store=store, config=config)
+    op = resolve_read_only_operation(registry, name)
+    return invoke_operation(op, params, config=config, store=store)

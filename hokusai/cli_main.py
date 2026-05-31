@@ -2438,28 +2438,22 @@ def _handle_operations(args, config) -> int:
 
     if subcommand == "run":
         name = args.name
-        try:
-            params = _parse_operation_params(getattr(args, "params", None))
-        except ValueError as e:
-            print(f"✗ {e}", file=sys.stderr)
-            return 1
-
-        # 実行は共通 sink execute_operation() 経由（lookup → scope guard →
-        # read-only store 解決 → handler の単一経路を CLI / Dashboard / 将来
-        # MCP で共有。Step 3 第3スライス）。store 解決も sink 側が担い、
-        # 副作用なしの ReadOnlyStore を構築する（SQLiteStore は WAL PRAGMA /
-        # CREATE / DB 新規作成の副作用があり read-only 契約に反する。PR #143
-        # Copilot Round 5 指摘）。
+        # 共通 sink（lookup → scope guard → read-only store 解決 → handler の
+        # 単一経路を CLI / Dashboard / 将来 MCP で共有。Step 3 第3スライス）を
+        # guard と実行の 2 段で使う。guard を `--param` 形式検証より前に通すこと
+        # で「未知 / scope 違反を param エラーより先に報告する」従来挙動を保つ
+        # （PR #164 Copilot Round 2）。store 解決も sink 側が担い、副作用なしの
+        # ReadOnlyStore を構築する（SQLiteStore は WAL PRAGMA / CREATE / DB
+        # 新規作成の副作用があり read-only 契約に反する。PR #143 Round 5）。
         from .operations import (
             ScopeViolationError,
             UnknownOperationError,
-            execute_operation,
+            invoke_operation,
+            resolve_read_only_operation,
         )
 
         try:
-            result = execute_operation(
-                registry, name, params, config=config
-            )
+            op = resolve_read_only_operation(registry, name)
         except UnknownOperationError:
             available = ", ".join(registry.names()) or "(なし)"
             print(f"✗ 未知の operation: {name}", file=sys.stderr)
@@ -2473,6 +2467,15 @@ def _handle_operations(args, config) -> int:
                 file=sys.stderr,
             )
             return 1
+
+        try:
+            params = _parse_operation_params(getattr(args, "params", None))
+        except ValueError as e:
+            print(f"✗ {e}", file=sys.stderr)
+            return 1
+
+        try:
+            result = invoke_operation(op, params, config=config)
         except ValueError as e:
             # handler の入力検証エラー (必須 param 欠落 / 不正 limit 等) は
             # stderr + exit 1 にし、stdout は JSON 専用のまま保つ。

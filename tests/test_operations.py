@@ -25,6 +25,8 @@ from hokusai.operations import (
     build_default_registry,
     default_registry,
     execute_operation,
+    invoke_operation,
+    resolve_read_only_operation,
 )
 
 
@@ -327,6 +329,52 @@ def test_execute_operation_propagates_handler_value_error():
             reg, "workflow.status", {},
             store=_FakeStore(), config=_FakeConfig(),
         )
+
+
+def test_resolve_read_only_operation_guards():
+    reg = build_default_registry()
+    # 正常: read-only op を返す
+    op = resolve_read_only_operation(reg, "workflow.list")
+    assert op.name == "workflow.list"
+    # 未知
+    with pytest.raises(UnknownOperationError):
+        resolve_read_only_operation(reg, "no.such")
+    # scope 違反
+    reg2 = OperationRegistry()
+    reg2.register(Operation(
+        name="m.do", summary="", scope=MUTATING,
+        input_schema={"type": "object", "properties": {}, "required": []},
+        handler=lambda params, *, store, config: {},
+    ))
+    with pytest.raises(ScopeViolationError):
+        resolve_read_only_operation(reg2, "m.do")
+
+
+def test_invoke_operation_runs_handler():
+    reg = build_default_registry()
+    op = resolve_read_only_operation(reg, "notion.outbox_status")
+    result = invoke_operation(
+        op, {}, store=_FakeStore(pending=5, errors=2), config=_FakeConfig()
+    )
+    assert result == {"outbox_pending": 5, "outbox_errors": 2}
+
+
+def test_handle_operations_run_unknown_before_param_error(capsys):
+    """未知 operation は --param 形式エラーより先に報告する（順序回帰防止。
+    PR #164 Copilot Round 2）。"""
+    from hokusai.cli_main import _handle_operations
+
+    rc = _handle_operations(
+        _ns(operations_subcommand="run", name="no.such.op",
+            params=["malformed_no_equals"]),
+        _FakeConfig(),
+    )
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert captured.out == ""
+    # param エラー(KEY=VALUE)でなく未知 operation が先に出る
+    assert "未知の operation" in captured.err
+    assert "KEY=VALUE" not in captured.err
 
 
 # --- 第2スライス: ReadOnlyStore の新 SELECT メソッド (実 DB) --------------
