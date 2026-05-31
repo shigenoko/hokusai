@@ -16,6 +16,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from hokusai.eval_capture import (
     audit_row_to_fixture,
     audit_rows_to_fixtures,
+    build_capture_key,
+    build_verification_captures,
     compute_content_digest,
 )
 from hokusai.persistence import SQLiteStore
@@ -224,3 +226,116 @@ def test_parse_since_overflow_is_value_error():
 
     with pytest.raises(ValueError, match="大きすぎます"):
         _parse_since("999999999999d")
+
+
+# --- 明示 capture (Step 4 第2スライス) -----------------------------------
+
+
+def test_build_verification_captures():
+    errors = [
+        {"repository": "Backend", "command": "npm test",
+         "error_output": "boom\nmore", "full_output_hash": "fh1",
+         "success": False},
+        {"command": "ruff", "error_output": "lint fail", "success": False},
+        {"repository": "X", "command": "ok", "success": True},  # 成功は skip
+        "not-a-dict",
+    ]
+    caps = build_verification_captures("wf-1", errors)
+    assert len(caps) == 2
+    assert caps[0]["kind"] == "verification"
+    assert caps[0]["phase"] == 6
+    assert caps[0]["label"] == "Backend:npm test"
+    assert caps[0]["output_hash"] == "fh1"  # full_output_hash 優先
+    assert caps[0]["status"] == "fail"
+    assert caps[1]["label"] == "ruff"  # repository 無し
+
+
+def test_build_capture_key_is_deterministic_and_output_sensitive():
+    base = dict(workflow_id="wf-1", phase=6, kind="verification", label="x")
+    k1 = build_capture_key(**base, output_hash="h1")
+    k2 = build_capture_key(**base, output_hash="h1")
+    k3 = build_capture_key(**base, output_hash="h2")
+    assert k1 == k2          # 決定的
+    assert k1 != k3          # 出力が変われば別 key（失敗→修正で別 fixture）
+
+
+def test_record_and_list_eval_capture(store):
+    store.record_eval_capture(
+        capture_key="ck1", workflow_id="wf-1", phase=6, kind="verification",
+        label="Backend:npm test", input_hash="ih", input_length=8,
+        output_hash="oh", output_length=20, status="fail",
+        metadata={"repository": "Backend"},
+    )
+    rows = store.list_eval_captures()
+    assert len(rows) == 1
+    assert rows[0]["kind"] == "verification"
+    assert rows[0]["status"] == "fail"
+    assert rows[0]["metadata"] == {"repository": "Backend"}
+
+
+def test_record_eval_capture_idempotent(store):
+    for _ in range(3):
+        store.record_eval_capture(
+            capture_key="ck1", workflow_id="wf-1", phase=6,
+            kind="verification", label="x", output_hash="oh", status="fail",
+        )
+    assert len(store.list_eval_captures()) == 1
+
+
+def test_eval_captures_cascade_on_gc(tmp_path):
+    from datetime import datetime, timedelta
+
+    s = SQLiteStore(tmp_path / "wf.db")
+    old = (datetime.now() - timedelta(days=120)).isoformat()
+    with s._connect() as conn:
+        conn.execute(
+            "INSERT INTO workflows (workflow_id, task_url, task_title, "
+            "branch_name, current_phase, state_json, created_at, updated_at, "
+            "profile_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ("wf-old", "u", "t", "b", 10, "{}", old, old, None),
+        )
+        conn.commit()
+    s.record_eval_capture(capture_key="ck", workflow_id="wf-old",
+                          kind="verification", output_hash="o")
+    counts = s.delete_old_completed_workflows(retention_days=90)
+    assert counts["eval_captures"] == 1
+    assert s.list_eval_captures(workflow_id="wf-old") == []
+
+
+def test_persist_verification_captures_helper(store):
+    from hokusai.local_persistence import persist_verification_captures
+
+    errors = [
+        {"repository": "Backend", "command": "npm test",
+         "error_output": "boom", "success": False},
+    ]
+    n = persist_verification_captures(store, "wf-1", errors)
+    assert n == 1
+    rows = store.list_eval_captures(kind="verification")
+    assert len(rows) == 1
+    assert rows[0]["label"] == "Backend:npm test"
+
+
+def test_eval_export_includes_captures(store, capsys):
+    import argparse
+    import json
+
+    from hokusai.cli_main import _handle_eval
+
+    store.record_eval_capture(
+        capture_key="ck1", workflow_id="wf-1", phase=6, kind="verification",
+        label="Backend:npm test", output_hash="oh", status="fail",
+    )
+
+    class _Cfg:
+        database_path = store.db_path
+
+    rc = _handle_eval(
+        argparse.Namespace(eval_subcommand="export", since=None,
+                           workflow_id=None, limit=1000, output="json"),
+        _Cfg(),
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    kinds = {f["kind"] for f in payload["fixtures"]}
+    assert "verification" in kinds
