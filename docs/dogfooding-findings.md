@@ -541,6 +541,34 @@ v0.7.0–v0.10.0 で追加した **Step 2/3/4/5** の CLI（`operations` / `grap
 
 ---
 
+## 12. `backfill` 後の再観察 — durable データ投入後の graph / recurring (2026-05-31)
+
+§11 で挙げた「durable テーブル forward-only」ギャップを `hokusai backfill`（PR #157）で解消したので、**実 DB に backfill を適用した後**の `graph status` / `graph recurring` / durable テーブルの中身を再観察した。
+
+### 観察手順
+
+| Step | 操作 |
+|---|---|
+| 1 | `hokusai backfill`（本体 profile の全 workflow を durable 化、実行済み）|
+| 2 | `hokusai graph status` / `graph recurring` |
+| 3 | `review_issues` / `work_items` の中身を SQLite から直接確認 |
+
+### 実観察結果
+
+- ✅ **backfill で `has_review_issue` edge が出現**: `graph status` が `has_work_item: 38` のみ（§11）から **`has_review_issue: 4` + `has_work_item: 38`（計 42 edge）** に増えた。forward-only だった durable データが後追いで graph に反映されることを実証。
+- ✅ **review_issues が想定より rich**: backfill された 4 件は **verification_failure 1 件 + Phase 7 `final_review` 3 件（review rule `HQ05` / `HQ04` / `HQ02`）**。`persist_review_issue_payloads` は source を問わず汎用に永続化するため、`pending_review_issues` に乗っていた Phase 7 のコードレビュー指摘（HQ ルール）も durable 化された。**Step 4 第2 の verification capture より広いカバレッジ**が backfill 経由で得られた。
+- ⚠ **`graph recurring` は単一 workflow では発火しない（仕様通り）**: backfill 後も recurring は空。4 件の review issue がすべて 1 workflow（`wf-dbe7b6cd`）由来で `COUNT(DISTINCT workflow_id)=1` のため。recurring は **同一 content signature が ≥2 の異なる workflow にまたがる**ときのみ検出する設計なので正しい挙動だが、dogfooding 環境は workflow が 2 件（うち 1 件は review issue 0）しかなく recurring の価値を実証できない。**複数 workflow を回す or 複数 DB を集約しないと recurring は観測できない**（§10 と同じ「データ量依存」構造）。
+- ⚠ **backfill の `work_items` カウント（380）は「処理 payload 数」で、実 unique 行は 38**: `hokusai backfill` の出力は `work_items 380` だが、`list_work_items` の実行数は **38**（status 全て `done` / phase 全て 4）。`pending_work_items` には同一 `(workflow_id, phase, title)` の work item イベント（upsert / claim / status_change / lease_release × retry）が**約 10 倍重複**して積まれており、durable table は `dedupe_key` で 38 行に正規化している。backfill 出力の件数は `persist_*_payloads` の戻り値（= upsert 呼び出し回数）であり、**実際に作られた unique 行数ではない**。誤誘導ではないが、「380 件の work item がある」と誤読され得る。
+
+### 評価 + 次のアクション候補
+
+- **backfill は実データで価値を実証**: 既存 workflow の Phase 4 plan / Phase 7 review 指摘が durable 化され、`graph status` に反映された。§11 の最大ギャップは実証的にクローズ。
+- ⚠ **小改善候補**: `backfill` 出力の件数を「処理 payload 数」ではなく **durable table の実 row 増分（before/after の差）** にすると、`work_items 380 → 実 38 行` の乖離が解消し UX が正確になる。1 関数の戻り値変更 + 表示調整で収まる軽微な改善。
+- **recurring / resolved_by のフル価値には複数 workflow が前提**: 単一案件の dogfooding DB では再発・解決の関係が出ない。実運用で複数案件を回すか、将来 `hokusai graph status` を複数 DB 横断で集約する機能があると recurring の真価が出る（中長期候補）。
+- **次マイルストーン候補**: (a) backfill 件数の実 row 増分化（上記小改善）、(b) Step 4 の Phase 7 review 結果 capture（backfill で review_issues に既に入っているので、eval_captures 側にも `kind=review` で取り込めば eval gate が review 退行も拾える）、(c) §11 で挙げた operations の MCP/HTTP 化。
+
+---
+
 ## Appendix A: 観察用に叩いたコマンド
 
 ```bash
