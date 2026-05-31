@@ -742,6 +742,61 @@ def _build_parser():
         help="出力形式（既定 text）",
     )
 
+    # eval コマンド: Eval Capture / export（Step 4 第1スライス）。
+    # LLM Gateway が audit_logs に記録した LLM 呼び出しを eval fixture として
+    # export / 集約する（本文非保存・hash/length のみ）。
+    eval_parser = subparsers.add_parser(
+        "eval",
+        help="LLM 呼び出し capture を eval fixture として export / 集約（Step 4）",
+        parents=[shared_options],
+    )
+    eval_subparsers = eval_parser.add_subparsers(
+        dest="eval_subcommand",
+        help="eval サブコマンド",
+    )
+
+    eval_export_parser = eval_subparsers.add_parser(
+        "export",
+        help="LLM 呼び出し capture を eval fixture として export",
+        parents=[shared_options],
+    )
+    eval_export_parser.add_argument(
+        "--since",
+        default=None,
+        help="期間で絞る（例 30d / 12h）。未指定なら limit 内の全件",
+    )
+    eval_export_parser.add_argument(
+        "--workflow-id", default=None, help="workflow_id で絞る"
+    )
+    eval_export_parser.add_argument(
+        "--limit", type=_positive_int, default=1000,
+        help="取得上限（>=1、既定 1000）",
+    )
+    eval_export_parser.add_argument(
+        "--output", choices=("json", "jsonl"), default="json",
+        help="出力形式（json 配列 / jsonl 1 行 1 fixture、既定 json）",
+    )
+
+    eval_list_parser = eval_subparsers.add_parser(
+        "list",
+        help="capture を集約サマリ表示（phase / purpose / decision 別件数）",
+        parents=[shared_options],
+    )
+    eval_list_parser.add_argument(
+        "--since", default=None, help="期間で絞る（例 30d / 12h）"
+    )
+    eval_list_parser.add_argument(
+        "--workflow-id", default=None, help="workflow_id で絞る"
+    )
+    eval_list_parser.add_argument(
+        "--limit", type=_positive_int, default=1000,
+        help="取得上限（>=1、既定 1000）",
+    )
+    eval_list_parser.add_argument(
+        "--output", choices=("text", "json"), default="text",
+        help="出力形式（既定 text）",
+    )
+
     return parser, profile_parser, connect_parser
 
 
@@ -1062,6 +1117,10 @@ def main():
     # graph コマンド: Local Workgraph Edges（Step 5 第1スライス）
     if args.command == "graph":
         sys.exit(_handle_graph(args, config))
+
+    # eval コマンド: Eval Capture / export（Step 4 第1スライス）
+    if args.command == "eval":
+        sys.exit(_handle_eval(args, config))
 
     # llm-gateway-setup コマンド: 現 LLM Gateway 設定を診断 + 推奨設定提示
     # （F2 / PR #125）。
@@ -1722,6 +1781,119 @@ def _parse_operation_params(raw_params: list[str] | None) -> dict[str, str]:
             raise ValueError(f"--param の KEY が重複しています: {key!r}")
         parsed[key] = value
     return parsed
+
+
+def _parse_since(value: str | None) -> str | None:
+    """`--since` の `Nd` / `Nh` を ISO の cutoff 文字列へ変換する。
+
+    `created_at` は ISO 文字列なので、cutoff も ISO にして辞書順比較で時刻
+    フィルタできる。未指定 (None / 空) は None（フィルタなし）。形式不正は
+    ValueError。
+    """
+    if not value:
+        return None
+    import re
+    from datetime import datetime, timedelta
+
+    m = re.fullmatch(r"(\d+)([dh])", value.strip())
+    if not m:
+        raise ValueError(
+            f"--since は Nd / Nh 形式で指定してください（例 30d）: {value!r}"
+        )
+    n = int(m.group(1))
+    # 極端に大きい値は timedelta / datetime 演算で OverflowError / OSError に
+    # なり得るため、ユーザー入力エラーとして ValueError に変換する
+    # (PR #151 Copilot Round 1: クラッシュさせず exit 1 で扱えるように)。
+    try:
+        delta = timedelta(days=n) if m.group(2) == "d" else timedelta(hours=n)
+        return (datetime.now() - delta).isoformat()
+    except (OverflowError, OSError) as e:
+        raise ValueError(f"--since の値が大きすぎます: {value!r}") from e
+
+
+def _handle_eval(args, config) -> int:
+    """`hokusai eval ...` のハンドラ（Step 4 第1スライス）。
+
+    LLM Gateway interceptor が `audit_logs` に記録した LLM 呼び出し
+    (action=llm_gateway_decision) を eval fixture として export / 集約する。
+    本文は保存されておらず hash / length / metadata のみ（非侵襲・既存配線）。
+
+    Returns:
+        0: 正常 / 1: 未知サブコマンド・不正 --since 等
+    """
+    import json
+
+    from .eval_capture import LLM_DECISION_ACTION, audit_rows_to_fixtures
+    from .persistence import SQLiteStore
+
+    subcommand = getattr(args, "eval_subcommand", None)
+    if subcommand not in ("export", "list"):
+        print("使い方: hokusai eval {export|list} ...", file=sys.stderr)
+        print("  export [--since 30d] [--output json|jsonl]", file=sys.stderr)
+        print("  list   [--since 30d] 集約サマリ", file=sys.stderr)
+        return 1
+
+    try:
+        since = _parse_since(getattr(args, "since", None))
+    except ValueError as e:
+        print(f"✗ {e}", file=sys.stderr)
+        return 1
+
+    store = SQLiteStore(config.database_path)
+    rows = store.list_audit_logs(
+        action=LLM_DECISION_ACTION,
+        workflow_id=getattr(args, "workflow_id", None),
+        since=since,
+        limit=getattr(args, "limit", 1000),
+    )
+    fixtures = audit_rows_to_fixtures(rows)
+
+    if subcommand == "export":
+        output = getattr(args, "output", "json")
+        if output == "jsonl":
+            for f in fixtures:
+                print(json.dumps(f, ensure_ascii=False, default=str))
+        else:
+            print(json.dumps(
+                {"fixtures": fixtures}, ensure_ascii=False, indent=2,
+                default=str,
+            ))
+        return 0
+
+    # list: 集約サマリ
+    summary = _summarize_eval_fixtures(fixtures)
+    if getattr(args, "output", "text") == "json":
+        print(json.dumps(summary, ensure_ascii=False, indent=2, default=str))
+    else:
+        print(f"eval capture: {summary['total']} 件（LLM 呼び出し）")
+        for dim, label in (
+            ("by_phase", "phase"), ("by_purpose", "purpose"),
+            ("by_decision", "decision"),
+        ):
+            counts = summary[dim]
+            if counts:
+                print(f"  {label} 別:")
+                for k, v in counts.items():
+                    print(f"    {k}: {v}")
+    return 0
+
+
+def _summarize_eval_fixtures(fixtures: list) -> dict:
+    """eval fixture を phase / purpose / decision 別に集計する。"""
+    def _tally(key):
+        out: dict = {}
+        for f in fixtures:
+            k = f.get(key)
+            k = "(なし)" if k is None else str(k)
+            out[k] = out.get(k, 0) + 1
+        return dict(sorted(out.items()))
+
+    return {
+        "total": len(fixtures),
+        "by_phase": _tally("phase"),
+        "by_purpose": _tally("purpose"),
+        "by_decision": _tally("decision"),
+    }
 
 
 def _handle_graph(args, config) -> int:

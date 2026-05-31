@@ -937,6 +937,7 @@ class SQLiteStore:
         phase: int | None = None,
         action: str | None = None,
         status: str | None = None,
+        since: str | None = None,
         limit: int = 50,
     ) -> list[dict[str, Any]]:
         """`audit_logs` を柔軟にフィルタして最新順に返す（PR #123 / F3）。
@@ -951,6 +952,9 @@ class SQLiteStore:
             phase: 指定すれば一致行のみ返す
             action: 指定すれば一致行のみ返す（例 "llm_gateway_decision"）
             status: 指定すれば一致行のみ返す（例 "block" / "log"）
+            since: 指定すれば `created_at >= since` の行のみ返す（ISO 文字列。
+                `created_at` は ISO なので辞書順比較で時刻比較になる。eval
+                export の `--since` 用 / Step 4）
             limit: 取得上限（既定 50、`ORDER BY id DESC` で最新優先）。**必ず
                 1 以上**を渡すこと。SQLite は negative LIMIT を「no limit」と
                 解釈する（PR #123 Copilot Round 1 指摘）ため、`limit < 1` の
@@ -983,6 +987,9 @@ class SQLiteStore:
         if status is not None:
             clauses.append("status = ?")
             params.append(status)
+        if since is not None:
+            clauses.append("created_at >= ?")
+            params.append(since)
         where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
         params.append(limit)
         with self._connect() as conn:
