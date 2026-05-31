@@ -2074,6 +2074,26 @@ class SQLiteStore:
             ).fetchall()
         return [dict(zip(keys, row)) for row in rows]
 
+    def count_review_issues(self, *, workflow_id: str | None = None) -> int:
+        """`review_issues` の行数を返す（backfill の実 row 増分計測用）。"""
+        where = "WHERE workflow_id = ?" if workflow_id is not None else ""
+        params = (workflow_id,) if workflow_id is not None else ()
+        with self._connect() as conn:
+            row = conn.execute(
+                f"SELECT COUNT(*) FROM review_issues {where}", params
+            ).fetchone()
+        return int(row[0]) if row else 0
+
+    def count_work_items(self, *, workflow_id: str | None = None) -> int:
+        """`work_items` の行数を返す（backfill の実 row 増分計測用）。"""
+        where = "WHERE workflow_id = ?" if workflow_id is not None else ""
+        params = (workflow_id,) if workflow_id is not None else ()
+        with self._connect() as conn:
+            row = conn.execute(
+                f"SELECT COUNT(*) FROM work_items {where}", params
+            ).fetchone()
+        return int(row[0]) if row else 0
+
     def find_recurring_review_issues(
         self, *, min_workflows: int = 2, limit: int = 100
     ) -> list[dict[str, Any]]:

@@ -80,6 +80,48 @@ def test_backfill_empty_state(store):
     assert counts == {"review_issues": 0, "work_items": 0, "edges": 0}
 
 
+def test_backfill_counts_unique_rows_not_payloads(store):
+    """件数は処理 payload 数でなく実 row 増分（重複 identity は 1 行）。
+
+    dogfooding §12: pending_work_items に同一 (workflow_id, phase, title) の
+    イベントが ~10倍重複して積まれるが、durable table は dedupe_key で正規化
+    するので、backfill 件数は unique row 数を返すべき。"""
+    # 同一 identity の work item を 5 payload（status だけ違う lifecycle）
+    state = {
+        "workflow_id": "wf-1",
+        "pending_work_items": [
+            {"workflow_id": "wf-1", "title": "認証", "phase": 4,
+             "status": s}
+            for s in ("pending", "in_progress", "done", "done", "done")
+        ],
+        "pending_review_issues": [],
+    }
+    counts = backfill_workflow(store, "wf-1", state)
+    # 5 payload → 実 row 1（dedupe_key 同一）
+    assert counts["work_items"] == 1
+    assert len(store.list_work_items(workflow_id="wf-1")) == 1
+
+    # preview も同じ semantics（unique row 数）
+    counts2 = preview_workflow(store, "wf-2", {
+        "workflow_id": "wf-2",
+        "pending_work_items": [
+            {"workflow_id": "wf-2", "title": "x", "phase": 4, "status": s}
+            for s in ("a", "b", "c")
+        ],
+    })
+    assert counts2["work_items"] == 1  # 3 payload → 1 unique
+
+
+def test_backfill_idempotent_rerun_adds_zero(store):
+    """冪等な再実行は実 row 増分 0 を返す（§12 件数=増分の意味）。"""
+    state = _state_with_pending()
+    first = backfill_workflow(store, "wf-1", state)
+    assert first["review_issues"] == 1
+    second = backfill_workflow(store, "wf-1", state)
+    assert second["review_issues"] == 0  # 既存なので増分なし
+    assert second["work_items"] == 0
+
+
 # --- CLI ---------------------------------------------------------------
 
 
