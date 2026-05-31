@@ -540,6 +540,12 @@ class SQLiteStore:
                 "CREATE INDEX IF NOT EXISTS idx_eval_captures_kind "
                 "ON eval_captures(kind)"
             )
+            # list_eval_captures は phase フィルタも持つため index を張る
+            # (件数増で full scan にならないように。PR #152 Copilot Round 2)。
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_eval_captures_phase "
+                "ON eval_captures(phase)"
+            )
 
             conn.commit()
 

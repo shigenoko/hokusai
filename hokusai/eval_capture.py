@@ -128,9 +128,18 @@ def build_verification_captures(
         error_output = entry.get("error_output") or ""
         label = f"{repo}:{command}" if repo else str(command)
         # output digest は full_output_hash（truncate 前の全文 hash）を優先。
-        output_hash = entry.get("full_output_hash") or compute_content_digest(
-            error_output
-        )["hash"]
+        # その場合 length は手元に全文が無く不明なので None にする（hash 対象 =
+        # 全文、length = truncate 後 という不整合を避ける。PR #152 Copilot
+        # Round 2）。full_output_hash が無ければ error_output 自身から hash +
+        # length を取り、両者を整合させる。
+        full_hash = entry.get("full_output_hash")
+        if full_hash:
+            output_hash = full_hash
+            output_length = None
+        else:
+            out_digest = compute_content_digest(error_output)
+            output_hash = out_digest["hash"]
+            output_length = out_digest["length"]
         in_digest = compute_content_digest(command)
         captures.append({
             "capture_key": build_capture_key(
@@ -144,7 +153,7 @@ def build_verification_captures(
             "input_hash": in_digest["hash"],
             "input_length": in_digest["length"],
             "output_hash": output_hash,
-            "output_length": len(error_output),
+            "output_length": output_length,
             "status": "fail",
             "metadata": {"repository": repo, "command": command},
         })

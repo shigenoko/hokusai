@@ -246,8 +246,25 @@ def test_build_verification_captures():
     assert caps[0]["phase"] == 6
     assert caps[0]["label"] == "Backend:npm test"
     assert caps[0]["output_hash"] == "fh1"  # full_output_hash 優先
+    # full_output_hash 採用時は length を None に（hash 対象=全文と整合、
+    # PR #152 Copilot Round 2）
+    assert caps[0]["output_length"] is None
     assert caps[0]["status"] == "fail"
     assert caps[1]["label"] == "ruff"  # repository 無し
+    # full_output_hash 無し → error_output 自身の hash + length（整合）
+    assert caps[1]["output_length"] == len("lint fail")
+
+
+def test_eval_captures_phase_index_exists(store):
+    """phase フィルタ用 index が張られている (PR #152 Copilot Round 2)。"""
+    with store._connect() as conn:
+        names = {
+            r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' "
+                "AND tbl_name='eval_captures'"
+            ).fetchall()
+        }
+    assert "idx_eval_captures_phase" in names
 
 
 def test_build_capture_key_is_deterministic_and_output_sensitive():
