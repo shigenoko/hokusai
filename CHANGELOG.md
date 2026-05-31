@@ -16,7 +16,7 @@ HOKUSAI のすべての特筆すべき変更をこのファイルに記録する
 
 ## [0.10.0] - 2026-05-31
 
-**Step 4: Eval Capture** を `eval gate`（退行検出）まで仕上げ、export → capture → gate が一通り揃った patch リリース。これで GBrain ロードマップ全 5 Step の主要機能が形になった。すべて決定的・SQLite-backed（保存は本文を持たず hash/length/metadata のみ）。設計議論は [docs/roadmap-gbrain-inspirations.md](docs/roadmap-gbrain-inspirations.md)。
+**Step 4: Eval Capture** を `eval gate`（退行検出）まで仕上げ、export → capture → gate が一通り揃った minor リリース。これで GBrain ロードマップ全 5 Step の主要機能が形になった。すべて決定的・SQLite-backed（保存は本文を持たず hash/length/metadata のみ）。設計議論は [docs/roadmap-gbrain-inspirations.md](docs/roadmap-gbrain-inspirations.md)。
 
 すべて additive。新サブコマンド `hokusai eval gate` を追加するのみで、既存コマンドの挙動は不変。
 
