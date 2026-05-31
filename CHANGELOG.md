@@ -12,6 +12,18 @@ HOKUSAI のすべての特筆すべき変更をこのファイルに記録する
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-05-31
+
+**Eval review capture + backfill** を区切りにした minor リリース。dogfooding §11 / §12 で挙げた 2 つの運用ギャップ（durable テーブルが forward-only で既存 workflow を拾えない / 件数が処理 payload 数で誤読を招く）を解消し、さらに durable な review_issues を `eval gate` の退行検出に接続した。すべて決定的・SQLite-backed（保存は本文を持たず hash/length/metadata のみ）。設計議論は [docs/dogfooding-findings.md](docs/dogfooding-findings.md) / [docs/roadmap-gbrain-inspirations.md](docs/roadmap-gbrain-inspirations.md)。
+
+すべて additive。新サブコマンド `hokusai backfill` の追加と eval capture の `kind=review` 拡張のみで、既存コマンドの挙動は不変。
+
+主な内容:
+
+- **`hokusai backfill`（dogfooding §11）** — 既存 workflow の `state_json` から durable テーブル（`review_issues` / `work_items` / `workgraph_edges`）を再構築。drain hook 依存の forward-only ギャップを解消し、completed workflow も `graph recurring` / `has_review_issue` / verification capture に後追いで現れる。`hokusai backfill [--workflow-id] [--dry-run] [--output text|json]`、冪等。
+- **backfill 件数を実 row 増分に（dogfooding §12）** — 返す件数を処理 payload 数でなく durable table の before/after 実 row 増分に修正（`pending_work_items` には retry で同一イベントが重複して積まれ payload 数 ≫ 実 row 数 になるため）。`count_review_issues()` / `count_work_items()` を追加。
+- **eval gate が review rule 退行も検出（Step 4 / dogfooding §12）** — durable な review_issues を `eval_captures(kind=review)` に取り込み、`eval gate --fail-on-regression` が新たなコードレビュー指摘を退行として検出できる。`build_review_captures()` を追加、`verification_failure` は除外（二重取り込み回避）、未解決指摘は gate 語彙で `status="fail"` にマップ。`workflow.py` の drain と `backfill_workflow` の双方が populate。
+
 ### Added
 
 - **Eval Capture に review 指摘を取り込み（`eval gate` が review rule 退行も検出）**: dogfooding §12 で挙げた「durable な review_issues は既にあるので eval_captures 側に `kind=review` で取り込めば eval gate が review 退行も拾える」を実装。`hokusai/eval_capture.py` に `build_review_captures(workflow_id, review_issues)` を追加し、review issue（`pending_review_issues` payload でも durable `review_issues` 行でも同形）を `kind="review"` の eval capture に変換する。`source="verification_failure"` は `build_verification_captures`（`kind="verification"`）が担当するので除外（二重取り込み回避）、Phase 7 の `final_review` 等コードレビュー指摘のみ取り込む。未解決（`open` / 未設定）の review 指摘は gate 語彙で `status="fail"` にマップ（新規発生時に regression として拾える。元 status は metadata の `review_status` に保持）。`local_persistence.persist_review_captures()` 経由で、(1) `workflow.py` の review issue drain（新規指摘）と (2) `backfill_workflow`（既存の durable review_issues、副作用）の双方が eval_captures を populate する。これにより `eval export` / `list` / `gate` が verification（`kind=verification`）に加え review（`kind=review`）も扱い、`eval gate --fail-on-regression` が**新たなコードレビュー指摘を退行として検出**できる。実環境では本体 profile の backfill で 4 review_issues → review capture 3 件（verification_failure 1 件は除外）を確認。回帰防止テスト 6 件追加 (`tests/test_eval_capture.py`: review capture 構築（verification 除外 / source+message guard）/ resolved status 保持 / persist ヘルパ / workflow_id 無し skip / `eval gate` が review regression を exit 1 で検出)。設計: [docs/dogfooding-findings.md §12](docs/dogfooding-findings.md) / [roadmap §P1 / Step 4](docs/roadmap-gbrain-inspirations.md)。
@@ -799,7 +811,8 @@ Notion / GitHub Issue / Jira / Linear 連携の最小機能セット。
 - SQLite による checkpoint / outbox 永続化
 - Worktree ベースの並行ワークフロー実行
 
-[Unreleased]: https://github.com/shigenoko/hokusai/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/shigenoko/hokusai/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/shigenoko/hokusai/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/shigenoko/hokusai/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/shigenoko/hokusai/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/shigenoko/hokusai/compare/v0.7.0...v0.8.0
