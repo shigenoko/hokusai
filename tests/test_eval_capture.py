@@ -290,6 +290,16 @@ def test_record_and_list_eval_capture(store):
     assert rows[0]["metadata"] == {"repository": "Backend"}
 
 
+def test_record_eval_capture_requires_workflow_id(store):
+    """Store API レベルで workflow_id 無しを reject (PR #152 Copilot Round 3)。"""
+    with pytest.raises(ValueError, match="workflow_id が必須"):
+        store.record_eval_capture(capture_key="ck", workflow_id=None,
+                                  kind="verification", output_hash="o")
+    with pytest.raises(ValueError, match="workflow_id が必須"):
+        store.record_eval_capture(capture_key="ck", workflow_id="",
+                                  kind="verification", output_hash="o")
+
+
 def test_record_eval_capture_idempotent(store):
     for _ in range(3):
         store.record_eval_capture(

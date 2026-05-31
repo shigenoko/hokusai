@@ -116,6 +116,10 @@ def build_verification_captures(
     `full_output_hash`）から 1 capture を作る。入力＝command、出力＝error_output
     の digest（本文非保存、`full_output_hash` があれば優先）。status="fail"。
     `record_eval_capture(**capture)` にそのまま渡せる dict を返す。
+
+    注意: `VerificationErrorEntry.command` は実コマンド文字列ではなく
+    **コマンド種別**（build / test / lint）である（hokusai/state.py 参照）。
+    label / input digest もこの種別文字列に基づく。
     """
     captures: list[dict[str, Any]] = []
     for entry in verification_errors or []:

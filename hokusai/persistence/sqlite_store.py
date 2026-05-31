@@ -2202,6 +2202,12 @@ class SQLiteStore:
         retry で同一観測 (同 capture_key) が来ても重複行を作らず updated_at を
         最新化する（created_at は初回値を維持）。本文は保存せず hash/length のみ。
         """
+        # capture_key は workflow_id を内包する設計のため、workflow_id 無しの
+        # 保存は (1) workflow 間 capture_key 衝突、(2) workflow GC の cascade
+        # 対象外＝孤児レコード を招く。Store API として弾く (PR #152 Copilot
+        # Round 3。呼び出し側 guard とは別に API レベルでも防ぐ)。
+        if not workflow_id:
+            raise ValueError("record_eval_capture には workflow_id が必須です")
         now = datetime.now().isoformat()
         metadata_json = (
             json.dumps(metadata, ensure_ascii=False, default=str)
@@ -2250,7 +2256,13 @@ class SQLiteStore:
         since: str | None = None,
         limit: int = 1000,
     ) -> list[dict[str, Any]]:
-        """`eval_captures` をフィルタして返す（最新 updated_at 順）。"""
+        """`eval_captures` をフィルタして返す（最新 `created_at` 順）。
+
+        並びは `created_at DESC`。CLI の `eval export` は audit fixture と合流後に
+        `created_at` で並べて `--limit` を適用するため、ここも `created_at` 基準に
+        揃える（`updated_at` 順だと top-N の取りこぼしで --limit の意味が崩れる。
+        PR #152 Copilot Round 3）。
+        """
         if limit < 1:
             raise ValueError("limit は 1 以上を指定してください")
         clauses: list[str] = []
@@ -2271,7 +2283,7 @@ class SQLiteStore:
         with self._connect() as conn:
             rows = conn.execute(
                 f"SELECT {', '.join(keys)} FROM eval_captures {where} "
-                f"ORDER BY updated_at DESC LIMIT ?",
+                f"ORDER BY created_at DESC LIMIT ?",
                 params,
             ).fetchall()
         out = []
