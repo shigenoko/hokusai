@@ -188,6 +188,132 @@ class ReadOnlyStore:
 
         return self._read(_run, [])
 
+    def get_workflow(self, workflow_id: str) -> dict[str, Any] | None:
+        """単一 workflow のメタ情報を返す（不在 / 読めない場合は None）。"""
+        keys = (
+            "workflow_id", "task_url", "task_title", "branch_name",
+            "current_phase", "updated_at", "profile_name",
+        )
+        return self._read(
+            lambda c: (
+                lambda row: dict(zip(keys, row)) if row else None
+            )(
+                c.execute(
+                    "SELECT workflow_id, task_url, task_title, branch_name, "
+                    "current_phase, updated_at, profile_name FROM workflows "
+                    "WHERE workflow_id = ?",
+                    (workflow_id,),
+                ).fetchone()
+            ),
+            None,
+        )
+
+    def list_open_review_issues(
+        self, *, workflow_id: str | None = None, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        """未解決 (status が未設定 / 解決系でない) review issue を返す。"""
+        if limit < 1:
+            raise ValueError("limit は 1 以上を指定してください")
+        keys = ("dedupe_key", "workflow_id", "source", "rule", "file",
+                "message", "repository", "severity", "status", "updated_at")
+        clauses = [
+            "(status IS NULL OR LOWER(status) NOT IN "
+            "('resolved', 'closed', 'done'))"
+        ]
+        params: list[Any] = []
+        if workflow_id is not None:
+            clauses.append("workflow_id = ?")
+            params.append(workflow_id)
+        params.append(limit)
+        where = "WHERE " + " AND ".join(clauses)
+        return self._read(
+            lambda c: [
+                dict(zip(keys, row))
+                for row in c.execute(
+                    "SELECT dedupe_key, workflow_id, source, rule, file, "
+                    "message, repository, severity, status, updated_at "
+                    f"FROM review_issues {where} "
+                    "ORDER BY updated_at DESC LIMIT ?",
+                    params,
+                ).fetchall()
+            ],
+            [],
+        )
+
+    def list_open_work_items(
+        self, *, workflow_id: str | None = None, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        """未完了 (status が未設定 / 完了系でない) work item を返す。"""
+        if limit < 1:
+            raise ValueError("limit は 1 以上を指定してください")
+        keys = ("dedupe_key", "workflow_id", "title", "phase", "status",
+                "updated_at")
+        clauses = [
+            "(status IS NULL OR LOWER(status) NOT IN "
+            "('done', 'closed', 'completed'))"
+        ]
+        params: list[Any] = []
+        if workflow_id is not None:
+            clauses.append("workflow_id = ?")
+            params.append(workflow_id)
+        params.append(limit)
+        where = "WHERE " + " AND ".join(clauses)
+        return self._read(
+            lambda c: [
+                dict(zip(keys, row))
+                for row in c.execute(
+                    "SELECT dedupe_key, workflow_id, title, phase, status, "
+                    f"updated_at FROM work_items {where} "
+                    "ORDER BY updated_at DESC LIMIT ?",
+                    params,
+                ).fetchall()
+            ],
+            [],
+        )
+
+    def audit_summary(
+        self, *, workflow_id: str | None = None
+    ) -> dict[str, Any]:
+        """audit_logs を action / status 別に集約する（件数は SQL で正確）。
+
+        全件 scan を避けつつ truncation も避けるため、LIMIT 無しの
+        `GROUP BY` 集約で件数を出す（一覧ではなく集計なので行数は種別数に
+        収まる）。
+        """
+        where = "WHERE workflow_id = ?" if workflow_id is not None else ""
+        params: list[Any] = []
+        if workflow_id is not None:
+            params.append(workflow_id)
+
+        def _run(c: sqlite3.Connection) -> dict[str, Any]:
+            total = int(
+                (c.execute(
+                    f"SELECT COUNT(*) FROM audit_logs {where}", params
+                ).fetchone() or [0])[0]
+            )
+            by_action = {
+                str(a): int(n)
+                for a, n in c.execute(
+                    f"SELECT action, COUNT(*) FROM audit_logs {where} "
+                    "GROUP BY action ORDER BY action",
+                    params,
+                ).fetchall()
+            }
+            by_status = {
+                str(s): int(n)
+                for s, n in c.execute(
+                    f"SELECT status, COUNT(*) FROM audit_logs {where} "
+                    "GROUP BY status ORDER BY status",
+                    params,
+                ).fetchall()
+            }
+            return {"total": total, "by_action": by_action,
+                    "by_status": by_status}
+
+        return self._read(
+            _run, {"total": 0, "by_action": {}, "by_status": {}}
+        )
+
 
 # --- seed handlers (read-only) -------------------------------------------
 # いずれも既存の SQLite-backed 関数を薄くラップするだけ。live API 呼び出しは
@@ -238,6 +364,76 @@ def _op_workflow_list(
     return {"workflows": store.list_active_workflows()}
 
 
+def _coerce_limit(params: dict[str, Any], default: int = 50) -> int:
+    """`limit` パラメータを int へ変換する（未指定なら default）。
+
+    CLI の `--param limit=50` は文字列で渡るため int 化する。1 未満 /
+    非数値は ValueError にして呼び出し側 (CLI) が stderr + exit 1 にできる。
+    """
+    raw = params.get("limit")
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        raise ValueError(f"limit は整数で指定してください: {raw!r}") from None
+    if value < 1:
+        raise ValueError("limit は 1 以上を指定してください")
+    return value
+
+
+def _op_workflow_status(
+    params: dict[str, Any], *, store: Any, config: Any
+) -> dict[str, Any]:
+    """単一 workflow のメタ情報 (phase / branch / profile 等) を返す。"""
+    workflow_id = params.get("workflow_id")
+    if not workflow_id:
+        raise ValueError("workflow_id は必須です")
+    return {"workflow": store.get_workflow(workflow_id)}
+
+
+def _op_review_issues_list_open(
+    params: dict[str, Any], *, store: Any, config: Any
+) -> dict[str, Any]:
+    """未解決の review issue 一覧を返す。"""
+    return {
+        "review_issues": store.list_open_review_issues(
+            workflow_id=params.get("workflow_id"),
+            limit=_coerce_limit(params),
+        )
+    }
+
+
+def _op_workgraph_list_open_items(
+    params: dict[str, Any], *, store: Any, config: Any
+) -> dict[str, Any]:
+    """未完了の work item 一覧を返す。"""
+    return {
+        "work_items": store.list_open_work_items(
+            workflow_id=params.get("workflow_id"),
+            limit=_coerce_limit(params),
+        )
+    }
+
+
+def _op_llm_gateway_audit_summary(
+    params: dict[str, Any], *, store: Any, config: Any
+) -> dict[str, Any]:
+    """audit_logs を action / status 別に集約したサマリを返す。"""
+    return store.audit_summary(workflow_id=params.get("workflow_id"))
+
+
+# input schema の部品: workflow_id でフィルタする read-only operation で共通。
+_WORKFLOW_ID_PROP = {
+    "type": "string",
+    "description": "対象 workflow に絞る場合に指定 (未指定なら profile 横断)",
+}
+_LIMIT_PROP = {
+    "type": "integer",
+    "description": "返す最大件数 (未指定なら 50)",
+}
+
+
 def build_default_registry() -> OperationRegistry:
     """seed の read-only operation を登録した registry を構築する。"""
     reg = OperationRegistry()
@@ -281,6 +477,69 @@ def build_default_registry() -> OperationRegistry:
             scope=READ_ONLY,
             input_schema={"type": "object", "properties": {}, "required": []},
             handler=_op_workflow_list,
+        )
+    )
+    reg.register(
+        Operation(
+            name="workflow.status",
+            summary="単一 workflow のメタ情報 (phase / branch / profile 等) を返す",
+            scope=READ_ONLY,
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "workflow_id": {
+                        "type": "string",
+                        "description": "対象 workflow の ID (必須)",
+                    }
+                },
+                "required": ["workflow_id"],
+            },
+            handler=_op_workflow_status,
+        )
+    )
+    reg.register(
+        Operation(
+            name="review_issues.list_open",
+            summary="未解決の review issue 一覧を返す",
+            scope=READ_ONLY,
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "workflow_id": _WORKFLOW_ID_PROP,
+                    "limit": _LIMIT_PROP,
+                },
+                "required": [],
+            },
+            handler=_op_review_issues_list_open,
+        )
+    )
+    reg.register(
+        Operation(
+            name="workgraph.list_open_items",
+            summary="未完了の work item 一覧を返す",
+            scope=READ_ONLY,
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "workflow_id": _WORKFLOW_ID_PROP,
+                    "limit": _LIMIT_PROP,
+                },
+                "required": [],
+            },
+            handler=_op_workgraph_list_open_items,
+        )
+    )
+    reg.register(
+        Operation(
+            name="llm_gateway.audit_summary",
+            summary="audit_logs を action / status 別に集約したサマリを返す",
+            scope=READ_ONLY,
+            input_schema={
+                "type": "object",
+                "properties": {"workflow_id": _WORKFLOW_ID_PROP},
+                "required": [],
+            },
+            handler=_op_llm_gateway_audit_summary,
         )
     )
     return reg

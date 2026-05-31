@@ -12,6 +12,10 @@ HOKUSAI のすべての特筆すべき変更をこのファイルに記録する
 
 ## [Unreleased]
 
+### Added
+
+- **Step 3 (Operation Registry) 第2スライス: read-only operation の拡充**: 第1スライスで土台を作った Operation Registry に、roadmap §P1 が挙げた候補のうち SQLite-backed で決定的に読める read-only operation を 4 種追加（3 → 7）。`workflow.status`（単一 workflow のメタ情報＝phase / branch / profile 等、`workflow_id` 必須）/ `review_issues.list_open`（未解決＝status が未設定 / `resolved`・`closed`・`done` 以外の review issue）/ `workgraph.list_open_items`（未完了＝status が未設定 / `done`・`closed`・`completed` 以外の work item）/ `llm_gateway.audit_summary`（`audit_logs` を action / status 別に SQL 集約。件数は LIMIT 無し GROUP BY で正確）。いずれも既存テーブルの薄い SELECT ラップで、`ReadOnlyStore`（`mode=ro` / SELECT のみ・DB 不在でも安全側の既定値）に `get_workflow()` / `list_open_review_issues()` / `list_open_work_items()` / `audit_summary()` を追加して実装（live API なし・副作用ゼロの「読むだけ」契約を維持）。`review_issues.list_open` / `workgraph.list_open_items` は `workflow_id` / `limit`（既定 50、`--param limit=N` は int 正規化し 1 未満 / 非数値は reject）でフィルタ可能。CLI `operations run <name>` は handler の入力検証 `ValueError`（必須 param 欠落 / 不正 limit）を stderr + exit 1 に変換し stdout は JSON 専用を維持。`gates.list_pending` / `profile.doctor` は Notion DB / live env 依存のため本スライスでは見送り（registry 経由化と MCP/HTTP admin は後続スライス）。回帰防止テスト 16 件追加 (`tests/test_operations.py`: registry 拡充登録 / 4 handler の正常系・必須 param・limit 正規化・bad limit reject / CLI handler ValueError → stderr / ReadOnlyStore 新 4 メソッドの実 DB 読取・open 判定・集約・bad limit・DB 不在の安全既定)。設計: [docs/roadmap-gbrain-inspirations.md §P1 / Step 3](docs/roadmap-gbrain-inspirations.md)。
+
 ## [0.11.0] - 2026-05-31
 
 **Eval review capture + backfill** を区切りにした minor リリース。dogfooding §11 / §12 で挙げた 2 つの運用ギャップ（durable テーブルが forward-only で既存 workflow を拾えない / 件数が処理 payload 数で誤読を招く）を解消し、さらに durable な review_issues を `eval gate` の退行検出に接続した。すべて決定的・SQLite-backed（保存は本文を持たず hash/length/metadata のみ）。設計議論は [docs/dogfooding-findings.md](docs/dogfooding-findings.md) / [docs/roadmap-gbrain-inspirations.md](docs/roadmap-gbrain-inspirations.md)。
