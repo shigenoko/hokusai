@@ -649,6 +649,22 @@ def _build_parser():
         help="operation 入力パラメータ（複数指定可: --param workflow_id=wf-xxx）",
     )
 
+    # serve: read-only operation を HTTP admin として公開（Step 3 第4スライス）。
+    # CLI run と同じ execute 経路を HTTP 越しに叩く単一経路の外部公開。
+    operations_serve_parser = operations_subparsers.add_parser(
+        "serve",
+        help="read-only operation を HTTP admin として公開（localhost 既定）",
+        parents=[shared_options],
+    )
+    operations_serve_parser.add_argument(
+        "--host", default="127.0.0.1",
+        help="bind host（既定 127.0.0.1。外部公開しない read-only admin）",
+    )
+    operations_serve_parser.add_argument(
+        "--port", type=_positive_int, default=8765,
+        help="bind port（>=1、既定 8765）",
+    )
+
     # graph コマンド: Local Workgraph Edges（Step 5 第1スライス）。
     # workflow state からローカル決定的に typed edge を抽出して SQLite に持ち、
     # CLI から graph query できるようにする。
@@ -2484,10 +2500,39 @@ def _handle_operations(args, config) -> int:
         print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
         return 0
 
+    if subcommand == "serve":
+        from .operations_http import serve_operations_http
+
+        host = getattr(args, "host", "127.0.0.1")
+        port = getattr(args, "port", 8765)
+        try:
+            server = serve_operations_http(
+                registry, config, host=host, port=port
+            )
+        except OSError as e:
+            # bind 失敗（port 使用中 / 権限など）は stderr + exit 1。
+            print(f"✗ HTTP admin の起動に失敗: {e}", file=sys.stderr)
+            return 1
+        # 起動案内は stderr（stdout を結果専用に保つ規約と整合）。
+        print(
+            f"read-only operations HTTP admin: http://{host}:{port}"
+            f"  (GET /operations, GET /operations/<name>?key=value)",
+            file=sys.stderr,
+        )
+        print("  停止: Ctrl-C", file=sys.stderr)
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            print("\n停止しました", file=sys.stderr)
+        finally:
+            server.server_close()
+        return 0
+
     # subcommand 未指定 → usage を表示（stdout を結果専用にするため stderr へ）
-    print("使い方: hokusai operations {list|run} ...", file=sys.stderr)
+    print("使い方: hokusai operations {list|run|serve} ...", file=sys.stderr)
     print("  list           登録 operation を一覧表示", file=sys.stderr)
     print("  run <name>     read-only operation を実行", file=sys.stderr)
+    print("  serve          read-only HTTP admin を起動", file=sys.stderr)
     return 1
 
 
