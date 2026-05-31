@@ -518,7 +518,7 @@ class SQLiteStore:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS eval_captures (
                     capture_key TEXT NOT NULL PRIMARY KEY,
-                    workflow_id TEXT,
+                    workflow_id TEXT NOT NULL,
                     phase INTEGER,
                     kind TEXT,
                     label TEXT,

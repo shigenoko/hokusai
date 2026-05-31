@@ -300,6 +300,20 @@ def test_record_eval_capture_requires_workflow_id(store):
                                   kind="verification", output_hash="o")
 
 
+def test_eval_captures_workflow_id_not_null_at_schema(store):
+    """schema 側でも workflow_id NOT NULL を担保（直 SQL の NULL も DB が弾く、
+    PR #152 Copilot Round 4）。"""
+    import sqlite3
+
+    with pytest.raises(sqlite3.IntegrityError):
+        with store._connect() as conn:
+            conn.execute(
+                "INSERT INTO eval_captures (capture_key, workflow_id, "
+                "created_at, updated_at) VALUES ('k', NULL, 't', 't')"
+            )
+            conn.commit()
+
+
 def test_record_eval_capture_idempotent(store):
     for _ in range(3):
         store.record_eval_capture(
