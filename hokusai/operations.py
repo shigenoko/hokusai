@@ -33,7 +33,12 @@ MUTATING = "mutating"
 
 
 class OperationError(Exception):
-    """operation 実行の契約違反（共通 sink `execute_operation` が送出）。"""
+    """operation 実行の契約違反。
+
+    共通 guard/sink（`resolve_read_only_operation` / `invoke_operation` /
+    `execute_operation`）から送出され、CLI / Dashboard / 将来 MCP が共通の
+    例外型として捕捉する。
+    """
 
 
 class UnknownOperationError(OperationError):
