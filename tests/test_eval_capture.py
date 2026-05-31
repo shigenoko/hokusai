@@ -292,6 +292,18 @@ def test_build_review_captures_excludes_verification():
     assert c["metadata"]["source"] == "final_review"
 
 
+def test_build_review_captures_skips_missing_source():
+    """source 欠落の malformed payload は capture しない（dispatcher guard を
+    mirror、PR #160 Copilot Round 1）。"""
+    caps = build_review_captures("wf-1", [
+        {"rule": "HQ01", "message": "m"},          # source 無し → skip
+        {"source": "final_review", "rule": "HQ01"},  # message 無し → skip
+        {"source": "final_review", "message": "ok"},  # 両方あり → capture
+    ])
+    assert len(caps) == 1
+    assert caps[0]["metadata"]["source"] == "final_review"
+
+
 def test_build_review_captures_resolved_status_preserved():
     caps = build_review_captures("wf-1", [
         {"source": "final_review", "rule": "HQ01", "message": "m",

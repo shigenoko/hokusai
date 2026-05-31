@@ -184,11 +184,15 @@ def build_review_captures(
     for ri in review_issues or []:
         if not isinstance(ri, dict):
             continue
+        # dispatcher / persist_review_issue_payloads と同じ guard:
+        # source + message が無い malformed payload は capture しない
+        # （source 無しが eval gate の regression に誤検知されるのを防ぐ。
+        #  PR #160 Copilot Round 1）。
+        if not ri.get("source") or not ri.get("message"):
+            continue
         if ri.get("source") == "verification_failure":
             continue  # verification capture が担当（二重取り込み回避）
-        message = ri.get("message") or ""
-        if not message:
-            continue
+        message = ri.get("message")
         rule = ri.get("rule") or ""
         repo = ri.get("repository") or ""
         label = f"{repo}:{rule}" if repo and rule else (
