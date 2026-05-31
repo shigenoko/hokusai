@@ -1904,9 +1904,11 @@ def _handle_backfill(args, config) -> int:
             return 1
         targets = [(target, state)]
     else:
+        # backfill の主対象は completed (phase>=10) の既存 workflow なので、
+        # active のみの list_active_workflows ではなく全件列挙を使う
+        # (PR #157 Copilot Round 1)。
         targets = []
-        for wf in store.list_active_workflows():
-            wid = wf.get("workflow_id")
+        for wid in store.list_all_workflow_ids():
             st = store.load_workflow(wid) if wid else None
             if st is not None:
                 targets.append((wid, st))

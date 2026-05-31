@@ -832,6 +832,20 @@ class SQLiteStore:
                 for row in cursor.fetchall()
             ]
 
+    def list_all_workflow_ids(self) -> list[str]:
+        """全 workflow_id を返す（completed = current_phase >= 10 も含む）。
+
+        `list_active_workflows()` は `current_phase < 10`（進行中）のみ返すが、
+        backfill の主対象は forward-only で取りこぼした **完了済み** workflow
+        なので、phase を問わず全件列挙する専用メソッドを用意する
+        （PR #157 Copilot Round 1）。最新 updated_at 順。
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT workflow_id FROM workflows ORDER BY updated_at DESC"
+            ).fetchall()
+        return [row[0] for row in rows]
+
     def save_checkpoint(
         self,
         workflow_id: str,

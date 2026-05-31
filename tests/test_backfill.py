@@ -107,6 +107,58 @@ def test_handle_backfill_all_workflows(store, capsys):
     assert len(store.list_review_issues()) == 1
 
 
+def test_handle_backfill_covers_completed_workflows(store, capsys):
+    """id 省略時、completed (phase>=10) の workflow も対象になる
+    (PR #157 Copilot Round 1: list_active_workflows は phase<10 のみで漏れる)。"""
+    import argparse
+    import json
+
+    from hokusai.cli_main import _handle_backfill
+
+    # completed workflow (phase=10) に pending データを持たせる
+    # (state 内部の workflow_id と保存 key を "wf-done" で一致させる)
+    st = {
+        "workflow_id": "wf-done", "current_phase": 10,
+        "pending_review_issues": [
+            {"dedupe_key": "kd", "workflow_id": "wf-done",
+             "source": "verification_failure", "message": "boom"},
+        ],
+        "pending_work_items": [
+            {"workflow_id": "wf-done", "title": "x", "phase": 4},
+        ],
+    }
+    store.save_workflow("wf-done", st)
+
+    class _Cfg:
+        database_path = store.db_path
+
+    rc = _handle_backfill(
+        argparse.Namespace(workflow_id=None, dry_run=False, output="json"),
+        _Cfg(),
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    # completed workflow が対象に含まれ backfill された
+    assert payload["workflows"] == 1
+    assert payload["totals"]["review_issues"] == 1
+    assert len(store.list_review_issues(workflow_id="wf-done")) == 1
+
+
+def test_list_all_workflow_ids_includes_completed(store):
+    st = _state_with_pending()
+    st["current_phase"] = 10
+    store.save_workflow("wf-done", st)
+    st2 = _state_with_pending()
+    st2["workflow_id"] = "wf-active"
+    st2["current_phase"] = 3
+    store.save_workflow("wf-active", st2)
+    ids = set(store.list_all_workflow_ids())
+    assert ids == {"wf-done", "wf-active"}
+    # list_active_workflows は active のみ（対比）
+    active = {w["workflow_id"] for w in store.list_active_workflows()}
+    assert active == {"wf-active"}
+
+
 def test_handle_backfill_dry_run(store, capsys):
     import argparse
     import json
