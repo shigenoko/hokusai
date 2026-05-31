@@ -299,6 +299,153 @@ def build_eval_gate_result(
     }
 
 
+def fixture_input_identity(fixture: dict[str, Any]) -> str:
+    """fixture の「入力」同定キーを返す（output を含まない。eval replay 用）。
+
+    `fixture_identity` は capture_key（output_hash を内包）や audit_id で
+    同定するため、**同じ入力でも出力が変われば別 identity** になる。replay は
+    「同じ入力に対する出力が変わったか（drift）」を見たいので、output を除いた
+    入力次元で同定する別キーを使う。
+
+    - capture（verification / review 等）: kind / workflow_id / phase / label
+      / input_hash（label は repo:command や repo:rule の入力種別。input_hash
+      も含め、同 label でも記録入力が異なる fixture を別入力として扱う。
+      output_hash は含めない。PR #163 Copilot Round 1）
+    - llm_call: provider / model / purpose / input_hash（prompt 入力の同一性）
+    - その他: kind / workflow_id / phase / input_hash
+    """
+    if fixture.get("capture_key"):
+        return "cap:" + "\x1f".join(
+            str(fixture.get(k))
+            for k in ("kind", "workflow_id", "phase", "label", "input_hash")
+        )
+    if fixture.get("audit_id") is not None:
+        return "llm:" + "\x1f".join(
+            str(fixture.get(k))
+            for k in ("provider", "model", "purpose", "input_hash")
+        )
+    return "fx:" + "\x1f".join(
+        str(fixture.get(k))
+        for k in ("kind", "workflow_id", "phase", "input_hash")
+    )
+
+
+def _fixture_output_token(fixture: dict[str, Any]) -> Any:
+    """fixture の「出力」を表す比較トークンを返す。
+
+    capture 系は `output_hash`（出力本文の digest）。llm_call は output_hash を
+    持たないため、gateway の `decision` を出力相当として使う。
+    """
+    h = fixture.get("output_hash")
+    if h is not None:
+        return h
+    return fixture.get("decision")
+
+
+def _fixture_recency(fixture: dict[str, Any]) -> str:
+    """fixture の「最後に観測された時刻」を表す recency キーを返す。
+
+    eval_captures は `record_eval_capture` が同一 `capture_key`（= 同一 input
+    かつ同一 output）の再観測で `created_at` を初回値のまま保ち `updated_at`
+    のみ進める。よって「同一入力の最新出力」を選ぶ recency は `created_at`
+    ではなく `updated_at` が正しい（古い output が再観測されたら updated_at が
+    進み、現在その入力が産む出力であることを示す。PR #163 Copilot Round 1）。
+    `updated_at` が無い fixture（baseline 旧 export / llm_call）は `created_at`
+    にフォールバックする。
+    """
+    return fixture.get("updated_at") or fixture.get("created_at") or ""
+
+
+def build_eval_replay_result(
+    baseline: list[dict[str, Any]],
+    current: list[dict[str, Any]],
+    *,
+    window_start: str | None = None,
+) -> dict[str, Any]:
+    """baseline fixture を現 fixture へ「replay」し、入力ごとの出力 drift を見る。
+
+    実 LLM を再実行する侵襲的 replay ではなく、`eval export` で保存した baseline
+    fixture の各**入力**（`fixture_input_identity`）について、現 DB が保持する
+    同一入力の fixture と**出力**（`_fixture_output_token`）を突き合わせ、決定的に
+    分類する:
+
+    - `stable`: 同一入力が現側にも在り、出力が一致（退行なし）
+    - `drift`: 同一入力が現側に在るが、出力が変化（prompt / review rule 変更等の
+      退行 or 改善の signal。baseline / current の出力を併記）
+    - `missing`: baseline の入力が現側に無い（再観測されていない）
+    - `out_of_window`: 現側に無いが、recency（updated_at→created_at）が
+      `window_start` より古く `--limit` truncation で現側ウィンドウから外れた
+      だけかもしれない baseline 入力（missing と断定しない。`eval gate` の
+      out_of_window と同方針。`window_start` は呼び出し側が recency 軸で
+      渡す。PR #163 Copilot Round 1 / Round 2）
+
+    同一入力に複数 fixture（失敗→修正で別 output の行）がある場合は、各側で
+    `_fixture_recency`（updated_at→created_at。同点は `fixture_identity`）の
+    最大を採り、最後に観測された出力で比較する。I/O なし・決定的。
+    `eval gate`（集合の add/remove 退行）と相補的に、**同一入力の出力変化**を
+    捉える。
+
+    Returns:
+        {baseline_count, current_count, stable, drift, missing, out_of_window}
+    """
+    def _index(fixtures: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        by: dict[str, dict[str, Any]] = {}
+        for f in fixtures or []:
+            iid = fixture_input_identity(f)
+            prev = by.get(iid)
+            if prev is None:
+                by[iid] = f
+                continue
+            fk = (_fixture_recency(f), fixture_identity(f))
+            pk = (_fixture_recency(prev), fixture_identity(prev))
+            if fk >= pk:
+                by[iid] = f
+        return by
+
+    base_by = _index(baseline)
+    cur_by = _index(current)
+    stable: list[dict[str, Any]] = []
+    drift: list[dict[str, Any]] = []
+    missing: list[dict[str, Any]] = []
+    out_of_window: list[dict[str, Any]] = []
+    for iid in base_by:
+        bf = base_by[iid]
+        cf = cur_by.get(iid)
+        if cf is None:
+            # 現側に無い baseline 入力。観測ウィンドウ下限 (window_start) より
+            # 古ければ、現側に現れないのは limit truncation 由来かもしれず
+            # 「再観測されていない (missing)」と断定できない。比較軸は recency
+            # と統一する: window_start も呼び出し側で recency (updated_at→
+            # created_at) 基準に揃えて渡す（created_at と updated_at の軸混在を
+            # 避ける。PR #163 Copilot Round 2）。
+            recency = _fixture_recency(bf)
+            if (window_start is not None and recency
+                    and recency < window_start):
+                out_of_window.append(bf)
+            else:
+                missing.append(bf)
+        elif _fixture_output_token(bf) == _fixture_output_token(cf):
+            stable.append(cf)
+        else:
+            drift.append({
+                "input_identity": iid,
+                "kind": cf.get("kind"),
+                "label": cf.get("label") or cf.get("purpose"),
+                "baseline_output": _fixture_output_token(bf),
+                "current_output": _fixture_output_token(cf),
+                "baseline_status": bf.get("status"),
+                "current_status": cf.get("status"),
+            })
+    return {
+        "baseline_count": len(base_by),
+        "current_count": len(cur_by),
+        "stable": stable,
+        "drift": drift,
+        "missing": missing,
+        "out_of_window": out_of_window,
+    }
+
+
 def eval_capture_to_fixture(row: dict[str, Any]) -> dict[str, Any]:
     """`list_eval_captures` の 1 行を export 用 fixture 形へ整形する。"""
     return {
@@ -314,4 +461,7 @@ def eval_capture_to_fixture(row: dict[str, Any]) -> dict[str, Any]:
         "status": row.get("status"),
         "metadata": row.get("metadata"),
         "created_at": row.get("created_at"),
+        # updated_at は eval replay の recency キー（同一入力の最新出力を選ぶ）
+        # に使う。created_at は初回 insert 値で固定されるため（PR #163 Round 1）。
+        "updated_at": row.get("updated_at"),
     }
