@@ -43,6 +43,7 @@ def backfill_workflow(
         0）。edges は置換後の edge 数。
     """
     from .local_persistence import (
+        persist_review_captures,
         persist_review_issue_payloads,
         persist_work_item_payloads,
     )
@@ -65,13 +66,17 @@ def backfill_workflow(
     ri_added = store.count_review_issues(workflow_id=workflow_id) - ri_before
     wi_added = store.count_work_items(workflow_id=workflow_id) - wi_before
 
+    # durable 化した review_issues を eval_captures(kind="review") にも取り込み、
+    # eval gate が backfill 済みデータの review 退行も拾えるようにする（副作用。
+    # 件数は冪等な capture_key 上書きで delta 計測が複雑なので出力には含めない）。
+    review_rows = store.list_review_issues(workflow_id=workflow_id, limit=None)
+    persist_review_captures(store, workflow_id, review_rows)
+
     # edge 構築は全 row 必要なので limit=None（全件、truncation 回避）。
     edges = collect_all_workflow_edges(
         workflow_id, state,
         work_items=store.list_work_items(workflow_id=workflow_id, limit=None),
-        review_issues=store.list_review_issues(
-            workflow_id=workflow_id, limit=None
-        ),
+        review_issues=review_rows,
     )
     store.replace_workgraph_edges_for_workflow(
         workflow_id, [edge_to_replace_dict(e) for e in edges]

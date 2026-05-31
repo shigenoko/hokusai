@@ -18,6 +18,7 @@ from hokusai.eval_capture import (
     audit_rows_to_fixtures,
     build_capture_key,
     build_eval_gate_result,
+    build_review_captures,
     build_verification_captures,
     compute_content_digest,
     fixture_identity,
@@ -267,6 +268,90 @@ def test_eval_captures_phase_index_exists(store):
             ).fetchall()
         }
     assert "idx_eval_captures_phase" in names
+
+
+def test_build_review_captures_excludes_verification():
+    """review capture は kind=review、verification_failure source は除外
+    (verification capture が担当、二重取り込み回避)。"""
+    review_issues = [
+        {"source": "final_review", "rule": "HQ05", "repository": "Default",
+         "message": "変更スコープの妥当性", "status": "open"},
+        {"source": "verification_failure", "rule": "test",
+         "message": "boom", "status": "open"},  # 除外
+        {"source": "final_review", "message": ""},  # message 空 → skip
+    ]
+    caps = build_review_captures("wf-1", review_issues)
+    assert len(caps) == 1
+    c = caps[0]
+    assert c["kind"] == "review"
+    assert c["phase"] == 7
+    assert c["label"] == "Default:HQ05"
+    # 未解決(open)の review 指摘は gate 語彙で "fail"（regression 対象）
+    assert c["status"] == "fail"
+    assert c["metadata"]["review_status"] == "open"
+    assert c["metadata"]["source"] == "final_review"
+
+
+def test_build_review_captures_resolved_status_preserved():
+    caps = build_review_captures("wf-1", [
+        {"source": "final_review", "rule": "HQ01", "message": "m",
+         "status": "resolved"},
+    ])
+    assert caps[0]["status"] == "resolved"  # 解決済みは fail にしない
+
+
+def test_persist_review_captures_helper(store):
+    from hokusai.local_persistence import persist_review_captures
+
+    rows = [
+        {"source": "final_review", "rule": "HQ02", "repository": "X",
+         "message": "重複コード", "status": "open"},
+    ]
+    n = persist_review_captures(store, "wf-1", rows)
+    assert n == 1
+    caps = store.list_eval_captures(kind="review")
+    assert len(caps) == 1
+    assert caps[0]["label"] == "X:HQ02"
+
+
+def test_persist_review_captures_skips_no_workflow_id(store):
+    from hokusai.local_persistence import persist_review_captures
+
+    rows = [{"source": "final_review", "rule": "HQ02", "message": "m"}]
+    assert persist_review_captures(store, None, rows) == 0
+    assert store.list_eval_captures() == []
+
+
+def test_eval_gate_covers_review_regression(store, capsys):
+    """新規の open review 指摘（kind=review, status=fail）が eval gate の
+    regression として検出され --fail-on-regression で exit 1 になる。"""
+    import argparse
+    import json
+
+    from hokusai.cli_main import _handle_eval
+
+    cap = build_review_captures("wf-1", [
+        {"source": "final_review", "rule": "HQ05", "repository": "D",
+         "message": "新たな review 指摘", "status": "open"},
+    ])[0]
+    store.record_eval_capture(**cap)
+
+    baseline = store.db_path.parent / "base.json"
+    baseline.write_text(json.dumps({"fixtures": []}))
+
+    class _Cfg:
+        database_path = store.db_path
+
+    rc = _handle_eval(
+        argparse.Namespace(eval_subcommand="gate", baseline=str(baseline),
+                           workflow_id=None, limit=10000,
+                           fail_on_regression=True, output="json"),
+        _Cfg(),
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert len(payload["regressions"]) == 1
+    assert payload["regressions"][0]["kind"] == "review"
 
 
 def test_build_capture_key_is_deterministic_and_output_sensitive():
