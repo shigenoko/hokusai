@@ -4,4 +4,4 @@ Claude Code Workflow
 LangGraphベースの開発ワークフロー自動化ツール。
 """
 
-__version__ = "0.8.0"
+__version__ = "0.9.0"

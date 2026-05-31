@@ -12,6 +12,20 @@ HOKUSAI のすべての特筆すべき変更をこのファイルに記録する
 
 ## [Unreleased]
 
+---
+
+## [0.9.0] - 2026-05-31
+
+GBrain ロードマップで唯一未着手だった **Step 4: Eval Capture** に着手し（第1/第2スライス）、**Step 5: Local Workgraph Edges** を `resolved_by` edge まで仕上げた minor リリース。これで GBrain ロードマップの全 5 Step に着手済みとなった。すべて決定的・SQLite-backed（保存は本文を持たず hash/length/metadata のみ）。設計議論は [docs/roadmap-gbrain-inspirations.md](docs/roadmap-gbrain-inspirations.md)。
+
+すべて additive。新コマンド `hokusai eval export / list`・新 durable table（`eval_captures`）・新 edge 種別（`has_review_issue` / `resolved_by`）を追加するのみで、既存コマンドの挙動は不変。既存 DB は起動時 migration（`CREATE TABLE IF NOT EXISTS`）で前方互換。
+
+主な内容:
+
+- **Eval Capture 土台（Step 4 第1）** — LLM Gateway が `audit_logs` に記録済みの LLM 呼び出しを eval fixture として export する非侵襲な層。`hokusai eval export [--since 30d] [--output json|jsonl]` / `eval list`。
+- **verification の明示 capture（Step 4 第2）** — Phase 6 verification 失敗を専用 `eval_captures` テーブルへ drain 経由で永続化（失敗→修正の履歴を別 fixture で保持）。`eval export` / `list` は audit（`llm_call`）と capture（`verification`）を合流。
+- **durable workgraph edge（Step 5 第5）** — durable な `work_items` / `review_issues` テーブルから `has_work_item` / `has_review_issue` / `review_issue → resolved_by → pull_request` edge を構築。`graph build` が state と durable を合流。
+
 ### Added
 
 - **Step 4 (Eval Capture) 第 2 スライス: verification 結果の明示 capture**: 第 1 スライス（audit_logs 由来 export）に加え、Phase 6 verification 失敗を専用 `eval_captures` テーブルへ明示 capture する。SQLite に `eval_captures` テーブル（`capture_key`（workflow_id + phase + kind + label + output_hash の決定的 hash）主キー + phase/kind/label/input_hash/input_length/output_hash/output_length/status/metadata）を追加し、`SQLiteStore` に `record_eval_capture()`（COALESCE 冪等 upsert）/ `list_eval_captures()`（workflow_id/kind/phase/since フィルタ + workflow_id/kind/phase index）を実装。`_WORKFLOW_DEPENDENT_TABLES` に追加し cascade-delete 対象に。capture は `hokusai/eval_capture.py` の純関数 `build_verification_captures(workflow_id, verification_errors)`（各失敗 → input=command / output=error_output の digest、本文非保存。`full_output_hash` 優先）+ `build_capture_key()`（出力が変われば別 fixture = 失敗→修正の履歴が別行）で構築し、`local_persistence.persist_verification_captures()` 経由で `workflow.py` の review issue drain が **clear 前に** best-effort 永続化（retry での同一観測は capture_key で冪等）。CLI `hokusai eval export` / `eval list` は audit_logs 由来（kind=`llm_call`）と eval_captures（kind=`verification`）を**合流**して出力し、`eval list` は kind / phase / purpose / status / decision 別に集約。phase 入出力の明示 capture / replay / regression gate は後続スライス。回帰防止テスト 12 件追加 (`tests/test_eval_capture.py`: verification capture 構築 / capture_key 決定性・出力感応 / record+list / 冪等 / GC cascade / persist ヘルパ / export 合流)。設計: [docs/roadmap-gbrain-inspirations.md §P1 / Step 4](docs/roadmap-gbrain-inspirations.md)。
@@ -757,7 +771,8 @@ Notion / GitHub Issue / Jira / Linear 連携の最小機能セット。
 - SQLite による checkpoint / outbox 永続化
 - Worktree ベースの並行ワークフロー実行
 
-[Unreleased]: https://github.com/shigenoko/hokusai/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/shigenoko/hokusai/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/shigenoko/hokusai/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/shigenoko/hokusai/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/shigenoko/hokusai/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/shigenoko/hokusai/compare/v0.5.1...v0.6.0
