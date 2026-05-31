@@ -373,10 +373,11 @@ def build_eval_replay_result(
     - `drift`: 同一入力が現側に在るが、出力が変化（prompt / review rule 変更等の
       退行 or 改善の signal。baseline / current の出力を併記）
     - `missing`: baseline の入力が現側に無い（再観測されていない）
-    - `out_of_window`: 現側に無いが、`window_start` より古く `--limit`
-      truncation で現側ウィンドウから外れただけかもしれない baseline 入力
-      （missing と断定しない。`eval gate` の out_of_window と同方針。
-       PR #163 Copilot Round 1）
+    - `out_of_window`: 現側に無いが、recency（updated_at→created_at）が
+      `window_start` より古く `--limit` truncation で現側ウィンドウから外れた
+      だけかもしれない baseline 入力（missing と断定しない。`eval gate` の
+      out_of_window と同方針。`window_start` は呼び出し側が recency 軸で
+      渡す。PR #163 Copilot Round 1 / Round 2）
 
     同一入力に複数 fixture（失敗→修正で別 output の行）がある場合は、各側で
     `_fixture_recency`（updated_at→created_at。同点は `fixture_identity`）の
@@ -413,10 +414,13 @@ def build_eval_replay_result(
         if cf is None:
             # 現側に無い baseline 入力。観測ウィンドウ下限 (window_start) より
             # 古ければ、現側に現れないのは limit truncation 由来かもしれず
-            # 「再観測されていない (missing)」と断定できない。
-            created = bf.get("created_at")
-            if (window_start is not None and created is not None
-                    and created < window_start):
+            # 「再観測されていない (missing)」と断定できない。比較軸は recency
+            # と統一する: window_start も呼び出し側で recency (updated_at→
+            # created_at) 基準に揃えて渡す（created_at と updated_at の軸混在を
+            # 避ける。PR #163 Copilot Round 2）。
+            recency = _fixture_recency(bf)
+            if (window_start is not None and recency
+                    and recency < window_start):
                 out_of_window.append(bf)
             else:
                 missing.append(bf)

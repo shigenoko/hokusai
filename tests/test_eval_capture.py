@@ -640,6 +640,22 @@ def test_build_eval_replay_result_out_of_window_not_missing():
     assert [f["capture_key"] for f in r["missing"]] == ["rec"]
 
 
+def test_build_eval_replay_result_out_of_window_uses_recency_not_created_at():
+    """out_of_window 判定は recency(updated_at) で行う。古い created_at でも
+    updated_at が window_start 以降なら missing 扱い（軸混在の回避。Round 2）。"""
+    # created_at は古いが updated_at は window 以降 → 再観測されており missing
+    reobserved = {"kind": "verification", "capture_key": "ro",
+                  "workflow_id": "wf-1", "phase": 6, "label": "L:ro",
+                  "output_hash": "H", "created_at": "2026-01-01",
+                  "updated_at": "2026-06-01"}
+    r = build_eval_replay_result(
+        [reobserved], [], window_start="2026-03-01"
+    )
+    # updated_at(2026-06-01) >= window_start → out_of_window でなく missing
+    assert r["out_of_window"] == []
+    assert [f["capture_key"] for f in r["missing"]] == ["ro"]
+
+
 def test_handle_eval_replay_fail_on_drift(store, tmp_path, capsys):
     import argparse
     import json

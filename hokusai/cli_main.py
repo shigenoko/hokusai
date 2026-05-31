@@ -2086,8 +2086,24 @@ def _handle_eval(args, config) -> int:
         except (OSError, ValueError) as e:
             print(f"✗ baseline 読み込み失敗: {e}", file=sys.stderr)
             return 1
+        # replay は観測 recency (updated_at→created_at) で現側を畳む。現側
+        # ウィンドウ下限 (window_start) も recency 軸に揃え直す: 全体の fetch は
+        # created_at 順だが、in-memory では recency で並べ直して truncation 下限を
+        # recency 基準にすることで、out_of_window 判定との軸混在を避ける
+        # （Copilot Round 2）。なお per-source の SQL fetch は created_at 順
+        # LIMIT のため、fixtures 総数が --limit (既定 10000) を超える極端なケースで
+        # は古く insert・最近再観測の capture が fetch 段階で落ちうる（その場合も
+        # out_of_window に conservative 分類される）。
+        def _recency(f):
+            return f.get("updated_at") or f.get("created_at") or ""
+
+        replay_fixtures = sorted(fixtures, key=_recency, reverse=True)
+        replay_window = (
+            _recency(replay_fixtures[-1])
+            if (_truncated and replay_fixtures) else None
+        )
         result = build_eval_replay_result(
-            baseline, fixtures, window_start=_window_start
+            baseline, replay_fixtures, window_start=replay_window
         )
         if getattr(args, "output", "text") == "json":
             print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
