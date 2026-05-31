@@ -71,8 +71,11 @@ def handle_operations_request(
         (status_code, body_dict) — body は JSON 直列化可能。エラーは
         `{"error": "..."}` 形。決定的・I/O は store 読取のみ（read-only）。
     """
+    # エラーボディには **リクエスト由来の生文字列（path / method / 未知 name）を
+    # 反映しない**（reflected data 経路を作らない。SonarCloud S5131 / PR #165）。
+    # 利用者への手掛かりは registry 由来の `available`（安全）で与える。
     if method != "GET":
-        return 405, {"error": f"method not allowed: {method}"}
+        return 405, {"error": "method not allowed"}
 
     # 末尾スラッシュを正規化（"/operations/" は一覧扱い）。
     normalized = path.rstrip("/") or "/"
@@ -93,23 +96,25 @@ def handle_operations_request(
     if normalized.startswith(prefix):
         name = normalized[len(prefix):]
         if not name or "/" in name:
-            return 404, {"error": f"not found: {path}"}
+            return 404, {"error": "not found"}
         try:
             op = resolve_read_only_operation(registry, name)
         except UnknownOperationError:
             return 404, {
-                "error": f"unknown operation: {name}",
+                "error": "unknown operation",
                 "available": registry.names(),
             }
-        except ScopeViolationError as e:
-            return 403, {"error": str(e)}
+        except ScopeViolationError:
+            return 403, {"error": "operation is not read-only"}
         try:
             result = invoke_operation(op, params, config=config)
         except ValueError as e:
-            return 400, {"error": str(e)}
-        return 200, {"operation": name, "result": result}
+            # handler 由来の検証メッセージ（開発者が書いた静的文言）。op.name は
+            # registry に登録済みの安全な名前。
+            return 400, {"operation": op.name, "error": str(e)}
+        return 200, {"operation": op.name, "result": result}
 
-    return 404, {"error": f"not found: {path}"}
+    return 404, {"error": "not found"}
 
 
 def build_operations_http_handler(
@@ -132,17 +137,41 @@ def build_operations_http_handler(
             ).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
+            # JSON を HTML として解釈させない（reflected 系の防御を一段足す）。
+            self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
             self.wfile.write(payload)
 
-        def do_GET(self) -> None:  # noqa: N802 (http.server 規約)
-            parts = urlsplit(self.path)
-            params = _query_to_params(parts.query)
-            status, body = handle_operations_request(
-                registry, "GET", parts.path, params, config=config
-            )
+        def _dispatch(self, method: str) -> None:
+            # 予期せぬ例外で traceback を stderr に流して接続を落とさず、500 を
+            # JSON で返す（log_message 抑止方針と整合。PR #165 Copilot Round 1）。
+            try:
+                parts = urlsplit(self.path)
+                params = _query_to_params(parts.query)
+                status, body = handle_operations_request(
+                    registry, method, parts.path, params, config=config
+                )
+            except Exception:  # noqa: BLE001 (admin 境界の防御的 500)
+                status, body = 500, {"error": "internal server error"}
             self._respond(status, body)
+
+        # GET 以外も handle_operations_request に通し、405 を返す（既定の 501 で
+        # なく契約通りの 405 に揃える。PR #165 Copilot Round 1）。
+        def do_GET(self) -> None:  # noqa: N802 (http.server 規約)
+            self._dispatch("GET")
+
+        def do_POST(self) -> None:  # noqa: N802
+            self._dispatch("POST")
+
+        def do_PUT(self) -> None:  # noqa: N802
+            self._dispatch("PUT")
+
+        def do_DELETE(self) -> None:  # noqa: N802
+            self._dispatch("DELETE")
+
+        def do_PATCH(self) -> None:  # noqa: N802
+            self._dispatch("PATCH")
 
     return _Handler
 

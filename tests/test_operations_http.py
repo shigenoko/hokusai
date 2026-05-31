@@ -1,8 +1,8 @@
 """read-only HTTP admin（Step 3 第4スライス）のテスト。
 
 純関数 `handle_operations_request` のルーティング / ステータス分類を中心に
-検証し、実 HTTP サーバ疎通は 1 件で確認する（execute 経路が HTTP 越しでも
-同じく動くことの担保）。
+検証し、実 HTTP サーバ疎通（end-to-end / 404 / 非 GET 405）でも execute 経路が
+HTTP 越しに同じく動くことを担保する。
 """
 
 from __future__ import annotations
@@ -153,7 +153,7 @@ def test_request_trailing_slash_is_list():
 
 def test_request_unknown_path_404():
     reg = build_default_registry()
-    status, body = handle_operations_request(
+    status, _ = handle_operations_request(
         reg, "GET", "/nope", {}, config=_FakeConfig()
     )
     assert status == 404
@@ -161,10 +161,31 @@ def test_request_unknown_path_404():
 
 def test_request_nested_path_404():
     reg = build_default_registry()
-    status, body = handle_operations_request(
+    status, _ = handle_operations_request(
         reg, "GET", "/operations/a/b", {}, config=_FakeConfig()
     )
     assert status == 404
+
+
+def test_request_error_bodies_do_not_reflect_request_data():
+    """エラーボディに path / method / 未知 name の生文字列を反映しない
+    （reflected data 経路を作らない。SonarCloud S5131 / PR #165）。"""
+    reg = build_default_registry()
+    # 未知 path: path 文字列を含めない
+    _, b1 = handle_operations_request(
+        reg, "GET", "/secret-path-xyz", {}, config=_FakeConfig()
+    )
+    assert "secret-path-xyz" not in json.dumps(b1)
+    # 未知 operation: name を含めない（available は registry 由来で安全）
+    _, b2 = handle_operations_request(
+        reg, "GET", "/operations/evil<script>", {}, config=_FakeConfig()
+    )
+    assert "evil" not in json.dumps(b2)
+    # 405: method を含めない
+    _, b3 = handle_operations_request(
+        reg, "DELETE", "/operations", {}, config=_FakeConfig()
+    )
+    assert b3 == {"error": "method not allowed"}
 
 
 # --- 実 HTTP 疎通（execute 経路が HTTP 越しでも動く） --------------------
@@ -180,7 +201,7 @@ def test_http_server_end_to_end():
     server = serve_operations_http(
         reg, _FakeConfig(), host="127.0.0.1", port=0  # port=0 → 空きポート
     )
-    host, port = server.server_address
+    _, port = server.server_address
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -217,6 +238,28 @@ def test_http_server_unknown_returns_404():
                 f"http://127.0.0.1:{port}/operations/no.such", timeout=5
             )
         assert ei.value.code == 404
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_http_server_non_get_returns_405():
+    """GET 以外は既定の 501 でなく契約通りの 405 を返す（Copilot Round 1）。"""
+    reg = build_default_registry()
+    server = serve_operations_http(
+        reg, _FakeConfig(), host="127.0.0.1", port=0
+    )
+    _, port = server.server_address
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/operations", method="DELETE"
+        )
+        with pytest.raises(urllib.error.HTTPError) as ei:
+            urllib.request.urlopen(req, timeout=5)
+        assert ei.value.code == 405
     finally:
         server.shutdown()
         server.server_close()
