@@ -165,3 +165,31 @@ def persist_verification_captures(
         except Exception as e:  # best-effort
             logger.debug(f"eval_capture の永続化を抑制: {e}")
     return persisted
+
+
+def persist_review_captures(
+    store: Any, workflow_id: str | None, review_issues: list[dict[str, Any]]
+) -> int:
+    """review issue を eval_captures(kind="review") へ best-effort 永続化する。
+
+    `build_review_captures` で capture dict を作り `record_eval_capture` へ流す。
+    `eval gate` が review rule の退行も拾えるようにする土台。workflow_id 無しは
+    skip（capture_key 衝突 / GC 孤児を防ぐ）。
+    """
+    from .eval_capture import build_review_captures
+
+    if not workflow_id:
+        return 0
+    persisted = 0
+    try:
+        captures = build_review_captures(workflow_id, review_issues)
+    except Exception as e:
+        logger.debug(f"review capture の構築を抑制: {e}")
+        return 0
+    for capture in captures:
+        try:
+            store.record_eval_capture(**capture)
+            persisted += 1
+        except Exception as e:  # best-effort
+            logger.debug(f"review eval_capture の永続化を抑制: {e}")
+    return persisted

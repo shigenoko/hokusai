@@ -265,6 +265,7 @@ class WorkflowRunner:
             # Notion 配線/dispatch の成否に関わらず、recurring 検出等の土台として
             # review_issues table に残す。best-effort で drain 本体を止めない。
             from .local_persistence import (
+                persist_review_captures,
                 persist_review_issue_payloads,
                 persist_verification_captures,
             )
@@ -276,6 +277,12 @@ class WorkflowRunner:
                 self.store,
                 state_values.get("workflow_id"),
                 state_values.get("verification_errors") or [],
+            )
+            # Phase 7 review 指摘 (final_review 等、verification 以外) を
+            # eval_captures(kind="review") へ取り込み、eval gate が review rule の
+            # 退行も拾えるようにする (Step 4 review capture)。best-effort。
+            persist_review_captures(
+                self.store, state_values.get("workflow_id"), pending
             )
             operator = state_values.get("operator")
             if not operator and self.notion_dispatcher.is_configured():

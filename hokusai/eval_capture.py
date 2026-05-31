@@ -164,6 +164,69 @@ def build_verification_captures(
     return captures
 
 
+def build_review_captures(
+    workflow_id: str | None,
+    review_issues: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """review issue を eval capture dict 群（kind="review"）へ変換する。
+
+    入力は review issue の dict（drain の `pending_review_issues` payload でも、
+    durable `review_issues` 行でも同じ `source` / `rule` / `file` / `message` /
+    `repository` / `status` フィールドを持つ）。`source="verification_failure"`
+    は `build_verification_captures`（kind="verification"）が担当するので
+    **除外**し、Phase 7 の `final_review` 等コードレビュー指摘のみ kind="review"
+    で取り込む。これにより `eval gate` が review rule の退行も拾える。
+
+    output digest は message（指摘内容）から取り、本文は保存しない。phase は
+    最終レビュー相当の 7。`record_eval_capture(**capture)` に渡せる dict を返す。
+    """
+    captures: list[dict[str, Any]] = []
+    for ri in review_issues or []:
+        if not isinstance(ri, dict):
+            continue
+        # dispatcher / persist_review_issue_payloads と同じ guard:
+        # source + message が無い malformed payload は capture しない
+        # （source 無しが eval gate の regression に誤検知されるのを防ぐ。
+        #  PR #160 Copilot Round 1）。
+        if not ri.get("source") or not ri.get("message"):
+            continue
+        if ri.get("source") == "verification_failure":
+            continue  # verification capture が担当（二重取り込み回避）
+        message = ri.get("message")
+        rule = ri.get("rule") or ""
+        repo = ri.get("repository") or ""
+        label = f"{repo}:{rule}" if repo and rule else (
+            rule or repo or str(ri.get("source") or "review")
+        )
+        out = compute_content_digest(message)
+        # gate の語彙にマップ: 未解決 (open / 未設定) の review 指摘は失敗相当
+        # として "fail" にし、新規発生時に eval gate の regression として拾える
+        # ようにする。解決済みはそのまま (resolved)。元 status は metadata に残す。
+        review_status = ri.get("status")
+        gate_status = "fail" if review_status in (None, "open") else review_status
+        captures.append({
+            "capture_key": build_capture_key(
+                workflow_id=workflow_id, phase=7, kind="review",
+                label=label, output_hash=out["hash"],
+            ),
+            "workflow_id": workflow_id,
+            "phase": 7,
+            "kind": "review",
+            "label": label,
+            "input_hash": None,
+            "input_length": None,
+            "output_hash": out["hash"],
+            "output_length": out["length"],
+            "status": gate_status,
+            "metadata": {
+                "source": ri.get("source"), "rule": rule,
+                "file": ri.get("file"), "repository": repo,
+                "review_status": review_status,
+            },
+        })
+    return captures
+
+
 def fixture_identity(fixture: dict[str, Any]) -> str:
     """fixture の安定した同定キーを返す（eval gate の diff 用）。
 
