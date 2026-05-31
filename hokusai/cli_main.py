@@ -822,6 +822,34 @@ def _build_parser():
         help="出力形式（既定 text）",
     )
 
+    # eval replay: baseline fixture の各入力を現 DB へ突き合わせ、同一入力の
+    # 出力 drift を検出する（実 LLM 再実行なし・非侵襲）。gate（集合 add/remove）
+    # と相補的に「同じ入力の出力が変わったか」を見る。
+    eval_replay_parser = eval_subparsers.add_parser(
+        "replay",
+        help="baseline fixture を現状へ replay し入力ごとの出力 drift を検出（Step 4）",
+        parents=[shared_options],
+    )
+    eval_replay_parser.add_argument(
+        "--baseline", required=True,
+        help="baseline fixture の JSON ファイル（`eval export` の出力）",
+    )
+    eval_replay_parser.add_argument(
+        "--workflow-id", default=None, help="現側 fixture を workflow_id で絞る"
+    )
+    eval_replay_parser.add_argument(
+        "--limit", type=_positive_int, default=10000,
+        help="現側 fixture の取得上限（>=1、既定 10000）",
+    )
+    eval_replay_parser.add_argument(
+        "--fail-on-drift", action="store_true",
+        help="同一入力の出力 drift があれば exit 1（CI gate 用）",
+    )
+    eval_replay_parser.add_argument(
+        "--output", choices=("text", "json"), default="text",
+        help="出力形式（既定 text）",
+    )
+
     # backfill コマンド: 既存 workflow の state から durable テーブルを再構築。
     # durable テーブルは drain hook 依存で forward-only にしか埋まらないため
     # (dogfooding §11)、既存データを後追いで durable 化する。
@@ -1960,11 +1988,12 @@ def _handle_eval(args, config) -> int:
     from .persistence import SQLiteStore
 
     subcommand = getattr(args, "eval_subcommand", None)
-    if subcommand not in ("export", "list", "gate"):
-        print("使い方: hokusai eval {export|list|gate} ...", file=sys.stderr)
+    if subcommand not in ("export", "list", "gate", "replay"):
+        print("使い方: hokusai eval {export|list|gate|replay} ...", file=sys.stderr)
         print("  export [--since 30d] [--output json|jsonl]", file=sys.stderr)
         print("  list   [--since 30d] 集約サマリ", file=sys.stderr)
-        print("  gate   --baseline <file> 退行検出", file=sys.stderr)
+        print("  gate   --baseline <file> 退行検出（集合 add/remove）", file=sys.stderr)
+        print("  replay --baseline <file> 入力ごとの出力 drift 検出", file=sys.stderr)
         return 1
 
     try:
@@ -2046,6 +2075,40 @@ def _handle_eval(args, config) -> int:
                 )
         # --fail-on-regression 指定時のみ regression で exit 1（CI gate 用）
         if getattr(args, "fail_on_regression", False) and result["regressions"]:
+            return 1
+        return 0
+
+    if subcommand == "replay":
+        from .eval_capture import build_eval_replay_result
+
+        try:
+            baseline = _load_baseline_fixtures(args.baseline)
+        except (OSError, ValueError) as e:
+            print(f"✗ baseline 読み込み失敗: {e}", file=sys.stderr)
+            return 1
+        result = build_eval_replay_result(baseline, fixtures)
+        if getattr(args, "output", "text") == "json":
+            print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+        else:
+            print(
+                f"eval replay: baseline {result['baseline_count']} 入力 / "
+                f"current {result['current_count']} 入力"
+            )
+            print(f"  ✓ 一致 (stable): {len(result['stable'])}")
+            print(f"  ⚠ 出力変化 (drift): {len(result['drift'])}")
+            for d in result["drift"]:
+                print(
+                    f"    ~ [{d.get('kind')}] {d.get('label') or '-'}: "
+                    f"{d.get('baseline_output')} → {d.get('current_output')}"
+                )
+            missing = result.get("missing") or []
+            if missing:
+                print(
+                    f"  ・現側に無い (missing): {len(missing)}"
+                    "（再観測されていない baseline 入力）"
+                )
+        # --fail-on-drift 指定時のみ drift で exit 1（CI gate 用）
+        if getattr(args, "fail_on_drift", False) and result["drift"]:
             return 1
         return 0
 

@@ -18,10 +18,12 @@ from hokusai.eval_capture import (
     audit_rows_to_fixtures,
     build_capture_key,
     build_eval_gate_result,
+    build_eval_replay_result,
     build_review_captures,
     build_verification_captures,
     compute_content_digest,
     fixture_identity,
+    fixture_input_identity,
 )
 from hokusai.persistence import SQLiteStore
 
@@ -513,6 +515,145 @@ def test_fixture_identity():
     assert fixture_identity({"audit_id": 5}) == "audit:5"
     # capture_key も audit_id も無い → 合成キー（落ちない）
     assert fixture_identity({"kind": "x"}).startswith("fx:")
+
+
+# --- eval replay (Step 4: 入力ごとの出力 drift) --------------------------
+
+
+def test_fixture_input_identity_excludes_output():
+    """input identity は output_hash を含まず、入力次元のみで同定する。"""
+    a = {"kind": "verification", "capture_key": "ck-A", "workflow_id": "wf-1",
+         "phase": 6, "label": "Backend:test", "output_hash": "OLD"}
+    b = {"kind": "verification", "capture_key": "ck-B", "workflow_id": "wf-1",
+         "phase": 6, "label": "Backend:test", "output_hash": "NEW"}
+    # capture_key / output_hash が違っても入力が同じなら input identity は一致
+    assert fixture_input_identity(a) == fixture_input_identity(b)
+    # llm_call は provider/model/purpose/input_hash で同定
+    llm = {"audit_id": 1, "provider": "anthropic", "model": "m",
+           "purpose": "p", "input_hash": "ih"}
+    assert fixture_input_identity(llm).startswith("llm:")
+    # どちらでもない → fx: フォールバック
+    assert fixture_input_identity({"kind": "x"}).startswith("fx:")
+
+
+def test_build_eval_replay_result_stable_drift_missing():
+    base_stable = {"kind": "verification", "capture_key": "s1",
+                   "workflow_id": "wf-1", "phase": 6, "label": "L:a",
+                   "output_hash": "H1"}
+    base_drift = {"kind": "verification", "capture_key": "d1",
+                  "workflow_id": "wf-1", "phase": 6, "label": "L:b",
+                  "output_hash": "OLD"}
+    base_missing = {"kind": "verification", "capture_key": "m1",
+                    "workflow_id": "wf-1", "phase": 6, "label": "L:c",
+                    "output_hash": "H3"}
+    cur_stable = dict(base_stable, capture_key="s1b")  # 同入力・同出力
+    cur_drift = {"kind": "verification", "capture_key": "d2",
+                 "workflow_id": "wf-1", "phase": 6, "label": "L:b",
+                 "output_hash": "NEW"}  # 同入力・出力変化
+    r = build_eval_replay_result(
+        [base_stable, base_drift, base_missing], [cur_stable, cur_drift]
+    )
+    assert r["baseline_count"] == 3
+    assert r["current_count"] == 2
+    assert len(r["stable"]) == 1
+    assert len(r["drift"]) == 1
+    assert r["drift"][0]["label"] == "L:b"
+    assert r["drift"][0]["baseline_output"] == "OLD"
+    assert r["drift"][0]["current_output"] == "NEW"
+    assert [f["capture_key"] for f in r["missing"]] == ["m1"]
+
+
+def test_build_eval_replay_result_collapses_to_latest_output():
+    """同一入力に複数 fixture がある場合、created_at 最新の出力で比較する。"""
+    base = [{"kind": "verification", "capture_key": "b", "workflow_id": "wf-1",
+             "phase": 6, "label": "L", "output_hash": "OLD",
+             "created_at": "2026-01-01"}]
+    current = [
+        {"kind": "verification", "capture_key": "c-old", "workflow_id": "wf-1",
+         "phase": 6, "label": "L", "output_hash": "OLD",
+         "created_at": "2026-01-01"},
+        {"kind": "verification", "capture_key": "c-new", "workflow_id": "wf-1",
+         "phase": 6, "label": "L", "output_hash": "NEW",
+         "created_at": "2026-05-31"},  # 最新 → こちらが採用され drift
+    ]
+    r = build_eval_replay_result(base, current)
+    assert len(r["drift"]) == 1
+    assert r["drift"][0]["current_output"] == "NEW"
+    assert r["stable"] == []
+
+
+def test_build_eval_replay_result_stable_when_identical():
+    fx = [{"kind": "verification", "capture_key": "k", "workflow_id": "wf-1",
+           "phase": 6, "label": "L", "output_hash": "H"}]
+    r = build_eval_replay_result(fx, fx)
+    assert len(r["stable"]) == 1
+    assert r["drift"] == []
+    assert r["missing"] == []
+
+
+def test_handle_eval_replay_fail_on_drift(store, tmp_path, capsys):
+    import argparse
+    import json
+
+    from hokusai.cli_main import _handle_eval
+
+    # baseline: 同一入力 (wf-1/phase6/Backend:test) の出力 OLD
+    baseline = tmp_path / "base.json"
+    baseline.write_text(json.dumps({"fixtures": [{
+        "kind": "verification", "capture_key": "ck-old",
+        "workflow_id": "wf-1", "phase": 6, "label": "Backend:test",
+        "output_hash": "OLD", "status": "fail",
+    }]}))
+    # 現 DB: 同一入力だが出力 NEW → drift
+    store.record_eval_capture(
+        capture_key="ck-new", workflow_id="wf-1", phase=6, kind="verification",
+        label="Backend:test", output_hash="NEW", status="fail",
+    )
+
+    class _Cfg:
+        database_path = store.db_path
+
+    # --fail-on-drift あり → exit 1
+    rc = _handle_eval(
+        argparse.Namespace(eval_subcommand="replay", baseline=str(baseline),
+                           workflow_id=None, limit=10000,
+                           fail_on_drift=True, output="json"),
+        _Cfg(),
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert len(payload["drift"]) == 1
+    assert payload["drift"][0]["baseline_output"] == "OLD"
+    assert payload["drift"][0]["current_output"] == "NEW"
+
+    # --fail-on-drift なし → exit 0（報告のみ）
+    rc2 = _handle_eval(
+        argparse.Namespace(eval_subcommand="replay", baseline=str(baseline),
+                           workflow_id=None, limit=10000,
+                           fail_on_drift=False, output="text"),
+        _Cfg(),
+    )
+    capsys.readouterr()
+    assert rc2 == 0
+
+
+def test_handle_eval_replay_missing_baseline(store, capsys):
+    import argparse
+
+    from hokusai.cli_main import _handle_eval
+
+    class _Cfg:
+        database_path = store.db_path
+
+    rc = _handle_eval(
+        argparse.Namespace(eval_subcommand="replay",
+                           baseline="/nonexistent/base.json",
+                           workflow_id=None, limit=10000,
+                           fail_on_drift=False, output="text"),
+        _Cfg(),
+    )
+    assert rc == 1
+    assert "baseline 読み込み失敗" in capsys.readouterr().err
 
 
 def test_build_eval_gate_result_detects_regression_and_improvement():

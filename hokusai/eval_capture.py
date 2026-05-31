@@ -299,6 +299,116 @@ def build_eval_gate_result(
     }
 
 
+def fixture_input_identity(fixture: dict[str, Any]) -> str:
+    """fixture の「入力」同定キーを返す（output を含まない。eval replay 用）。
+
+    `fixture_identity` は capture_key（output_hash を内包）や audit_id で
+    同定するため、**同じ入力でも出力が変われば別 identity** になる。replay は
+    「同じ入力に対する出力が変わったか（drift）」を見たいので、output を除いた
+    入力次元で同定する別キーを使う。
+
+    - capture（verification / review 等）: kind / workflow_id / phase / label
+      （label は repo:command や repo:rule の入力種別。output_hash は含めない）
+    - llm_call: provider / model / purpose / input_hash（prompt 入力の同一性）
+    - その他: kind / workflow_id / phase / input_hash
+    """
+    if fixture.get("capture_key"):
+        return "cap:" + "\x1f".join(
+            str(fixture.get(k))
+            for k in ("kind", "workflow_id", "phase", "label")
+        )
+    if fixture.get("audit_id") is not None:
+        return "llm:" + "\x1f".join(
+            str(fixture.get(k))
+            for k in ("provider", "model", "purpose", "input_hash")
+        )
+    return "fx:" + "\x1f".join(
+        str(fixture.get(k))
+        for k in ("kind", "workflow_id", "phase", "input_hash")
+    )
+
+
+def _fixture_output_token(fixture: dict[str, Any]) -> Any:
+    """fixture の「出力」を表す比較トークンを返す。
+
+    capture 系は `output_hash`（出力本文の digest）。llm_call は output_hash を
+    持たないため、gateway の `decision` を出力相当として使う。
+    """
+    h = fixture.get("output_hash")
+    if h is not None:
+        return h
+    return fixture.get("decision")
+
+
+def build_eval_replay_result(
+    baseline: list[dict[str, Any]],
+    current: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """baseline fixture を現 fixture へ「replay」し、入力ごとの出力 drift を見る。
+
+    実 LLM を再実行する侵襲的 replay ではなく、`eval export` で保存した baseline
+    fixture の各**入力**（`fixture_input_identity`）について、現 DB が保持する
+    同一入力の fixture と**出力**（`_fixture_output_token`）を突き合わせ、決定的に
+    分類する:
+
+    - `stable`: 同一入力が現側にも在り、出力が一致（退行なし）
+    - `drift`: 同一入力が現側に在るが、出力が変化（prompt / review rule 変更等の
+      退行 or 改善の signal。baseline / current の出力を併記）
+    - `missing`: baseline の入力が現側に無い（再観測されていない）
+
+    同一入力に複数 fixture（失敗→修正で別 output の行）がある場合は、各側で
+    `created_at`（同点は `fixture_identity`）の最大を採り、最新の出力で比較する。
+    I/O なし・決定的。`eval gate`（集合の add/remove 退行）と相補的に、
+    **同一入力の出力変化**を捉える。
+
+    Returns:
+        {baseline_count, current_count, stable, drift, missing}
+    """
+    def _index(fixtures: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        by: dict[str, dict[str, Any]] = {}
+        for f in fixtures or []:
+            iid = fixture_input_identity(f)
+            prev = by.get(iid)
+            if prev is None:
+                by[iid] = f
+                continue
+            fk = (f.get("created_at") or "", fixture_identity(f))
+            pk = (prev.get("created_at") or "", fixture_identity(prev))
+            if fk >= pk:
+                by[iid] = f
+        return by
+
+    base_by = _index(baseline)
+    cur_by = _index(current)
+    stable: list[dict[str, Any]] = []
+    drift: list[dict[str, Any]] = []
+    missing: list[dict[str, Any]] = []
+    for iid in base_by:
+        bf = base_by[iid]
+        cf = cur_by.get(iid)
+        if cf is None:
+            missing.append(bf)
+        elif _fixture_output_token(bf) == _fixture_output_token(cf):
+            stable.append(cf)
+        else:
+            drift.append({
+                "input_identity": iid,
+                "kind": cf.get("kind"),
+                "label": cf.get("label") or cf.get("purpose"),
+                "baseline_output": _fixture_output_token(bf),
+                "current_output": _fixture_output_token(cf),
+                "baseline_status": bf.get("status"),
+                "current_status": cf.get("status"),
+            })
+    return {
+        "baseline_count": len(base_by),
+        "current_count": len(cur_by),
+        "stable": stable,
+        "drift": drift,
+        "missing": missing,
+    }
+
+
 def eval_capture_to_fixture(row: dict[str, Any]) -> dict[str, Any]:
     """`list_eval_captures` の 1 行を export 用 fixture 形へ整形する。"""
     return {
