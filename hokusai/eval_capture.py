@@ -19,8 +19,11 @@ from typing import Any
 LLM_DECISION_ACTION = "llm_gateway_decision"
 
 
-def compute_content_digest(content: str) -> dict[str, Any]:
+def compute_content_digest(content: Any) -> dict[str, Any]:
     """content の sha256 16 桁 hex と length を返す（本文は保存しない）。
+
+    str 以外が渡された場合は `str()` で文字列化してから digest を取る
+    （annotation を `Any` にして実装と整合させる。PR #151 Copilot Round 1）。
 
     LLM Gateway interceptor と同一の digest 方式（`sha256(...).hexdigest()[:16]`
     + `len`）。eval fixture / capture で secret・PII を残さず内容の同一性だけ
@@ -49,7 +52,11 @@ def audit_row_to_fixture(row: dict[str, Any]) -> dict[str, Any] | None:
     details = row.get("details")
     if not isinstance(details, dict):
         return None
-    context = details.get("context") or {}
+    # context が dict でない (None / 文字列 / 破損) ケースでも .get で落ちない
+    # よう空 dict 扱いにする (PR #151 Copilot Round 1)。
+    context = details.get("context")
+    if not isinstance(context, dict):
+        context = {}
     return {
         "kind": "llm_call",
         "audit_id": row.get("id"),

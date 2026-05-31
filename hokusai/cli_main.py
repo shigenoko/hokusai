@@ -1801,8 +1801,14 @@ def _parse_since(value: str | None) -> str | None:
             f"--since は Nd / Nh 形式で指定してください（例 30d）: {value!r}"
         )
     n = int(m.group(1))
-    delta = timedelta(days=n) if m.group(2) == "d" else timedelta(hours=n)
-    return (datetime.now() - delta).isoformat()
+    # 極端に大きい値は timedelta / datetime 演算で OverflowError / OSError に
+    # なり得るため、ユーザー入力エラーとして ValueError に変換する
+    # (PR #151 Copilot Round 1: クラッシュさせず exit 1 で扱えるように)。
+    try:
+        delta = timedelta(days=n) if m.group(2) == "d" else timedelta(hours=n)
+        return (datetime.now() - delta).isoformat()
+    except (OverflowError, OSError) as e:
+        raise ValueError(f"--since の値が大きすぎます: {value!r}") from e
 
 
 def _handle_eval(args, config) -> int:

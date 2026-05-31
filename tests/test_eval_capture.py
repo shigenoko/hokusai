@@ -86,6 +86,17 @@ def test_audit_row_to_fixture_skips_bad_details():
     assert audit_row_to_fixture(row) is None
 
 
+def test_audit_row_to_fixture_handles_non_dict_context():
+    """context が dict でなくても AttributeError で落ちない
+    (PR #151 Copilot Round 1)。"""
+    row = _audit_row()
+    row["details"] = {"prompt_hash": "h", "context": "not-a-dict"}
+    f = audit_row_to_fixture(row)
+    assert f is not None
+    assert f["provider"] is None  # 空 dict 扱い
+    assert f["input_hash"] == "h"
+
+
 def test_audit_rows_to_fixtures_filters_none():
     rows = [_audit_row(id=1), _audit_row(id=2, action="other")]
     fixtures = audit_rows_to_fixtures(rows)
@@ -204,3 +215,12 @@ def test_parse_since():
     assert _parse_since("12h") is not None
     with pytest.raises(ValueError, match="Nd / Nh"):
         _parse_since("bad")
+
+
+def test_parse_since_overflow_is_value_error():
+    """極端に大きい値は OverflowError でなく ValueError として扱う
+    (PR #151 Copilot Round 1: クラッシュさせない)。"""
+    from hokusai.cli_main import _parse_since
+
+    with pytest.raises(ValueError, match="大きすぎます"):
+        _parse_since("999999999999d")
