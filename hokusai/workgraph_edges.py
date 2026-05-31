@@ -203,3 +203,51 @@ def extract_durable_edges(
                 ))
 
     return edges
+
+
+def collect_all_workflow_edges(
+    workflow_id: str,
+    state: dict[str, Any],
+    *,
+    work_items: list[dict[str, Any]],
+    review_issues: list[dict[str, Any]],
+) -> list[Edge]:
+    """state-based + durable な edge を合流し 5-tuple で dedup した list を返す。
+
+    `extract_edges_from_state(state)`（state 由来: supersedes / has_pr /
+    has_work_item）と `extract_durable_edges(...)`（durable table 由来:
+    has_work_item / has_review_issue / resolved_by）を合流する。`graph build`
+    と `backfill` の双方が使う共通ロジック（dedup は先勝ち・安定順序）。
+    """
+    edges = list(extract_edges_from_state(state))
+    pr_urls = [
+        pr.get("url")
+        for pr in (state.get("pull_requests") or [])
+        if isinstance(pr, dict) and pr.get("url")
+    ]
+    edges.extend(extract_durable_edges(
+        workflow_id,
+        work_items=work_items,
+        review_issues=review_issues,
+        pr_urls=pr_urls,
+    ))
+    seen: set[tuple[str, ...]] = set()
+    out: list[Edge] = []
+    for e in edges:
+        key = (e.src_type, e.src_id, e.edge_type, e.dst_type, e.dst_id)
+        if key not in seen:
+            seen.add(key)
+            out.append(e)
+    return out
+
+
+def edge_to_replace_dict(edge: Edge) -> dict[str, Any]:
+    """Edge を `replace_workgraph_edges_for_workflow` の入力 dict に変換する。"""
+    return {
+        "src_type": edge.src_type,
+        "src_id": edge.src_id,
+        "edge_type": edge.edge_type,
+        "dst_type": edge.dst_type,
+        "dst_id": edge.dst_id,
+        "metadata": edge.metadata,
+    }

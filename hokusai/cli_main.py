@@ -822,6 +822,25 @@ def _build_parser():
         help="出力形式（既定 text）",
     )
 
+    # backfill コマンド: 既存 workflow の state から durable テーブルを再構築。
+    # durable テーブルは drain hook 依存で forward-only にしか埋まらないため
+    # (dogfooding §11)、既存データを後追いで durable 化する。
+    backfill_parser = subparsers.add_parser(
+        "backfill",
+        help="既存 workflow の state から durable テーブル(review_issues / "
+             "work_items / workgraph_edges)を再構築",
+        parents=[shared_options],
+    )
+    backfill_parser.add_argument(
+        "--workflow-id", default=None,
+        help="対象 workflow_id（省略時は全 workflow）",
+    )
+    backfill_parser.add_argument(
+        "--output", choices=("text", "json"), default="text",
+        help="出力形式（既定 text）。トップレベル --dry-run で preview "
+             "（`hokusai --dry-run backfill`）",
+    )
+
     return parser, profile_parser, connect_parser
 
 
@@ -1146,6 +1165,10 @@ def main():
     # eval コマンド: Eval Capture / export（Step 4 第1スライス）
     if args.command == "eval":
         sys.exit(_handle_eval(args, config))
+
+    # backfill コマンド: 既存 workflow から durable テーブル再構築
+    if args.command == "backfill":
+        sys.exit(_handle_backfill(args, config))
 
     # llm-gateway-setup コマンド: 現 LLM Gateway 設定を診断 + 推奨設定提示
     # （F2 / PR #125）。
@@ -1855,6 +1878,72 @@ def _load_baseline_fixtures(path: str) -> list:
     )
 
 
+def _handle_backfill(args, config) -> int:
+    """`hokusai backfill ...` のハンドラ（dogfooding §11 ギャップ解消）。
+
+    既存 workflow の state_json から durable テーブル（review_issues /
+    work_items / workgraph_edges）を再構築する。`--workflow-id` 指定で 1 件、
+    省略で全 workflow。トップレベル `--dry-run` で SQLite 非 mutate の preview。
+
+    Returns:
+        0: 正常 / 1: 指定 workflow_id が無い等
+    """
+    import json
+
+    from .backfill import backfill_workflow, preview_workflow
+    from .persistence import SQLiteStore
+
+    store = SQLiteStore(config.database_path)
+    dry_run = getattr(args, "dry_run", False)
+    target = getattr(args, "workflow_id", None)
+
+    if target is not None:
+        state = store.load_workflow(target)
+        if state is None:
+            print(f"✗ workflow が見つかりません: {target}", file=sys.stderr)
+            return 1
+        targets = [(target, state)]
+    else:
+        # backfill の主対象は completed (phase>=10) の既存 workflow なので、
+        # active のみの list_active_workflows ではなく全件列挙を使う
+        # (PR #157 Copilot Round 1)。
+        targets = []
+        for wid in store.list_all_workflow_ids():
+            st = store.load_workflow(wid) if wid else None
+            if st is not None:
+                targets.append((wid, st))
+
+    results = []
+    totals = {"review_issues": 0, "work_items": 0, "edges": 0}
+    for wid, state in targets:
+        fn = preview_workflow if dry_run else backfill_workflow
+        counts = fn(store, wid, state)
+        results.append({"workflow_id": wid, **counts})
+        for k in totals:
+            totals[k] += counts.get(k, 0)
+
+    output = getattr(args, "output", "text")
+    if output == "json":
+        print(json.dumps(
+            {"dry_run": dry_run, "workflows": len(results),
+             "totals": totals, "results": results},
+            ensure_ascii=False, indent=2, default=str,
+        ))
+    else:
+        prefix = "[dry-run] " if dry_run else ""
+        print(f"{prefix}backfill 対象 workflow: {len(results)} 件")
+        for r in results:
+            print(
+                f"  {r['workflow_id']}: review_issues {r['review_issues']} / "
+                f"work_items {r['work_items']} / edges {r['edges']}"
+            )
+        print(
+            f"  合計: review_issues {totals['review_issues']} / "
+            f"work_items {totals['work_items']} / edges {totals['edges']}"
+        )
+    return 0
+
+
 def _handle_eval(args, config) -> int:
     """`hokusai eval ...` のハンドラ（Step 4 第1スライス）。
 
@@ -2014,7 +2103,6 @@ def _handle_graph(args, config) -> int:
     import json
 
     from .persistence import SQLiteStore
-    from .workgraph_edges import extract_edges_from_state
 
     subcommand = getattr(args, "graph_subcommand", None)
     store = SQLiteStore(config.database_path)
@@ -2025,33 +2113,17 @@ def _handle_graph(args, config) -> int:
         if state is None:
             print(f"✗ workflow が見つかりません: {workflow_id}", file=sys.stderr)
             return 1
-        edges = list(extract_edges_from_state(state))
-        # durable な SQLite table (work_items / review_issues) からも edge を
-        # 抽出して合流する (Step 5 第5スライス)。state-based has_work_item は
-        # drain で消えるため、durable 版で補完し has_review_issue / resolved_by
-        # も追加する。同一 edge は upsert 時に dedup される。
-        from .workgraph_edges import extract_durable_edges
-        pr_urls = [
-            pr.get("url")
-            for pr in (state.get("pull_requests") or [])
-            if isinstance(pr, dict) and pr.get("url")
-        ]
-        edges.extend(extract_durable_edges(
-            workflow_id,
+        # state-based + durable (work_items / review_issues) edge を合流・dedup
+        # する共通ロジック（backfill と共用。Step 5 第5）。
+        from .workgraph_edges import (
+            collect_all_workflow_edges,
+            edge_to_replace_dict,
+        )
+        edges = collect_all_workflow_edges(
+            workflow_id, state,
             work_items=store.list_work_items(workflow_id=workflow_id),
             review_issues=store.list_review_issues(workflow_id=workflow_id),
-            pr_urls=pr_urls,
-        ))
-        # state-based と durable で has_work_item が重複し得るため、5-tuple で
-        # dedup する（先勝ち。upsert は冪等だが件数表示と preview を正確化）。
-        _seen_edge_keys: set = set()
-        _deduped = []
-        for e in edges:
-            k = (e.src_type, e.src_id, e.edge_type, e.dst_type, e.dst_id)
-            if k not in _seen_edge_keys:
-                _seen_edge_keys.add(k)
-                _deduped.append(e)
-        edges = _deduped
+        )
         # --dry-run 時は SQLite を一切 mutate せず preview だけ出す
         # (他経路の dry-run 規約と整合。例: prime_index backfill も dry-run で
         #  skip する。PR #144 Copilot Round 1 指摘)。
@@ -2071,18 +2143,7 @@ def _handle_graph(args, config) -> int:
         # 置換する (state が変わって消えた関係を残さない。途中失敗時は旧 edge
         # set を保持。PR #144 Copilot Round 3 指摘)。
         store.replace_workgraph_edges_for_workflow(
-            workflow_id,
-            [
-                {
-                    "src_type": e.src_type,
-                    "src_id": e.src_id,
-                    "edge_type": e.edge_type,
-                    "dst_type": e.dst_type,
-                    "dst_id": e.dst_id,
-                    "metadata": e.metadata,
-                }
-                for e in edges
-            ],
+            workflow_id, [edge_to_replace_dict(e) for e in edges]
         )
         print(f"✓ {workflow_id} から {len(edges)} 本の edge を抽出しました")
         for e in edges:
