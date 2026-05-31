@@ -143,9 +143,15 @@ def persist_verification_captures(
 
     `build_verification_captures` で capture dict を作り `record_eval_capture`
     へ流す。1 件の失敗が drain 本体を止めない（Step 4 第2スライス）。
+
+    workflow_id が無い場合は永続化しない（capture_key が workflow 間で衝突し得る
+    + workflow GC の cascade-delete 対象外になり孤児レコードが残るため。
+    PR #152 Copilot Round 1）。
     """
     from .eval_capture import build_verification_captures
 
+    if not workflow_id:
+        return 0
     persisted = 0
     try:
         captures = build_verification_captures(workflow_id, verification_errors)

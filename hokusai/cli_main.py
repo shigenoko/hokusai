@@ -1855,6 +1855,11 @@ def _handle_eval(args, config) -> int:
         workflow_id=workflow_id, since=since, limit=limit,
     )
     fixtures.extend(eval_capture_to_fixture(r) for r in capture_rows)
+    # 個別 source ごとに limit を掛けると合流後に最大 2*limit になり --limit の
+    # 意味とズレるため、合流後に created_at 降順で並べてから全体で limit を
+    # 適用する（PR #152 Copilot Round 1）。
+    fixtures.sort(key=lambda f: f.get("created_at") or "", reverse=True)
+    fixtures = fixtures[:limit]
 
     if subcommand == "export":
         output = getattr(args, "output", "json")

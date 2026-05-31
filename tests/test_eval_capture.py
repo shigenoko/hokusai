@@ -316,6 +316,50 @@ def test_persist_verification_captures_helper(store):
     assert rows[0]["label"] == "Backend:npm test"
 
 
+def test_persist_verification_captures_skips_when_no_workflow_id(store):
+    """workflow_id が無い場合は永続化しない（capture_key 衝突 / GC 孤児防止、
+    PR #152 Copilot Round 1）。"""
+    from hokusai.local_persistence import persist_verification_captures
+
+    errors = [{"repository": "B", "command": "npm test",
+               "error_output": "x", "success": False}]
+    assert persist_verification_captures(store, None, errors) == 0
+    assert persist_verification_captures(store, "", errors) == 0
+    assert store.list_eval_captures() == []
+
+
+def test_eval_export_limit_applies_after_merge(store, capsys):
+    """--limit は audit + captures 合流後に全体へ適用される（個別2倍にしない、
+    PR #152 Copilot Round 1）。"""
+    import argparse
+    import json
+
+    from hokusai.cli_main import _handle_eval
+
+    # audit 2 件 + capture 2 件 = 計 4 件、limit=2 で 2 件に絞られる
+    for i in range(2):
+        store.add_audit_log(
+            "wf-1", 2, "llm_gateway_decision", "log",
+            {"prompt_hash": f"h{i}", "context": {"purpose": "p"}},
+        )
+        store.record_eval_capture(
+            capture_key=f"ck{i}", workflow_id="wf-1", kind="verification",
+            output_hash=f"o{i}", status="fail",
+        )
+
+    class _Cfg:
+        database_path = store.db_path
+
+    rc = _handle_eval(
+        argparse.Namespace(eval_subcommand="export", since=None,
+                           workflow_id=None, limit=2, output="json"),
+        _Cfg(),
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert len(payload["fixtures"]) == 2  # 4 ではなく limit=2
+
+
 def test_eval_export_includes_captures(store, capsys):
     import argparse
     import json
