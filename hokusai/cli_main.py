@@ -2086,7 +2086,9 @@ def _handle_eval(args, config) -> int:
         except (OSError, ValueError) as e:
             print(f"✗ baseline 読み込み失敗: {e}", file=sys.stderr)
             return 1
-        result = build_eval_replay_result(baseline, fixtures)
+        result = build_eval_replay_result(
+            baseline, fixtures, window_start=_window_start
+        )
         if getattr(args, "output", "text") == "json":
             print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
         else:
@@ -2106,6 +2108,12 @@ def _handle_eval(args, config) -> int:
                 print(
                     f"  ・現側に無い (missing): {len(missing)}"
                     "（再観測されていない baseline 入力）"
+                )
+            oow = result.get("out_of_window") or []
+            if oow:
+                print(
+                    f"  ・観測ウィンドウ外 (out_of_window): {len(oow)}"
+                    "（--limit truncation により判断保留）"
                 )
         # --fail-on-drift 指定時のみ drift で exit 1（CI gate 用）
         if getattr(args, "fail_on_drift", False) and result["drift"]:

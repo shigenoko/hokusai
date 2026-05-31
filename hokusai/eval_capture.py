@@ -308,14 +308,16 @@ def fixture_input_identity(fixture: dict[str, Any]) -> str:
     入力次元で同定する別キーを使う。
 
     - capture（verification / review 等）: kind / workflow_id / phase / label
-      （label は repo:command や repo:rule の入力種別。output_hash は含めない）
+      / input_hash（label は repo:command や repo:rule の入力種別。input_hash
+      も含め、同 label でも記録入力が異なる fixture を別入力として扱う。
+      output_hash は含めない。PR #163 Copilot Round 1）
     - llm_call: provider / model / purpose / input_hash（prompt 入力の同一性）
     - その他: kind / workflow_id / phase / input_hash
     """
     if fixture.get("capture_key"):
         return "cap:" + "\x1f".join(
             str(fixture.get(k))
-            for k in ("kind", "workflow_id", "phase", "label")
+            for k in ("kind", "workflow_id", "phase", "label", "input_hash")
         )
     if fixture.get("audit_id") is not None:
         return "llm:" + "\x1f".join(
@@ -340,9 +342,25 @@ def _fixture_output_token(fixture: dict[str, Any]) -> Any:
     return fixture.get("decision")
 
 
+def _fixture_recency(fixture: dict[str, Any]) -> str:
+    """fixture の「最後に観測された時刻」を表す recency キーを返す。
+
+    eval_captures は `record_eval_capture` が同一 `capture_key`（= 同一 input
+    かつ同一 output）の再観測で `created_at` を初回値のまま保ち `updated_at`
+    のみ進める。よって「同一入力の最新出力」を選ぶ recency は `created_at`
+    ではなく `updated_at` が正しい（古い output が再観測されたら updated_at が
+    進み、現在その入力が産む出力であることを示す。PR #163 Copilot Round 1）。
+    `updated_at` が無い fixture（baseline 旧 export / llm_call）は `created_at`
+    にフォールバックする。
+    """
+    return fixture.get("updated_at") or fixture.get("created_at") or ""
+
+
 def build_eval_replay_result(
     baseline: list[dict[str, Any]],
     current: list[dict[str, Any]],
+    *,
+    window_start: str | None = None,
 ) -> dict[str, Any]:
     """baseline fixture を現 fixture へ「replay」し、入力ごとの出力 drift を見る。
 
@@ -355,14 +373,19 @@ def build_eval_replay_result(
     - `drift`: 同一入力が現側に在るが、出力が変化（prompt / review rule 変更等の
       退行 or 改善の signal。baseline / current の出力を併記）
     - `missing`: baseline の入力が現側に無い（再観測されていない）
+    - `out_of_window`: 現側に無いが、`window_start` より古く `--limit`
+      truncation で現側ウィンドウから外れただけかもしれない baseline 入力
+      （missing と断定しない。`eval gate` の out_of_window と同方針。
+       PR #163 Copilot Round 1）
 
     同一入力に複数 fixture（失敗→修正で別 output の行）がある場合は、各側で
-    `created_at`（同点は `fixture_identity`）の最大を採り、最新の出力で比較する。
-    I/O なし・決定的。`eval gate`（集合の add/remove 退行）と相補的に、
-    **同一入力の出力変化**を捉える。
+    `_fixture_recency`（updated_at→created_at。同点は `fixture_identity`）の
+    最大を採り、最後に観測された出力で比較する。I/O なし・決定的。
+    `eval gate`（集合の add/remove 退行）と相補的に、**同一入力の出力変化**を
+    捉える。
 
     Returns:
-        {baseline_count, current_count, stable, drift, missing}
+        {baseline_count, current_count, stable, drift, missing, out_of_window}
     """
     def _index(fixtures: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
         by: dict[str, dict[str, Any]] = {}
@@ -372,8 +395,8 @@ def build_eval_replay_result(
             if prev is None:
                 by[iid] = f
                 continue
-            fk = (f.get("created_at") or "", fixture_identity(f))
-            pk = (prev.get("created_at") or "", fixture_identity(prev))
+            fk = (_fixture_recency(f), fixture_identity(f))
+            pk = (_fixture_recency(prev), fixture_identity(prev))
             if fk >= pk:
                 by[iid] = f
         return by
@@ -383,11 +406,20 @@ def build_eval_replay_result(
     stable: list[dict[str, Any]] = []
     drift: list[dict[str, Any]] = []
     missing: list[dict[str, Any]] = []
+    out_of_window: list[dict[str, Any]] = []
     for iid in base_by:
         bf = base_by[iid]
         cf = cur_by.get(iid)
         if cf is None:
-            missing.append(bf)
+            # 現側に無い baseline 入力。観測ウィンドウ下限 (window_start) より
+            # 古ければ、現側に現れないのは limit truncation 由来かもしれず
+            # 「再観測されていない (missing)」と断定できない。
+            created = bf.get("created_at")
+            if (window_start is not None and created is not None
+                    and created < window_start):
+                out_of_window.append(bf)
+            else:
+                missing.append(bf)
         elif _fixture_output_token(bf) == _fixture_output_token(cf):
             stable.append(cf)
         else:
@@ -406,6 +438,7 @@ def build_eval_replay_result(
         "stable": stable,
         "drift": drift,
         "missing": missing,
+        "out_of_window": out_of_window,
     }
 
 
@@ -424,4 +457,7 @@ def eval_capture_to_fixture(row: dict[str, Any]) -> dict[str, Any]:
         "status": row.get("status"),
         "metadata": row.get("metadata"),
         "created_at": row.get("created_at"),
+        # updated_at は eval replay の recency キー（同一入力の最新出力を選ぶ）
+        # に使う。created_at は初回 insert 値で固定されるため（PR #163 Round 1）。
+        "updated_at": row.get("updated_at"),
     }

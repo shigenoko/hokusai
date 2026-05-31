@@ -589,6 +589,55 @@ def test_build_eval_replay_result_stable_when_identical():
     assert len(r["stable"]) == 1
     assert r["drift"] == []
     assert r["missing"] == []
+    assert r["out_of_window"] == []
+
+
+def test_fixture_input_identity_includes_input_hash():
+    """同 label でも input_hash が違えば別入力として同定する（Copilot Round 1）。"""
+    a = {"kind": "verification", "capture_key": "a", "workflow_id": "wf-1",
+         "phase": 6, "label": "L", "input_hash": "IN1", "output_hash": "H"}
+    b = dict(a, capture_key="b", input_hash="IN2")
+    assert fixture_input_identity(a) != fixture_input_identity(b)
+
+
+def test_build_eval_replay_result_recency_uses_updated_at():
+    """recency は updated_at 優先。古い created_at でも updated_at が新しければ
+    その出力を最新として比較する（record_eval_capture は created_at 固定・
+    updated_at のみ進む。Copilot Round 1）。"""
+    base = [{"kind": "verification", "capture_key": "b", "workflow_id": "wf-1",
+             "phase": 6, "label": "L", "output_hash": "OLD",
+             "created_at": "2026-01-01", "updated_at": "2026-01-01"}]
+    current = [
+        # created_at は新しいが updated_at は古い → 採用されない
+        {"kind": "verification", "capture_key": "c-newcreate",
+         "workflow_id": "wf-1", "phase": 6, "label": "L", "output_hash": "X",
+         "created_at": "2026-05-31", "updated_at": "2026-02-01"},
+        # created_at は古いが updated_at が最新（古い出力が再観測された）→ 採用
+        {"kind": "verification", "capture_key": "c-recent",
+         "workflow_id": "wf-1", "phase": 6, "label": "L", "output_hash": "OLD",
+         "created_at": "2026-01-01", "updated_at": "2026-06-01"},
+    ]
+    r = build_eval_replay_result(base, current)
+    # updated_at 最新の OLD が現出力 → baseline OLD と一致で stable（drift なし）
+    assert len(r["stable"]) == 1
+    assert r["drift"] == []
+
+
+def test_build_eval_replay_result_out_of_window_not_missing():
+    """window_start より古く現側に無い baseline 入力は missing でなく
+    out_of_window に分類する（--limit truncation の偽陽性防止。Copilot Round 1）。"""
+    old = {"kind": "verification", "capture_key": "old", "workflow_id": "wf-1",
+           "phase": 6, "label": "L:old", "output_hash": "H",
+           "created_at": "2026-01-01"}
+    recent = {"kind": "verification", "capture_key": "rec", "workflow_id": "wf-1",
+              "phase": 6, "label": "L:rec", "output_hash": "H",
+              "created_at": "2026-05-31"}
+    # 現側は空（truncation 想定）、window_start は 2026-03-01
+    r = build_eval_replay_result(
+        [old, recent], [], window_start="2026-03-01"
+    )
+    assert [f["capture_key"] for f in r["out_of_window"]] == ["old"]
+    assert [f["capture_key"] for f in r["missing"]] == ["rec"]
 
 
 def test_handle_eval_replay_fail_on_drift(store, tmp_path, capsys):
