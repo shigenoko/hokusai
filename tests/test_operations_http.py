@@ -302,3 +302,25 @@ def test_http_server_non_get_returns_405():
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+def test_http_server_head_returns_405():
+    """HEAD も do_HEAD 未実装の既定 501 でなく契約通り 405（Copilot Round 2）。"""
+    reg = build_default_registry()
+    server = serve_operations_http(
+        reg, _FakeConfig(), host="127.0.0.1", port=0
+    )
+    _, port = server.server_address
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/operations", method="HEAD"
+        )
+        with pytest.raises(urllib.error.HTTPError) as ei:
+            urllib.request.urlopen(req, timeout=5)
+        assert ei.value.code == 405
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)

@@ -184,6 +184,11 @@ def build_operations_http_handler(
         def do_GET(self) -> None:  # noqa: N802 (http.server 規約)
             self._dispatch("GET")
 
+        def do_HEAD(self) -> None:  # noqa: N802
+            # HEAD も既定の 501 でなく契約通り 405 に揃える（PR #165 Copilot
+            # Round 2）。エラー応答なので body も返す（GET 以外と同一経路）。
+            self._dispatch("HEAD")
+
         def do_POST(self) -> None:  # noqa: N802
             self._dispatch("POST")
 
