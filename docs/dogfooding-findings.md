@@ -751,11 +751,15 @@ hokusai operations list
 hokusai operations run runtime.health
 
 # HTTP admin 起動（既定 127.0.0.1 bind / read-only / 認証なし）
+# PID を保持し、スクリプト終了時に必ず停止する（プロセス残り / ポート競合を防ぐ）
 hokusai operations serve --port 8765 &
+SERVE_PID=$!
+trap 'kill "$SERVE_PID" 2>/dev/null' EXIT
+sleep 1  # bind 完了待ち
 
 # 正常系: 一覧（input_schema 込み）/ 実行（CLI と result 一致を確認）
 python - <<'PY'
-import json, urllib.request, urllib.error
+import urllib.request, urllib.error
 B = "http://127.0.0.1:8765"
 def hit(path, method="GET"):
     req = urllib.request.Request(B + path, method=method)
