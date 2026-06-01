@@ -569,6 +569,41 @@ v0.7.0–v0.10.0 で追加した **Step 2/3/4/5** の CLI（`operations` / `grap
 
 ---
 
+## 13. Step 3 read-only HTTP admin の実環境 dogfooding (PR #165, 2026-06-01)
+
+§11/§12 で next-action 候補に挙げ続けた「operations の MCP/HTTP 化」が PR #162（operation 拡充）→ #164（共通実行 sink `execute_operation()`）→ #165（依存ゼロの HTTP admin）で実装され、GBrain ロードマップ Step 3 が完了した。マージ直後の HTTP admin を**初めて実環境で観察**し、ロードマップの核「**CLI / Dashboard / HTTP admin が同一 handler を単一経路で叩く**」が実データで成立するかを検証した。
+
+### 観察手順
+
+| Step | 操作 |
+|---|---|
+| 1 | `hokusai operations list` / `operations run runtime.health`（CLI 側ベースライン）|
+| 2 | `hokusai operations serve --port 8765`（HTTP admin 起動、既定 `127.0.0.1` bind）|
+| 3 | `GET /operations`（一覧）/ `GET /operations/runtime.health`・`workflow.list`（実行）|
+| 4 | 異常系: 400（必須 param 欠落）/ 404（未知 op）/ 405（POST・HEAD）/ 400 redaction（`limit=evil<script>xyz`）|
+
+### 実観察結果
+
+- ✅ **同一 handler・単一経路をバイト一致で実証**: `runtime.health` の JSON は CLI（`operations run`）と HTTP admin で **`result` が完全一致**（`outbox_pending: 12` / `gaps[0].kind: notion_outbox_pending` まで同一）。ロードマップ §P1 の中核命題（CLI / Dashboard / HTTP admin が `resolve_read_only_operation` → `invoke_operation` の単一経路を共有）を実データで確認。
+- ✅ **`GET /operations` が `input_schema` 込みの stable schema を返す**: CLI `list` がテキスト（name / scope / summary）なのに対し、HTTP は各 operation の `input_schema`（JSON Schema）まで返す。MCP / 外部 admin UI が動的にフォームを組める粒度で、HTTP 側の方が機械可読性が高い。
+- ✅ **実 workflow データを read-only で取得**: `workflow.list` が実 DB の 2 workflow（`wf-f373fac6` phase 2 / `wf-dbe7b6cd` phase 7）を返却。副作用なしの「読むだけ」契約を維持。
+- ✅ **異常系がすべて契約通り**: 400（`workflow.status` の `workflow_id は必須です` = static 文言を保持）/ 404（`available` に registry 由来の安全な op 名一覧）/ 405（POST）。
+- ✅ **PR #165 の 2 修正が実環境で機能**: (1) **HEAD が 405 + 空ボディ**で返る（`do_HEAD` 追加。既定 501 を回避）。(2) **400 redaction が実値で機能**: `limit=evil<script>xyz` → `"limit は整数で指定してください: '<redacted>'"`。query param 生値が reflected されないこと（SonarCloud S5131）を実トラフィックで確認。
+
+### 不足点 / 運用穴
+
+- ⚠ **F13-1: server 自身の bound profile / config / version を introspect する手段が無い**: HTTP レスポンスにも起動バナー（`read-only operations HTTP admin: http://127.0.0.1:8765`）にも **どの profile / DB を読んでいる admin か**の情報が出ない。CLI は `Profile: hokusai (default_profile)` を毎回表示するのに対し、HTTP admin は無記名。複数 profile を別ポートで並走させると、どのポートがどの DB かを HTTP 越しに判別できない。`GET /operations` のメタに `profile` / `database_path`（または専用 `GET /meta`）を足すと運用調査が成立する。**優先度: 中**。
+- ⚠ **F13-2: 軽量 liveness endpoint が無い**: `/` や `/healthz` は 404 になり、ヘルスチェックは `/operations`（全 operation を registry から構築して返す）に依存する。現状 registry 構築は軽いので実害は小さいが、uptime 監視・LB ヘルスチェックの定石（`/healthz` で 200）に乗れない。**優先度: 低**。
+- 注: 認証なし・localhost bind・read-only は**設計通り**（ネットワーク到達性で保護）。外部公開する段階で初めて F13-1 の profile 表示と併せて認証が論点になる。
+
+### 評価 + 次のアクション候補
+
+- **Step 3 は実環境で価値を実証**: CLI と HTTP admin が同一結果を返すことで「単一経路」設計が机上でなく実データで成立。GBrain ロードマップ全 5 Step の主要機能が dogfooding 観察まで到達した。
+- ⚠ **Notion-backed operation は依然 §1 運用穴に依存**: `workflow.status` / `review_issues.list_open` 等は SQLite で完結し観察できたが、Notion DB ID env 未設定のため Notion 横断の値（outbox の実 drain 等）はダミーのまま。§10/§11/§12 と同じ構造で、**次の本丸は推奨手順 ② の Notion env 設定 + integration share**。
+- **次マイルストーン候補**: (a) **F13-1 introspection**（`GET /operations` メタに profile / database_path、または `GET /meta`）— 複数 profile 運用の前提、1 PR スコープ。(b) **Notion DB env 設定 + share**（推奨手順 ②、本丸ブロッカー。これ無しに Prime v2 `--query` / `has_pr` edge / Notion 横断 operation が実データで観察できない）。(c) read-only MCP 化（HTTP admin の次段、SDK 依存を足す判断とセット）。
+
+---
+
 ## Appendix A: 観察用に叩いたコマンド
 
 ```bash
@@ -706,6 +741,43 @@ want=['workgraph_edges','review_issues','work_items','eval_captures']
 have=[r[0] for r in conn.execute(\"SELECT name FROM sqlite_master WHERE type='table'\")]
 print({t:(t in have) for t in want})
 "
+```
+
+### Appendix A.4: §13 HTTP admin で叩いたコマンド (2026-06-01)
+
+```bash
+# CLI 側ベースライン（同一 handler の比較対象）
+hokusai operations list
+hokusai operations run runtime.health
+
+# HTTP admin 起動（既定 127.0.0.1 bind / read-only / 認証なし）
+hokusai operations serve --port 8765 &
+
+# 正常系: 一覧（input_schema 込み）/ 実行（CLI と result 一致を確認）
+python - <<'PY'
+import json, urllib.request, urllib.error
+B = "http://127.0.0.1:8765"
+def hit(path, method="GET"):
+    req = urllib.request.Request(B + path, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return r.status, r.read().decode()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode()
+
+for path, method in [
+    ("/operations", "GET"),                  # 200 一覧（stable schema）
+    ("/operations/runtime.health", "GET"),   # 200 CLI と result バイト一致
+    ("/operations/workflow.list", "GET"),    # 200 実 workflow データ
+    ("/operations/workflow.status", "GET"),  # 400 必須 param 欠落（static 文言）
+    ("/operations/no.such.op", "GET"),       # 404 available 列挙（registry 由来）
+    ("/operations", "POST"),                 # 405 method not allowed
+    ("/operations", "HEAD"),                 # 405 + 空ボディ（do_HEAD）
+    ("/operations/review_issues.list_open?limit=evil<script>xyz", "GET"),  # 400 redaction
+]:
+    code, body = hit(path, method)
+    print(method, path, "->", code, body[:120])
+PY
 ```
 
 ## Appendix B: 参照したコード位置
