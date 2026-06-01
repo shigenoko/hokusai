@@ -188,6 +188,44 @@ def test_request_error_bodies_do_not_reflect_request_data():
     assert b3 == {"error": "method not allowed"}
 
 
+def test_request_400_redacts_request_values_in_message():
+    """handler の ValueError が query param の生値を埋め込んでも、HTTP 層が
+    params 由来の値を伏字化して reflected data を残さない（PR #165 Round 2）。"""
+    reg = OperationRegistry()
+
+    def _raise_with_raw(params, *, store, config):
+        # _coerce_limit と同型: 生値をメッセージに埋め込む handler
+        raise ValueError(f"limit は整数で指定してください: {params['limit']!r}")
+
+    reg.register(Operation(
+        name="bad.limit", summary="", scope=READ_ONLY,
+        input_schema={"type": "object", "properties": {}, "required": []},
+        handler=_raise_with_raw,
+    ))
+    secret = "evil<script>payload"
+    status, body = handle_operations_request(
+        reg, "GET", "/operations/bad.limit", {"limit": secret},
+        config=_FakeConfig(),
+    )
+    assert status == 400
+    # 生値（および repr 形）は body に残らない
+    assert secret not in json.dumps(body)
+    # 伏字化されつつ static 文言は保持
+    assert "<redacted>" in body["error"]
+    assert "limit は整数で指定してください" in body["error"]
+
+
+def test_request_400_keeps_static_message_intact():
+    """params 由来の値を含まない static な検証文言はそのまま返す。"""
+    reg = build_default_registry()
+    status, body = handle_operations_request(
+        reg, "GET", "/operations/workflow.status", {}, config=_FakeConfig()
+    )
+    assert status == 400
+    assert "workflow_id" in body["error"]
+    assert "<redacted>" not in body["error"]
+
+
 # --- 実 HTTP 疎通（execute 経路が HTTP 越しでも動く） --------------------
 
 

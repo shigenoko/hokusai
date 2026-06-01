@@ -50,6 +50,24 @@ def _query_to_params(query: str) -> dict[str, Any]:
     return out
 
 
+def _redact_request_values(message: str, params: dict[str, Any]) -> str:
+    """検証エラーメッセージから **request 由来の生値** だけを伏字にする。
+
+    handler の `ValueError` メッセージは原則 static（開発者が書いた固定文言）だが、
+    一部は query param の生値を埋め込む（例: `operations._coerce_limit` は
+    `... {raw!r}`）。HTTP 層は handler 文言が安全と仮定せず、`params` の各値が
+    そのまま／`repr` で混入していれば `<redacted>` に置換する。これにより
+    "workflow_id は必須です" 等の安全な static 文言は保持しつつ、reflected data
+    経路（SonarCloud S5131 / PR #165）を断つ。
+    """
+    redacted = message
+    for value in params.values():
+        for form in (str(value), repr(value)):
+            if form and form in redacted:
+                redacted = redacted.replace(form, "<redacted>")
+    return redacted
+
+
 def handle_operations_request(
     registry: OperationRegistry,
     method: str,
@@ -109,9 +127,14 @@ def handle_operations_request(
         try:
             result = invoke_operation(op, params, config=config)
         except ValueError as e:
-            # handler 由来の検証メッセージ（開発者が書いた静的文言）。op.name は
-            # registry に登録済みの安全な名前。
-            return 400, {"operation": op.name, "error": str(e)}
+            # handler 由来の検証メッセージ。原則 static だが一部は query param の
+            # 生値を埋め込む（例 _coerce_limit の `{raw!r}`）ため、params 由来の値
+            # だけ伏字化して reflected data を断つ（PR #165 Copilot Round 2）。
+            # op.name は registry 登録済みの安全な名前。
+            return 400, {
+                "operation": op.name,
+                "error": _redact_request_values(str(e), params),
+            }
         return 200, {"operation": op.name, "result": result}
 
     return 404, {"error": "not found"}
