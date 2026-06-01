@@ -588,7 +588,7 @@ v0.7.0–v0.10.0 で追加した **Step 2/3/4/5** の CLI（`operations` / `grap
 - ✅ **`GET /operations` が `input_schema` 込みの stable schema を返す**: CLI `list` がテキスト（name / scope / summary）なのに対し、HTTP は各 operation の `input_schema`（JSON Schema）まで返す。MCP / 外部 admin UI が動的にフォームを組める粒度で、HTTP 側の方が機械可読性が高い。
 - ✅ **実 workflow データを read-only で取得**: `workflow.list` が実 DB の 2 workflow（`wf-f373fac6` phase 2 / `wf-dbe7b6cd` phase 7）を返却。副作用なしの「読むだけ」契約を維持。
 - ✅ **異常系がすべて契約通り**: 400（`workflow.status` の `workflow_id は必須です` = static 文言を保持）/ 404（`available` に registry 由来の安全な op 名一覧）/ 405（POST）。
-- ✅ **PR #165 の 2 修正が実環境で機能**: (1) **HEAD が 405 + 空ボディ**で返る（`do_HEAD` 追加。既定 501 を回避）。(2) **400 redaction が実値で機能**: `limit=evil<script>xyz` → `"limit は整数で指定してください: '<redacted>'"`。query param 生値が reflected されないこと（SonarCloud S5131）を実トラフィックで確認。
+- ✅ **PR #165 の 2 修正が実環境で機能**: (1) **HEAD が 405 + 空ボディ**で返る（`do_HEAD` 追加。既定 501 を回避）。(2) **400 redaction が実値で機能**: `limit=evil<script>xyz` → `limit は整数で指定してください: '<redacted>'`。query param 生値が reflected されないこと（SonarCloud S5131）を実トラフィックで確認。
 
 ### 不足点 / 運用穴
 
