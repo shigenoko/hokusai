@@ -577,9 +577,9 @@ v0.7.0–v0.10.0 で追加した **Step 2/3/4/5** の CLI（`operations` / `grap
 
 | Step | 操作 |
 |---|---|
-| 1 | `hokusai operations list` / `operations run runtime.health`（CLI 側ベースライン）|
+| 1 | `hokusai operations list` / `hokusai operations run runtime.health`（CLI 側ベースライン）|
 | 2 | `hokusai operations serve --port 8765`（HTTP admin 起動、既定 `127.0.0.1` bind）|
-| 3 | `GET /operations`（一覧）/ `GET /operations/runtime.health`・`workflow.list`（実行）|
+| 3 | `GET /operations`（一覧）/ `GET /operations/runtime.health`・`GET /operations/workflow.list`（実行）|
 | 4 | 異常系: 400（必須 param 欠落）/ 404（未知 op）/ 405（POST・HEAD）/ 400 redaction（`limit=evil<script>xyz`）|
 
 ### 実観察結果
