@@ -6,10 +6,9 @@ Phase 7.5: ブランチ衛生チェックのテスト
 - _rebase_onto_base: 成功 / コンフリクト / フェッチ失敗
 """
 
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
-from hokusai.nodes.phase7_5_hygiene import handle_hygiene_action, _rebase_onto_base
-from hokusai.state import add_audit_log
+from hokusai.nodes.phase7_5_hygiene import handle_hygiene_action
 
 
 class TestRebaseAction:
@@ -74,7 +73,7 @@ class TestRebaseAction:
         mock_git = MockGitClient.return_value
         mock_git.run_git_command.return_value = (False, "fatal: unable to access")
 
-        result = handle_hygiene_action(minimal_state, "rebase")
+        handle_hygiene_action(minimal_state, "rebase")
 
         # rebase は呼ばれない（fetch のみ）
         calls = [c[0][0] for c in mock_git.run_git_command.call_args_list]

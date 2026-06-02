@@ -14,13 +14,13 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from hokusai.integrations.notion_dashboard.setup import (
-    NotionSetupError,
     PROJECT_MEMORY_DB_TITLE,
     PULL_REQUESTS_DB_TITLE,
     REVIEW_ISSUES_DB_TITLE,
     WORK_ITEMS_DB_TITLE,
     WORKFLOW_GATES_DB_TITLE,
     WORKFLOWS_DB_TITLE,
+    NotionSetupError,
     scaffold_notion_workspace,
     setup_notion_workspace,
 )
@@ -1811,7 +1811,7 @@ def test_cli_handler_falls_back_when_config_env_name_invalid(
     # （改行はリテラル `\n` 2 文字としてエスケープされて表示される）
     assert 'export "1BAD"' not in out and "export 1BAD=" not in out
     # 注入された "export EVIL=1" が独立した行として出ない
-    export_lines = [l for l in out.splitlines() if l.lstrip().startswith("export ")]
+    export_lines = [line for line in out.splitlines() if line.lstrip().startswith("export ")]
     assert all("EVIL" not in line for line in export_lines)
 
 

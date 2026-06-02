@@ -5,16 +5,14 @@ C2: 必須ルール欠落検知
 C3: 合格/不合格判定の堅牢化
 """
 
-import pytest
 
 from hokusai.nodes.phase7_review import (
     _aggregate_review_results,
     _extract_required_rule_ids,
-    _validate_rule_completeness,
-    _parse_rule_results,
     _parse_review_result,
+    _parse_rule_results,
+    _validate_rule_completeness,
 )
-
 
 # --- C2: 必須ルール欠落検知 ---
 

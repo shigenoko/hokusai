@@ -5,10 +5,7 @@ WAL モード + busy_timeout が正しく設定され、
 並行書き込みで DATABASE IS LOCKED が発生しないことを検証する。
 """
 
-import os
-import sqlite3
 import threading
-import tempfile
 from pathlib import Path
 
 import pytest

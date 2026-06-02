@@ -4,27 +4,27 @@ Integration tests for partial success scenarios
 部分的成功シナリオの統合テスト
 """
 
-import pytest
 from datetime import datetime
-from unittest.mock import Mock, patch
 
-from hokusai.state import (
-    WorkflowState,
-    PhaseStatus,
-    VerificationResult,
-    VerificationErrorEntry,
-    PhaseState,
-    PullRequestInfo,
-    PRStatus,
-    RepositoryPhaseStatus,
-    init_repository_state,
-    get_repository_state,
-    update_repository_phase_status,
-    get_pending_repositories,
-)
+import pytest
+
 from hokusai.nodes.phase8 import (
     _is_repository_successful,
     _mark_successful_prs_ready,
+)
+from hokusai.state import (
+    PhaseState,
+    PhaseStatus,
+    PRStatus,
+    PullRequestInfo,
+    RepositoryPhaseStatus,
+    VerificationErrorEntry,
+    VerificationResult,
+    WorkflowState,
+    get_pending_repositories,
+    get_repository_state,
+    init_repository_state,
+    update_repository_phase_status,
 )
 
 

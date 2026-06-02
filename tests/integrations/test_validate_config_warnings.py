@@ -9,21 +9,18 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Any
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
+from hokusai.integrations import connection_status as cs  # noqa: E402
 from scripts.dashboard import (  # noqa: E402
     _check_service_alignment,
     _detect_token_like_values,
     _looks_redacted,
     validate_config,
 )
-
-from hokusai.integrations import connection_status as cs  # noqa: E402
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

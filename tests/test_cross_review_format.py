@@ -6,8 +6,6 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from hokusai.utils.cross_review import format_cross_review_for_prompt
 
 

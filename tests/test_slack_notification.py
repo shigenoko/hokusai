@@ -25,7 +25,6 @@ from hokusai.integrations.notifications.slack import (
     notify_slack,
 )
 
-
 # ---------------------------------------------------------------------------
 # _parse_notifications_config
 # ---------------------------------------------------------------------------

@@ -1,11 +1,11 @@
 """hokusai/utils/change_summary.py のテスト"""
 
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 from hokusai.utils.change_summary import (
-    build_repo_change_summary,
-    build_pr_change_summary,
     build_combined_change_summary,
+    build_pr_change_summary,
+    build_repo_change_summary,
 )
 
 

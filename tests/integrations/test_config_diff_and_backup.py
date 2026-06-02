@@ -27,7 +27,6 @@ from scripts import dashboard as dash  # noqa: E402
 from scripts.dashboard import (  # noqa: E402
     BACKUP_RETAIN_COUNT,
     RESTORE_ERROR_INVALID_NAME,
-    RESTORE_ERROR_IO_ERROR,
     RESTORE_ERROR_NOT_FOUND,
     DashboardHandler,
     _prune_old_backups,
@@ -38,7 +37,6 @@ from scripts.dashboard import (  # noqa: E402
     restore_config_backup,
     save_config_yaml,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

@@ -4,16 +4,13 @@ CodexClient / クロスLLMレビューのテスト
 
 import json
 import subprocess
-from pathlib import Path
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import Mock, patch
 
 import pytest
 
-from hokusai.integrations.codex import CodexClient, reset_codex_client
 from hokusai.config.models import CrossReviewConfig, WorkflowConfig
 from hokusai.constants import CROSS_REVIEW_PROMPTS
-from hokusai.state import WorkflowState
-
+from hokusai.integrations.codex import CodexClient, reset_codex_client
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -655,8 +652,8 @@ class TestCrossReviewConfigAndLogging:
 
     def test_log_cross_review_config(self):
         """_log_cross_review_config がログに設定値を出力すること"""
+
         from hokusai.workflow import _log_cross_review_config
-        import logging
 
         config = WorkflowConfig(
             cross_review=CrossReviewConfig(

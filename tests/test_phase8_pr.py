@@ -4,20 +4,19 @@ Tests for hokusai.nodes.phase8_pr module
 C-2-4: 部分的なPR完了フローのテスト
 """
 
-import pytest
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import Mock, patch
 
-from hokusai.state import (
-    WorkflowState,
-    PullRequestInfo,
-    PRStatus,
-    init_repository_state,
-    RepositoryPhaseStatus,
-)
 from hokusai.nodes.phase8 import (
     _is_repository_successful,
     _mark_successful_prs_ready,
     phase8e_ready_for_review_node,
+)
+from hokusai.state import (
+    PRStatus,
+    PullRequestInfo,
+    RepositoryPhaseStatus,
+    WorkflowState,
+    init_repository_state,
 )
 
 

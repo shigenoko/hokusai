@@ -5,12 +5,9 @@ Runtime Repository Resolver のテスト
 from dataclasses import dataclass
 from pathlib import Path
 
-import pytest
-
 from hokusai.utils.repo_resolver import (
-    RuntimeRepository,
-    resolve_runtime_repositories,
     get_runtime_repository,
+    resolve_runtime_repositories,
 )
 
 

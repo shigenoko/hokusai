@@ -1,15 +1,15 @@
 """hokusai/prompts/loader.py のテスト"""
 
+
 import pytest
-from pathlib import Path
 
 from hokusai.prompts.loader import (
+    _PROMPTS_DIR,
+    _load_registry,
     get_prompt,
     list_prompts,
     read_prompt_file,
     write_prompt_file,
-    _PROMPTS_DIR,
-    _load_registry,
 )
 
 

@@ -14,7 +14,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from hokusai.nodes.phase6_verify import _build_verification_review_issue_payloads
 from hokusai.nodes.phase7_review import _build_review_issue_payloads
 
-
 # ---------------------------------------------------------------------------
 # Phase 7: _build_review_issue_payloads
 # ---------------------------------------------------------------------------
@@ -253,8 +252,9 @@ def test_phase6_node_appends_payloads_to_pending_review_issues(monkeypatch, tmp_
     """phase6_verify_node 自体が verification 失敗時に
     state["pending_review_issues"] を populate することを検証（PR #37 Copilot
     7 回目指摘）。"""
-    from hokusai.nodes import phase6_verify
     from types import SimpleNamespace
+
+    from hokusai.nodes import phase6_verify
 
     monkeypatch.setattr(phase6_verify, "should_skip_phase", lambda s, p: False)
     monkeypatch.setattr(
@@ -379,8 +379,9 @@ def test_phase6_node_populates_full_output_hash_on_failure(monkeypatch, tmp_path
     `full_output_hash` を 16 hex chars で populate することを検証
     （PR #37 Copilot 9 回目指摘）。
     """
-    from hokusai.nodes import phase6_verify
     from types import SimpleNamespace
+
+    from hokusai.nodes import phase6_verify
 
     monkeypatch.setattr(phase6_verify, "should_skip_phase", lambda s, p: False)
     monkeypatch.setattr(

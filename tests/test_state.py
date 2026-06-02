@@ -4,18 +4,16 @@ Tests for hokusai.state module
 B-1-3, B-4-4: VerificationErrorEntry と repository_status のテスト
 """
 
-import pytest
-from datetime import datetime
 
 from hokusai.state import (
-    WorkflowState,
     PhaseStatus,
-    VerificationResult,
     VerificationErrorEntry,
-    create_initial_state,
-    update_phase_status,
+    VerificationResult,
+    WorkflowState,
     add_audit_log,
+    create_initial_state,
     should_skip_phase,
+    update_phase_status,
 )
 
 
@@ -208,16 +206,14 @@ class TestShouldSkipPhase:
 
 # === C-1: リポジトリ別状態管理のテスト ===
 
-from hokusai.state import (
-    RepositoryState,
+from hokusai.state import (  # noqa: E402
     RepositoryPhaseStatus,
-    init_repository_state,
-    get_repository_state,
-    update_repository_state,
-    update_repository_phase_status,
-    get_pending_repositories,
-    get_completed_repositories,
     all_repositories_completed,
+    get_pending_repositories,
+    get_repository_state,
+    init_repository_state,
+    update_repository_phase_status,
+    update_repository_state,
 )
 
 

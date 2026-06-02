@@ -8,7 +8,6 @@ UI 経由の End-to-End は手動 QA / 統合テストで担保する。
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest

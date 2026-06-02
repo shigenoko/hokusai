@@ -24,7 +24,6 @@ from hokusai.integrations.notion_dashboard.identification import (
     notion_db_url,
 )
 
-
 # ---------------------------------------------------------------------------
 # mask_db_id
 # ---------------------------------------------------------------------------
@@ -516,8 +515,9 @@ def test_panel_includes_identification_section(monkeypatch):
 
 def test_panel_section_not_rendered_when_disabled(monkeypatch):
     """notion_dashboard が disabled なら panel 全体が空"""
-    import scripts.dashboard as dashboard
     from types import SimpleNamespace
+
+    import scripts.dashboard as dashboard
 
     nd_cfg = SimpleNamespace(enabled=False)
     mock_dispatcher = MagicMock()

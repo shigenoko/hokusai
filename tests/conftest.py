@@ -2,15 +2,16 @@
 共通テストフィクスチャ
 """
 
-import pytest
 from datetime import datetime
 
+import pytest
+
 from hokusai.state import (
-    WorkflowState,
-    PhaseStatus,
-    VerificationResult,
-    VerificationErrorEntry,
     PhaseState,
+    PhaseStatus,
+    VerificationErrorEntry,
+    VerificationResult,
+    WorkflowState,
 )
 
 

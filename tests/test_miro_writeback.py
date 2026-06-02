@@ -21,7 +21,6 @@ from hokusai.integrations.design.writeback import (
 )
 from hokusai.persistence.sqlite_store import SQLiteStore
 
-
 # ---------------------------------------------------------------------------
 # MiroClient.create_card
 # ---------------------------------------------------------------------------

@@ -6,22 +6,15 @@ B-3-3: Phase 6 失敗時の is_retry フラグ設定のテスト
 B-4-4: リポジトリステータス記録のテスト
 """
 
-import pytest
-from unittest.mock import patch, MagicMock
-from dataclasses import dataclass
 
-from hokusai.state import (
-    WorkflowState,
-    PhaseStatus,
-    VerificationResult,
-    VerificationErrorEntry,
-)
 from hokusai.nodes.phase6_verify import (
     CommandResult,
     FailureType,
-    FailureAnalysis,
-    _run_command_with_output,
     _analyze_failures,
+)
+from hokusai.state import (
+    VerificationErrorEntry,
+    WorkflowState,
 )
 
 

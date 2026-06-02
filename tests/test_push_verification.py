@@ -5,24 +5,23 @@ Tests for push verification in review wait nodes.
 レビュー指摘の自動修正テストも含む。
 """
 
-import pytest
 from unittest.mock import Mock, patch
 
-from hokusai.state import WorkflowState, get_current_pr, update_pr_in_list
+from hokusai.nodes.phase8.review_check import (
+    phase8d_copilot_fix_node,
+    phase8d_unified_fix_node,
+    phase8h_human_fix_node,
+)
+from hokusai.nodes.phase8.review_fix import (
+    _auto_fix_review_comments,
+    _build_review_fix_prompt,
+    _parse_fix_summaries,
+)
 from hokusai.nodes.phase8.review_wait import (
     _resume_review_wait,
     phase8b_unified_wait_node,
 )
-from hokusai.nodes.phase8.review_check import (
-    phase8d_unified_fix_node,
-    phase8d_copilot_fix_node,
-    phase8h_human_fix_node,
-)
-from hokusai.nodes.phase8.review_fix import (
-    _build_review_fix_prompt,
-    _parse_fix_summaries,
-    _auto_fix_review_comments,
-)
+from hokusai.state import WorkflowState, get_current_pr
 
 
 def _make_state_with_pr(
@@ -46,7 +45,7 @@ def _make_state_with_pr(
             {"id": 1, "body": "Fix this", "replied": False, "author": "copilot[bot]"},
         ]
 
-    from hokusai.state import PhaseStatus, PhaseState
+    from hokusai.state import PhaseState, PhaseStatus
 
     phases = {}
     for i in range(1, 11):

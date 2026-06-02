@@ -17,10 +17,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from scripts.dashboard import DashboardHandler  # noqa: E402
-
 from hokusai.integrations import connection_status as cs  # noqa: E402
-
+from scripts.dashboard import DashboardHandler  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Helpers

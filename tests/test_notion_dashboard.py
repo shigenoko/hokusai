@@ -1014,7 +1014,9 @@ def test_dispatcher_safe_error_message_does_not_include_token():
 # ---------------------------------------------------------------------------
 
 
-from hokusai.integrations.notion_dashboard.pull_requests_db import PullRequestsDBClient
+from hokusai.integrations.notion_dashboard.pull_requests_db import (  # noqa: E402
+    PullRequestsDBClient,
+)
 
 
 def test_pull_requests_db_create_record_minimal():
@@ -1703,8 +1705,8 @@ def test_dispatcher_review_issue_raised_resolves_workflow_relation(
 # ---------------------------------------------------------------------------
 
 
-from hokusai import workflow as workflow_module
-from hokusai.state import PhaseStatus
+from hokusai import workflow as workflow_module  # noqa: E402
+from hokusai.state import PhaseStatus  # noqa: E402
 
 
 def _phases_with(phase_num: int, status: str) -> dict:

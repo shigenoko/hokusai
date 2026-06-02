@@ -8,14 +8,14 @@ NotionTaskClient のテスト
 - 例外時に failed 結果が返されること
 """
 
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from hokusai.integrations.task_backend.notion import (
-    NotionTaskClient,
     NotionOperationResult,
     NotionResult,
+    NotionTaskClient,
 )
 
 

@@ -1,7 +1,7 @@
 from hokusai.state import create_initial_state
 from hokusai.utils.phase_page_templates import (
-    build_phase_page_content,
     _derive_display_status,
+    build_phase_page_content,
 )
 
 

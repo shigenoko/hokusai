@@ -19,7 +19,6 @@ import pytest
 from hokusai.cli.commands import connect as connect_mod
 from hokusai.integrations import connection_status as cs
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------

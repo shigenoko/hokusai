@@ -16,7 +16,6 @@ import pytest
 
 from hokusai.persistence.sqlite_store import SQLiteStore
 
-
 # ---------------------------------------------------------------------------
 # SQLiteStore.list_audit_logs / get_audit_log
 # ---------------------------------------------------------------------------

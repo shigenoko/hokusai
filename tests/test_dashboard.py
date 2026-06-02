@@ -6,78 +6,74 @@ C-3-4: ダッシュボードのPR表示修正の動作確認テスト
 
 import json
 import os
-import pytest
-from datetime import datetime
 import sqlite3
 import subprocess
-import tempfile
-from pathlib import Path
-from unittest.mock import patch, MagicMock
 
 # テスト対象をインポート
 import sys
+import tempfile
+from datetime import datetime
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from hokusai.persistence.sqlite_store import SQLiteStore
 from scripts.dashboard import (
     _BG_MAX_AGE_SECONDS,
-    _BG_META_DIR,
-    _check_command_string,
-    _get_running_identifiers,
-    _hygiene_action_banner,
+    DashboardHandler,
     _cross_review_blocked_banner,
     _find_cross_review_blocked_phase,
+    _get_running_identifiers,
+    _hygiene_action_banner,
     _launch_hokusai_background,
+    _notion_status_badge,
+    _notion_warning_banner,
     _phase6_settings_link,
-    _pid_is_alive,
     _remove_running_meta,
     _resolve_config_path,
     _resolve_hokusai_args,
     _run_hokusai_command,
     _save_running_meta,
-    _verify_pid_is_hokusai,
     apply_cross_review_fixes,
+    classify_verification_error,
     continue_ignoring_cross_review,
-    is_workflow_running,
     continue_workflow_auto_mode,
     continue_workflow_step_mode,
     cross_review_badge,
-    classify_verification_error,
-    phase6_failure_summary,
-    render_phase6_failure_panel,
-    validate_command_fields,
-    verification_badge,
     get_waiting_status,
     get_workflow_detail,
     get_workflows,
-    render_detail_page,
-    render_rulebook_page,
-    render_phase_table,
-    render_prs,
-    render_workflow_list,
-    render_step_controls,
-    render_html,
-    render_phase_page_links,
-    render_prompts_page,
-    render_settings_page,
-    rerun_cross_review_for_phase,
-    submit_phase_decision,
-    _get_store,
-    DashboardHandler,
+    handle_pr_review_action,
+    is_workflow_running,
     list_config_files,
     load_config_yaml,
-    save_config_yaml,
+    phase6_failure_summary,
+    render_detail_page,
+    render_html,
+    render_phase6_failure_panel,
+    render_phase_page_links,
+    render_phase_table,
+    render_pr_progress,
+    render_prompts_page,
+    render_prs,
+    render_rulebook_page,
+    render_settings_page,
+    render_step_controls,
+    render_workflow_list,
+    rerun_cross_review_for_phase,
     retry_phase,
+    save_config_yaml,
     start_workflow_auto_mode,
     start_workflow_step_mode,
+    submit_phase_decision,
+    validate_command_fields,
     validate_config,
-    _notion_status_badge,
-    _notion_warning_banner,
+    verification_badge,
     waiting_status_label,
-    handle_pr_review_action,
-    render_pr_progress,
-    CHECKPOINT_DB_PATH,
 )
-from hokusai.persistence.sqlite_store import SQLiteStore
 
 
 @pytest.fixture
@@ -2210,7 +2206,7 @@ class TestCrossReviewBlocked:
             }
             return st
 
-        from hokusai.config.models import WorkflowConfig, CrossReviewConfig
+        from hokusai.config.models import CrossReviewConfig, WorkflowConfig
         fake_config = WorkflowConfig(cross_review=CrossReviewConfig(enabled=True, phases=[2, 3, 4]))
         with patch("hokusai.utils.cross_review.execute_cross_review", side_effect=fake_cross_review), \
              patch("scripts.dashboard._resolve_config_path", return_value=Path("/tmp/fake.yaml")), \

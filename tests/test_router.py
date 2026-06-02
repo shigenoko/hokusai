@@ -4,8 +4,9 @@
 C1: リトライ上限到達時にワークフローを停止（ENDへルーティング）
 """
 
-import pytest
 from unittest.mock import patch
+
+import pytest
 
 from hokusai.nodes.router import (
     should_retry_implementation,

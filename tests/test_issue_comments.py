@@ -5,16 +5,13 @@ Issue comment（PR全体へのコメント）の取得・返信・統合処理�
 """
 
 import json
-import pytest
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import Mock, patch
 
 from hokusai.integrations.git_hosting.base import ReviewComment as ReviewCommentDC
 from hokusai.integrations.git_hosting.github import GitHubHostingClient
 from hokusai.state import (
-    WorkflowState,
     ReviewComment,
-    PullRequestInfo,
-    PRStatus,
+    WorkflowState,
 )
 
 

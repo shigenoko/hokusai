@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from hokusai.integrations.git import GitClient, BranchReuseDenied
+from hokusai.integrations.git import BranchReuseDenied, GitClient
 
 
 def _git(cwd: Path, *args: str) -> str:

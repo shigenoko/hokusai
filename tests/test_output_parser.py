@@ -7,11 +7,9 @@ output_parser のテスト
 """
 
 from hokusai.utils.output_parser import (
-    extract_markdown_section,
     _find_prefix_heading,
-    _strip_heading_prefix,
+    extract_markdown_section,
 )
-
 
 # === extract_markdown_section ===
 
