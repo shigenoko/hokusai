@@ -631,6 +631,26 @@ class GitHubHostingClient(GitHostingClient):
                 "checks_passing": None,
             }
 
+    @staticmethod
+    def _graphql_error_message(data: dict) -> str | None:
+        """GraphQL レスポンスの `errors` をメッセージ文字列に変換する。
+
+        `gh api graphql` は GraphQL の `errors` を含むレスポンスでも
+        exit code 0 を返すことがあるため、JSON 内の `errors` を明示的に
+        確認する必要がある。
+
+        Args:
+            data: パース済みの GraphQL レスポンス
+
+        Returns:
+            エラーがあればメッセージ（複数は "; " 区切り）、なければ None
+        """
+        errors = data.get("errors")
+        if not errors:
+            return None
+        messages = [str(e.get("message", e)) for e in errors]
+        return "; ".join(messages)
+
     def _resolve_copilot_reviewer(
         self, owner: str, repo: str, pr_number: int
     ) -> tuple[str | None, str | None]:
@@ -674,6 +694,12 @@ class GitHubHostingClient(GitHostingClient):
             check=True,
         )
         data = json.loads(result.stdout)
+        # gh api graphql は errors を含んでも exit 0 を返すことがあるため明示的に確認。
+        # ここで raise し、上位で「取得失敗」として扱う（未対応と区別する）。
+        error_message = self._graphql_error_message(data)
+        if error_message:
+            raise RuntimeError(f"GraphQL errors: {error_message}")
+
         repo_data = data.get("data", {}).get("repository", {}) or {}
         pr_node_id = (repo_data.get("pullRequest") or {}).get("id")
 
@@ -740,20 +766,34 @@ class GitHubHostingClient(GitHostingClient):
         """
         try:
             shell = self._get_shell()
-            shell.run_gh(
+            result = shell.run_gh(
                 "api", "graphql",
                 "-f", f"query={mutation}",
                 "-f", f"prId={pr_node_id}",
                 "-f", f"botId={bot_id}",
                 check=True,
             )
-            return {"requested": True, "available": True, "reason": None}
         except ShellError as e:
             return {
                 "requested": False,
                 "available": True,
                 "reason": f"レビュー依頼に失敗しました: {e.result.stderr}",
             }
+
+        # gh api graphql は errors を含んでも exit 0 を返すことがあるため、
+        # レスポンス JSON の errors を確認し、存在すれば依頼失敗として扱う。
+        try:
+            error_message = self._graphql_error_message(json.loads(result.stdout))
+        except (json.JSONDecodeError, ValueError):
+            error_message = None
+        if error_message:
+            return {
+                "requested": False,
+                "available": True,
+                "reason": f"レビュー依頼に失敗しました: {error_message}",
+            }
+
+        return {"requested": True, "available": True, "reason": None}
 
     def get_pr_status_from_github(
         self, pr_number: int

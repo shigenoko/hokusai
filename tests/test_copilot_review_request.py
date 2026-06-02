@@ -155,6 +155,53 @@ class TestRequestCopilotReview:
         # ミューテーションは呼ばない（事前チェックのみ）
         assert mock_shell.run_gh.call_count == 1
 
+    def test_graphql_errors_in_resolve_treated_as_failure(self):
+        """事前チェックのレスポンスに GraphQL errors があれば取得失敗として扱う
+
+        gh api graphql は errors を含んでも exit 0 を返すことがあるため、
+        errors を見ずに「未対応」と誤判定しないことを検証する。
+        """
+        client = _make_client()
+        payload = {
+            "data": {"repository": None},
+            "errors": [{"message": "Could not resolve to a Repository"}],
+        }
+        mock_shell = Mock()
+        mock_shell.run_gh.return_value = Mock(stdout=json.dumps(payload))
+
+        with patch.object(client, "_get_shell", return_value=mock_shell):
+            result = client.request_copilot_review(42)
+
+        assert result["requested"] is False
+        assert result["available"] is False
+        assert "レビュアー候補取得失敗" in result["reason"]
+        assert "Could not resolve to a Repository" in result["reason"]
+        # ミューテーションは呼ばない
+        assert mock_shell.run_gh.call_count == 1
+
+    def test_graphql_errors_in_mutation_treated_as_failure(self):
+        """ミューテーションのレスポンスに GraphQL errors があれば依頼失敗として扱う
+
+        exit 0 でも errors を含む場合に requested=True にしないことを検証する。
+        """
+        client = _make_client()
+        mutation_payload = {
+            "data": {"requestReviews": None},
+            "errors": [{"message": "Copilot is not available"}],
+        }
+        mock_shell = Mock()
+        mock_shell.run_gh.side_effect = [
+            _suggested_actors_response(with_copilot=True),
+            Mock(stdout=json.dumps(mutation_payload)),
+        ]
+
+        with patch.object(client, "_get_shell", return_value=mock_shell):
+            result = client.request_copilot_review(42)
+
+        assert result["requested"] is False
+        assert result["available"] is True
+        assert "Copilot is not available" in result["reason"]
+
     def test_resolve_failure_is_handled(self):
         """事前チェックのクエリが例外を投げても安全に処理する"""
         client = _make_client()
