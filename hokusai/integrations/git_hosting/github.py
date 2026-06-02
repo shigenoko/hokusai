@@ -13,6 +13,14 @@ from ..claude_code import ClaudeCodeClient
 from .base import GitHostingClient, PullRequest, ReviewComment
 
 
+class GitHubGraphQLError(Exception):
+    """GitHub GraphQL API がエラー（`errors` フィールド）を返したことを表す例外。
+
+    `gh api graphql` は GraphQL の `errors` を含むレスポンスでも exit code 0 を
+    返すことがあるため、汎用例外ではなく専用例外で「取得失敗」を明示する。
+    """
+
+
 class GitHubHostingClient(GitHostingClient):
     """GitHub CLI を使用するクライアント"""
 
@@ -698,7 +706,7 @@ class GitHubHostingClient(GitHostingClient):
         # ここで raise し、上位で「取得失敗」として扱う（未対応と区別する）。
         error_message = self._graphql_error_message(data)
         if error_message:
-            raise RuntimeError(f"GraphQL errors: {error_message}")
+            raise GitHubGraphQLError(f"GraphQL errors: {error_message}")
 
         repo_data = data.get("data", {}).get("repository", {}) or {}
         pr_node_id = (repo_data.get("pullRequest") or {}).get("id")
@@ -783,8 +791,9 @@ class GitHubHostingClient(GitHostingClient):
         # gh api graphql は errors を含んでも exit 0 を返すことがあるため、
         # レスポンス JSON の errors を確認し、存在すれば依頼失敗として扱う。
         try:
+            # json.JSONDecodeError は ValueError のサブクラスなので ValueError で捕捉できる
             error_message = self._graphql_error_message(json.loads(result.stdout))
-        except (json.JSONDecodeError, ValueError):
+        except ValueError:
             error_message = None
         if error_message:
             return {
