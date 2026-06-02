@@ -3246,10 +3246,11 @@ def test_check_db_share_health_skips_unset_env_vars(store, monkeypatch):
     assert results["TEST_DB"] == (True, None)
 
 
-def test_check_db_share_health_detects_404_as_share_missing(store, monkeypatch):
-    """404 エラーは「integration not shared」として警告する"""
+def test_check_db_share_health_detects_404_as_not_queryable(store, monkeypatch):
+    """query が 404 のときは「DB not queryable」として警告する（原因は env の DB ID
+    が古い/誤り、DB がゴミ箱・削除済み、integration 未接続のいずれか）"""
     monkeypatch.setenv("TEST_TOKEN", "secret")
-    monkeypatch.setenv("TEST_DB", "db-not-shared")
+    monkeypatch.setenv("TEST_DB", "db-not-queryable")
 
     def _raise_404(self, db_id, **kwargs):
         raise NotionAPIError(
@@ -3263,7 +3264,7 @@ def test_check_db_share_health_detects_404_as_share_missing(store, monkeypatch):
     ok, msg = results["TEST_DB"]
     assert ok is False
     assert msg is not None
-    assert "integration not shared" in msg
+    assert "DB not queryable" in msg
     assert "404" in msg
 
 
@@ -3271,18 +3272,19 @@ def test_check_db_share_health_catches_query_404_when_retrieve_would_pass(
     store, monkeypatch
 ):
     """dogfooding §14 回帰: retrieve は成功するが query は 404 になる実環境の
-    誤設定（integration が親ページ経由で DB を「見られる」が DB 自体には未接続）
-    を health check が NG として検知する。probe を retrieve→query に変えた理由。"""
+    誤設定（env が Notion ゴミ箱の DB ID を指したままで、retrieve はメタデータを
+    返すが query は落ちる）を health check が NG として検知する。probe を
+    retrieve→query に変えた理由。"""
     monkeypatch.setenv("TEST_TOKEN", "secret")
-    monkeypatch.setenv("TEST_DB", "db-parent-visible-but-not-connected")
+    monkeypatch.setenv("TEST_DB", "db-trashed-retrieve-ok-query-404")
 
-    # retrieve は通る（親ページ経由の可視性）— かつて false positive を生んだ経路
+    # retrieve は通る（ゴミ箱 DB でもメタデータは残る）— かつて false positive を生んだ経路
     monkeypatch.setattr(
         NotionAPIClient,
         "retrieve_database",
-        lambda self, db_id: {"id": db_id, "title": []},
+        lambda self, db_id: {"id": db_id, "title": [], "in_trash": True},
     )
-    # query は 404（DB へ直接接続されていない＝sync の書き込み経路が落ちる状態）
+    # query は 404（DB がゴミ箱/削除済み等で sync の書き込み経路が落ちる状態）
     def _query_404(self, db_id, **kwargs):
         raise NotionAPIError(
             404,
@@ -3298,7 +3300,7 @@ def test_check_db_share_health_catches_query_404_when_retrieve_would_pass(
     ok, msg = results["TEST_DB"]
     assert ok is False, "retrieve が通っても query 404 なら NG であるべき"
     assert msg is not None
-    assert "integration not shared" in msg
+    assert "DB not queryable" in msg
 
 
 def test_check_db_share_health_handles_unexpected_exception(store, monkeypatch):
@@ -3320,8 +3322,8 @@ def test_check_db_share_health_handles_unexpected_exception(store, monkeypatch):
     assert "connection refused" in msg
 
 
-def test_check_db_share_health_treats_5xx_as_non_share_error(store, monkeypatch):
-    """500 系の API エラーは「integration not shared」ではなく一般エラーとして扱う
+def test_check_db_share_health_treats_5xx_as_non_404_error(store, monkeypatch):
+    """500 系の API エラーは「DB not queryable (query 404)」ではなく一般エラーとして扱う
     （404 検出と区別。SonarCloud 経路の安定性確認）"""
     monkeypatch.setenv("TEST_TOKEN", "secret")
     monkeypatch.setenv("TEST_DB", "db-5xx")
@@ -3335,9 +3337,9 @@ def test_check_db_share_health_treats_5xx_as_non_share_error(store, monkeypatch)
     results = disp.check_db_share_health()
     ok, msg = results["TEST_DB"]
     assert ok is False
-    # 404 検出ではないので「integration not shared」は付かない
+    # 404 検出ではないので「DB not queryable (query 404)」案内は付かない
     assert msg is not None
-    assert "integration not shared" not in msg
+    assert "DB not queryable" not in msg
     assert "500" in msg
 
 
@@ -3550,7 +3552,7 @@ def test_check_db_share_health_does_not_false_positive_on_404_in_message(
     store, monkeypatch
 ):
     """エラーメッセージに偶然 "404" の文字列が含まれていても、status が 404 で
-    なければ「integration not shared」誤検出しない（Issue #82 Copilot Round 2
+    なければ「DB not queryable (query 404)」誤検出しない（Issue #82 Copilot Round 2
     指摘: 構造化 status での判定）"""
     monkeypatch.setenv("TEST_TOKEN", "secret")
     monkeypatch.setenv("TEST_DB", "db-validation-error")
@@ -3571,10 +3573,10 @@ def test_check_db_share_health_does_not_false_positive_on_404_in_message(
     results = disp.check_db_share_health()
     ok, msg = results["TEST_DB"]
     assert ok is False
-    # 偽陽性ガード: message に "404" が含まれていても integration not shared
-    # と分類しない
+    # 偽陽性ガード: message に "404" が含まれていても query 404 案内
+    # （DB not queryable）と分類しない
     assert msg is not None
-    assert "integration not shared" not in msg
+    assert "DB not queryable" not in msg
     assert "validation_error" in msg
 
 

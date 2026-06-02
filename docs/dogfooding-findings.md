@@ -604,33 +604,43 @@ v0.7.0–v0.10.0 で追加した **Step 2/3/4/5** の CLI（`operations` / `grap
 
 ---
 
-## 14. Notion 同期が数週間 stuck していた真因 — integration が DB 未接続 + health check の false positive (2026-06-01)
+## 14. Notion 同期が数週間 stuck していた真因 — env がゴミ箱の DB を指していた + health check の false positive (2026-06-01〜06-03)
 
-推奨手順 ②（Notion env 設定 + integration share）の検証として、§10〜13 で一貫して「outbox に 12 件 pending が滞留」「Notion-backed 値がダミー」と記録してきた状態の**真因を特定**した。結論は **§10〜13 の前提（「env 未設定が原因」）が誤り**で、真因は別にあった。
+推奨手順 ②（Notion env 設定 + integration share）の検証として、§10〜13 で一貫して「outbox に 12 件 pending が滞留」「Notion-backed 値がダミー」と記録してきた状態の**真因を特定し、解消まで完遂**した。本節は **初回の誤った診断と、その訂正までを正直に記録**する（dogfooding の学びの本体）。
+
+> **訂正履歴**: 当初 (06-01) 本節は真因を「integration が DB に未接続」と結論したが、これは **誤り**だった。`POST /v1/search` の結果に DB が出なかったのを「未接続」と解釈したが、実際は **フィルタ無し search の先頭ページに入っていなかっただけ**で、`filter={object:database}` 付き search では両 DB が出る＝**接続済み**だった。06-03 の再調査で真因が **「env が Notion ゴミ箱(in_trash)の DB ID を指したまま」** と確定。PR #167（probe を query 化）と本節を本 PR で訂正する。
 
 ### 観察手順
 
 | Step | 操作 |
 |---|---|
 | 1 | `~/.zshrc` の Notion env 永続化状況を確認 |
-| 2 | API token で Workflows / PR DB を `GET /databases/{id}`（retrieve）|
-| 3 | `NotionSyncDispatcher.retry_pending()` で実 drain を試行 |
-| 4 | 失敗の切り分け: 同一 token で `retrieve` vs `query` vs `search` を生 API で比較 |
+| 2 | API token で Workflows / PR DB を `retrieve` / `query` / `search` 比較（生 API）|
+| 3 | 2 つの "HOKUSAI" integration（`_API_TOKEN` / `_4HOKUSAI`）と各 DB の `created_by` を照合 |
+| 4 | `Notion-Version: 2025-09-03` で DB の `in_trash` / `data_sources` を確認 |
+| 5 | env を live DB へ張替 → `check_db_share_health()` → `retry_pending()` で実 drain |
 
 ### 実観察結果（真因の特定）
 
-- ⚠ **「env 未設定」は誤認だった**: `HOKUSAI_NOTION_API_TOKEN_4HOKUSAI` / `..._WORKFLOWS_DB_ID_4HOKUSAI` / `..._PR_DB_ID_4HOKUSAI` は **`~/.zshrc` に永続化済み**で token も有効。§10〜13 で「未設定」に見えたのは、**dogfooding 観察シェル（Bash tool = bash）が zsh の env を読まなかった**観察アーティファクト。ユーザーの対話 zsh では env は通っていた。
-- ⚠ **retrieve は通るが query が 404**: 同一 token・同一 DB ID・同一 `Notion-Version: 2022-06-28` で、`GET /databases/{id}`（retrieve）は **200**、`POST /databases/{id}/query` は **404 `object_not_found`**（"Make sure the relevant pages and databases are shared with your integration"）。
-- ⚠ **真因 = integration が DB に直接未接続**: 両 DB は親ページ `35e8…4d53` 配下にあり、integration "HOKUSAI" は**親ページ経由で DB メタデータを retrieve できる**が、`POST /v1/search`（直接接続された object のみ返す）の結果に **両 DB が現れない**＝**DB 自体には接続されていない**。Notion では retrieve（メタ可視性）は親ページ共有で漏れて通るが、query / create（同期の書き込み経路）は **DB へ直接接続**しないと 404 になる。これが 2026-05-23 以降 outbox を無言で滞留させていた真因。
-- ⚠ **`check_db_share_health()` が false positive を返していた**: この health check は `retrieve_database`（GET）で probe していたため、上記の「retrieve は通るが query は 404」状態を **OK と誤報告**。`hokusai start` 冒頭の事前警告がまさにこの誤設定を見逃し、数週間サイレントに同期を止めていた。**health check が、同期が実際に必要とする capability を試していなかった**のが盲点。
-- ✅ **drain 自体は堅牢（無害）**: `retry_pending()` は 12 件すべて 404 を受けても `attempts` を 1→2 に進めるだけで（`max_retry_attempts=10`）error 行送りや破損はなし。Notion へは何も書き込まれず。outbox retry 機構の頑健性は実証された。
+- ⚠ **「env 未設定」は誤認だった**: `HOKUSAI_NOTION_*_4HOKUSAI`（token / DB ID）は **`~/.zshrc` に永続化済み**で token も有効。§10〜13 で「未設定」に見えたのは、**dogfooding 観察シェル（Bash tool = bash）が zsh の env を読まなかった**観察アーティファクト。
+- ✅ **integration は接続済みだった（当初の「未接続」結論は誤り）**: config が使う `_4HOKUSAI` integration（bot id `35f8…`）は対象 DB の `created_by` 当人で、`filter={object:database}` 付き search にも対象 DB が出る。retrieve / page read / block children すべて 200。**接続は欠けていなかった**。
+- ⚠ **真因 = env が Notion ゴミ箱(in_trash)の DB を指していた**: env の DB ID（`…8187…` / `…815b…`、title `HOKUSAI Workflows/Pull Requests DB`）を `Notion-Version: 2025-09-03` で retrieve すると **`in_trash: True`**。Notion のゴミ箱 DB は **retrieve は 200（メタデータは残る）だが query は 404 `object_not_found`** になる。これが「retrieve OK / query 404」の正体で、2026-05-23 以降 outbox を無言で滞留させていた真因。
+- ⚠ **同一スキーマの live DB が別 id で存在**: ゴミ箱 DB と**プロパティ完全一致**（Workflows 23 / PR 8）の live DB（`in_trash: False`、title `Workflows DB` / `Pull Requests DB`、ともに 2026-05-14 作成）が別 id（`…812b…` / `…8192…`）で存在し query も 200。ゴミ箱化された旧 DB を env が指したままだった。
+- ⚠ **`check_db_share_health()` が false positive を返していた**: この health check は `retrieve_database`（GET）で probe していたため、**ゴミ箱 DB を OK と誤報告**。`hokusai start` 冒頭の事前警告がこの誤設定を見逃し、数週間サイレントに同期を止めていた。**health check が、同期が実際に必要とする capability（query/create）を試していなかった**のが盲点。
+- 補足: Notion ワークスペースは新データモデル（database → data source）へ移行済み（live DB は `data_sources` を持ち、`/v1/data_sources/{id}/query` でも 200）。ただし今回の 404 は data source 移行が原因ではなく **in_trash** が原因（live DB は旧 `/databases/{id}/query` でも 200）。
+
+### 解消（実 drain 成功）
+
+- env を live DB へ張替（`~/.zshrc`、バックアップ取得の上）: `WORKFLOWS_DB_ID_4HOKUSAI=…812b…` / `PR_DB_ID_4HOKUSAI=…8192…`。
+- **`check_db_share_health()` が両 DB とも OK**（query probe が live DB で通過）。
+- **`retry_pending(limit=50)` → `{succeeded: 12, failed: 0, moved_to_error: 0}`、outbox 12 → 0**。live Workflows DB に **3 workflow レコード**が同期（12 イベント＝workflow_started 3 / phase_changed 6 / terminal 3 がイベントソーシングで 3 workflow に集約）。推奨手順 ③（Notion 配線後の再観察）が実データで完遂。
+- ✅ **drain 機構は堅牢**: ゴミ箱 DB に対しても 404 で `attempts` を進めるだけ（`max_retry_attempts=10`）で破損なし。張替後は 1 発で全件成功。
 
 ### 評価 + アクション
 
-- **HOKUSAI 本体の改善（本 PR で実施）**: `check_db_share_health()` の probe を `retrieve_database` → **`query_database(page_size=1)`（read-only・副作用なし）** に変更。同期の書き込み経路と同じ capability を試すことで「retrieve は通るが sync は 404」の誤設定を正しく NG 検知し、`hokusai start` の事前警告で「Notion で DB を開き ⋯ → 接続 → HOKUSAI を追加」と案内する。回帰テスト `test_check_db_share_health_catches_query_404_when_retrieve_would_pass` で固定。
-- **【要・手作業】Notion 側の対処**: ユーザーが Workflows DB / PR DB を**各々フルページで開く → 右上 ⋯ → 接続 / Connections → "HOKUSAI" を追加**する。これで query / create が通り、再 drain で 12 件が実同期される。share 付与は Notion UI 操作で、API/integration からは自己付与できない。
-- **§10〜13 の「Notion 未配線」記述の訂正**: ブロッカーは「env 未設定」ではなく「**integration の DB 未接続 + health check の false positive**」だった。env は設定済み・integration share だけが欠けていた。
-- **dogfooding の収穫**: 「観察ツールがユーザー環境の env を読めない」と「health check が誤った capability を probe する」という 2 つの盲点を、実 drain を試みて初めて炙り出せた。read-only 観察だけでは health check が OK を返し続け、真因に到達できなかった（**書き込み経路を実際に叩く dogfooding の価値**）。
+- **HOKUSAI 本体の改善（PR #167 + 本 PR）**: `check_db_share_health()` の probe を `retrieve_database` → **`query_database(page_size=1)`（read-only・副作用なし）** に変更（PR #167）。同期の書き込み経路と同じ capability を試すことで「retrieve は通るが sync は 404」（= env がゴミ箱/古い DB を指す、削除済み、未接続のいずれか）を正しく NG 検知する。本 PR で 404 メッセージを **原因を断定しない汎用文言**（"DB not queryable (query 404) — env の DB ID が古い/誤り、DB がゴミ箱・削除済み、または integration 未接続"）に訂正。回帰テスト `test_check_db_share_health_catches_query_404_when_retrieve_would_pass`（retrieve 成功・query 404 → NG）で固定。
+- **§10〜13 の「Notion 未配線」記述の訂正**: ブロッカーは「env 未設定」でも「integration 未接続」でもなく、「**env がゴミ箱の DB ID を指したまま + health check の false positive**」だった。
+- **dogfooding の収穫**: (1) 「観察ツールがユーザー環境の env を読めない」、(2) 「health check が誤った capability（retrieve）を probe し OK を返し続ける」、(3) 「`search` のフィルタ無し先頭ページの空振りを"未接続"と早合点した初回診断ミス」——の 3 つを、**実 drain を試みて初めて**炙り出せた。read-only 観察だけでは真因に到達できず、誤診断（未接続）に流れた。**書き込み経路を実際に叩き、生 API で in_trash まで確認する**ことの価値を示す事例。
 
 ---
 
