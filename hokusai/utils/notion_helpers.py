@@ -342,6 +342,18 @@ def _is_notion_page_ref(task_url: str) -> bool:
         return False
 
 
+def subpage_persistence_active(task_url: str) -> bool:
+    """phase 出力を Notion 子ページとして保存/検証する経路が有効かを返す。
+
+    `is_skip_notion()` でなく、かつ `task_url` が Notion ページ参照のときのみ True。
+    保存（`save_to_subpage_or_create`）と各 phase ノードの検証（`_verify_subpage_content`
+    / `_verify_notion_state` 等）が**同じ述語**を使うことで条件の乖離を防ぐ
+    （dogfooding §15: PR #170 は保存のみ skip 対応し、検証ガードが取り残されて
+    Phase 2 が `子ページURLが未登録` で再クラッシュした反省）。
+    """
+    return not is_skip_notion() and _is_notion_page_ref(task_url)
+
+
 def save_to_subpage_or_create(
     state: WorkflowState,
     task_url: str,
@@ -380,22 +392,20 @@ def save_to_subpage_or_create(
         Phase 2 で `Invalid Notion page URL or ID` クラッシュしていた）。Notion
         ダッシュボード同期（workflow status イベント）は別経路のため影響しない。
     """
-    if is_skip_notion():
-        # Issue #113 Round 1 指摘: profile suffix env でも skip されるため、
-        # 文言には特定 env 名を含めず一般的な表現にする（log は info 粒度で
-        # phase 識別だけ残せば十分なため、active_skip_env_name の呼び出しは省略）。
-        logger.info(
-            f"Notion接続スキップモード: Phase {phase} 子ページ保存をスキップ"
-        )
-        return state
-
-    if not _is_notion_page_ref(task_url):
-        # task_url が Notion ページでない（github_issue backend 等）→ 親ページが
-        # 無いため subpage 保存は適用不可。workflow を止めず skip する（§15）。
-        logger.info(
-            f"task_url が Notion ページではないため Phase {phase} 子ページ保存を"
-            "スキップ（task_backend=github_issue 等。ダッシュボード同期は影響なし）"
-        )
+    # 保存と検証で共有する述語で skip 判定する（条件の乖離を防ぐ。§15）。
+    # ログだけ原因別に出し分ける（skip-notion / task_url が非 Notion）。
+    if not subpage_persistence_active(task_url):
+        if is_skip_notion():
+            # Issue #113 Round 1 指摘: profile suffix env でも skip されるため、
+            # 文言には特定 env 名を含めない一般表現にする。
+            logger.info(
+                f"Notion接続スキップモード: Phase {phase} 子ページ保存をスキップ"
+            )
+        else:
+            logger.info(
+                f"task_url が Notion ページではないため Phase {phase} 子ページ保存を"
+                "スキップ（task_backend=github_issue 等。ダッシュボード同期は影響なし）"
+            )
         return state
 
     phase_name = PHASE_NAMES.get(phase, f"Phase {phase}")

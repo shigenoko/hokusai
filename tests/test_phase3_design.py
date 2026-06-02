@@ -13,6 +13,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from tests._notion_test_helpers import build_subpage_verify_state
+
 # ---------------------------------------------------------------------------
 # 直接プロンプト実行テスト
 # ---------------------------------------------------------------------------
@@ -313,23 +315,7 @@ class TestVerifyDesignSubpageContent:
         monkeypatch.delenv("HOKUSAI_SKIP_NOTION", raising=False)
 
     def _build_state(self):
-        phase_template = {
-            "status": "pending",
-            "started_at": None,
-            "completed_at": None,
-            "error_message": None,
-            "retry_count": 0,
-        }
-        return {
-            "task_url": "https://www.notion.so/task-page-aabbccdd",
-            "task_name": "テストタスク",
-            "repo_path": "/tmp/test",
-            "workflow_id": "test-wf-001",
-            "phases": {i: {**phase_template} for i in range(1, 11)},
-            "audit_log": [],
-            "schema_change_required": False,
-            "research_result": "",
-        }
+        return build_subpage_verify_state()
 
     @patch("hokusai.integrations.notion_mcp.NotionMCPClient")
     def test_passes_when_full_content_saved(self, MockClient):

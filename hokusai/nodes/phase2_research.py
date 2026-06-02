@@ -24,13 +24,15 @@ from ..state import (
     update_phase_status,
 )
 from ..utils.cross_review import execute_cross_review
-from ..utils.notion_helpers import save_to_subpage_or_create
+from ..utils.notion_helpers import (
+    save_to_subpage_or_create,
+    subpage_persistence_active,
+)
 from ..utils.output_parser import _find_prefix_heading, extract_markdown_section
 from ..utils.phase_page_templates import (
     build_phase_page_content,
     initialize_phase_page_state,
 )
-from ..utils.skip_notion import is_skip_notion
 
 logger = get_logger("phase2")
 
@@ -204,21 +206,25 @@ def _verify_notion_state(state: WorkflowState) -> None:
     失敗時は RuntimeError を送出。
 
     Note:
-        `is_skip_notion()` が True を返す場合（legacy global
-        `HOKUSAI_SKIP_NOTION=1` または profile suffix env
-        `HOKUSAI_SKIP_NOTION_<SLUG>=1`、Issue #113 follow-up で統一）は
-        検証スキップ（早期 return）。
-        SKIP_NOTION 経路では save_to_subpage_or_create も noop で
+        subpage 保存が適用されない経路では検証も skip（早期 return）する。
+        対象は `subpage_persistence_active(task_url)` が False、すなわち
+        (1) `is_skip_notion()` が True（legacy global `HOKUSAI_SKIP_NOTION=1`
+        または profile suffix env `HOKUSAI_SKIP_NOTION_<SLUG>=1`、Issue #113
+        follow-up で統一）、または (2) **`task_url` が Notion ページでない**
+        （`task_backend=github_issue` の GitHub issue URL 等。dogfooding §15）。
+        これらの経路では save_to_subpage_or_create も noop で
         state["phase_subpages"] が空のままになるため、検証すると常に
-        RuntimeError になり phase 2 が完走しない（Issue #77、PR #76 連鎖）。
-        `_verify_subpage_content` も同様に skip で早期 return する。
-        現在は state ベースの検証のみ。実ページの存在確認や
-        親タスクページへの本文混入チェック（notion-fetch による再取得）は
-        追加 LLM 呼び出しコストが高いため後続対応とする。
+        RuntimeError になり phase 2 が完走しない（Issue #77、PR #76 連鎖 /
+        §15 で task_url 非 Notion ケースを追加）。`_verify_subpage_content`
+        も同じ述語で skip する。現在は state ベースの検証のみ。実ページの
+        存在確認や親タスクページへの本文混入チェック（notion-fetch による
+        再取得）は追加 LLM 呼び出しコストが高いため後続対応とする。
     """
-    # Issue #113 follow-up: profile-aware な is_skip_notion() に統一。
-    if is_skip_notion():
-        logger.info("Notion接続スキップモード: Phase 2 Notion 状態検証をスキップ")
+    # subpage 保存が適用されない経路（skip-notion / task_url が非 Notion ページ）
+    # では phase_subpages が空のままになるため、検証も skip する（§15: 保存と
+    # 検証で同じ述語 subpage_persistence_active を使い条件の乖離を防ぐ）。
+    if not subpage_persistence_active(state.get("task_url", "")):
+        logger.info("Phase 2 Notion 状態検証をスキップ（subpage 非適用経路）")
         return
 
     subpage_url = state.get("phase_subpages", {}).get(2)
@@ -241,8 +247,8 @@ def _verify_subpage_content(state: WorkflowState, raw_output: str) -> None:
 
     失敗時は RuntimeError を送出し、Phase 2 を失敗扱いにする。
     """
-    # Issue #113 follow-up: profile-aware な is_skip_notion() に統一。
-    if is_skip_notion():
+    # subpage 非適用経路（skip-notion / task_url が非 Notion ページ）では skip（§15）。
+    if not subpage_persistence_active(state.get("task_url", "")):
         return
 
     subpage_url = state.get("phase_subpages", {}).get(2)

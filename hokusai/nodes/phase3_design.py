@@ -22,13 +22,15 @@ from ..state import (
     update_phase_status,
 )
 from ..utils.cross_review import execute_cross_review, format_cross_review_for_prompt
-from ..utils.notion_helpers import save_to_subpage_or_create
+from ..utils.notion_helpers import (
+    save_to_subpage_or_create,
+    subpage_persistence_active,
+)
 from ..utils.output_parser import _find_prefix_heading, extract_markdown_section
 from ..utils.phase_page_templates import (
     build_phase_page_content,
     initialize_phase_page_state,
 )
-from ..utils.skip_notion import is_skip_notion
 
 logger = get_logger("phase3")
 
@@ -300,8 +302,8 @@ def _verify_design_subpage_content(state: WorkflowState, raw_output: str) -> Non
 
     失敗時は RuntimeError を送出し、Phase 3 を失敗扱いにする。
     """
-    # Issue #113 follow-up: profile-aware な is_skip_notion() に統一。
-    if is_skip_notion():
+    # subpage 非適用経路（skip-notion / task_url が非 Notion ページ）では skip（§15）。
+    if not subpage_persistence_active(state.get("task_url", "")):
         return
 
     subpage_url = state.get("phase_subpages", {}).get(3)

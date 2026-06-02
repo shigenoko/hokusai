@@ -15,6 +15,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from hokusai.nodes.phase2_research import _extract_research_report
+from tests._notion_test_helpers import build_subpage_verify_state
 
 # ---------------------------------------------------------------------------
 # _extract_research_report テスト
@@ -348,23 +349,7 @@ class TestPhase2FailFast:
     """子ページ作成失敗時に Phase 2 が失敗で止まることを検証"""
 
     def _build_state(self):
-        phase_template = {
-            "status": "pending",
-            "started_at": None,
-            "completed_at": None,
-            "error_message": None,
-            "retry_count": 0,
-        }
-        return {
-            "task_url": "https://www.notion.so/task-page-aabbccdd",
-            "task_name": "テストタスク",
-            "repo_path": "/tmp/test",
-            "workflow_id": "test-wf-001",
-            "phases": {i: {**phase_template} for i in range(1, 11)},
-            "audit_log": [],
-            "schema_change_required": False,
-            "research_result": "",
-        }
+        return build_subpage_verify_state()
 
     def test_verify_notion_state_raises_when_no_subpage(self):
         """_verify_notion_state() で phase_subpages[2] 未設定 → RuntimeError"""
@@ -413,6 +398,24 @@ class TestPhase2FailFast:
         log_text = " ".join(r.getMessage() for r in caplog.records)
         assert "スキップ" in log_text
         assert "Phase 2" in log_text
+
+    def test_verify_skips_when_task_url_not_notion(self, monkeypatch):
+        """§15: task_url が非 Notion（github_issue backend）のとき、phase_subpages
+        未設定でも _verify_notion_state / _verify_subpage_content は raise せず skip。
+        PR #170 が save のみ修正し検証ガードを取り残した回帰を防ぐ。"""
+        from hokusai.nodes.phase2_research import (
+            _verify_notion_state,
+            _verify_subpage_content,
+        )
+
+        monkeypatch.delenv("HOKUSAI_SKIP_NOTION", raising=False)
+        state = self._build_state()
+        state["task_url"] = "https://github.com/shigenoko/hokusai/issues/169"
+        # phase_subpages は未設定（subpage 保存が skip されたため）
+
+        # どちらも例外を投げない
+        _verify_notion_state(state)
+        _verify_subpage_content(state, "raw output text")
 
     @patch("hokusai.nodes.phase2_research._validate_research_output")
     @patch("hokusai.nodes.phase2_research.execute_cross_review", side_effect=lambda s, *a, **kw: s)
@@ -554,23 +557,7 @@ class TestVerifySubpageContent:
         monkeypatch.delenv("HOKUSAI_SKIP_NOTION", raising=False)
 
     def _build_state(self):
-        phase_template = {
-            "status": "pending",
-            "started_at": None,
-            "completed_at": None,
-            "error_message": None,
-            "retry_count": 0,
-        }
-        return {
-            "task_url": "https://www.notion.so/task-page-aabbccdd",
-            "task_name": "テストタスク",
-            "repo_path": "/tmp/test",
-            "workflow_id": "test-wf-001",
-            "phases": {i: {**phase_template} for i in range(1, 11)},
-            "audit_log": [],
-            "schema_change_required": False,
-            "research_result": "",
-        }
+        return build_subpage_verify_state()
 
     @patch("hokusai.integrations.notion_mcp.NotionMCPClient")
     def test_passes_when_full_content_saved(self, MockClient):
