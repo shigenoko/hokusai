@@ -213,8 +213,10 @@ def serve_operations_http(
 ) -> HTTPServer:
     """read-only HTTP admin サーバを構築して返す（呼び出し側で serve_forever）。
 
-    既定 bind は `127.0.0.1`（ローカル admin）。テスト容易性のため起動
-    （`serve_forever`）はせず、構築済み `HTTPServer` を返す。CLI 側が
+    既定 bind は `127.0.0.1`（ローカル admin）。認証は持たず read-only ゆえ
+    副作用はないが、`host="0.0.0.0"` 等で外部公開する場合は認証がないため
+    ネットワーク到達性が唯一の防御になる点に注意する。テスト容易性のため
+    起動（`serve_forever`）はせず、構築済み `HTTPServer` を返す。CLI 側が
     `serve_forever()` を呼ぶ。
     """
     handler_cls = build_operations_http_handler(registry, config)
