@@ -342,6 +342,18 @@ def _is_notion_page_ref(task_url: str) -> bool:
         return False
 
 
+def subpage_persistence_active(task_url: str) -> bool:
+    """phase 出力を Notion 子ページとして保存/検証する経路が有効かを返す。
+
+    `is_skip_notion()` でなく、かつ `task_url` が Notion ページ参照のときのみ True。
+    保存（`save_to_subpage_or_create`）と各 phase ノードの検証（`_verify_subpage_content`
+    / `_verify_notion_state` 等）が**同じ述語**を使うことで条件の乖離を防ぐ
+    （dogfooding §15: PR #170 は保存のみ skip 対応し、検証ガードが取り残されて
+    Phase 2 が `子ページURLが未登録` で再クラッシュした反省）。
+    """
+    return not is_skip_notion() and _is_notion_page_ref(task_url)
+
+
 def save_to_subpage_or_create(
     state: WorkflowState,
     task_url: str,

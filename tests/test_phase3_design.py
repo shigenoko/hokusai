@@ -84,7 +84,7 @@ class TestPhase3DirectPrompt:
             "retry_count": 0,
         }
         return {
-            "task_url": "https://www.notion.so/task-page-aabbccdd",
+            "task_url": "https://www.notion.so/task-page-aabbccdd11223344aabbccdd11223344",
             "task_name": "テストタスク",
             "repo_path": "/tmp/test",
             "workflow_id": "test-wf-001",
@@ -283,7 +283,7 @@ class TestValidateDesignOutput:
             "retry_count": 0,
         }
         state = {
-            "task_url": "https://www.notion.so/task-page-aabbccdd",
+            "task_url": "https://www.notion.so/task-page-aabbccdd11223344aabbccdd11223344",
             "task_name": "テストタスク",
             "repo_path": "/tmp/test",
             "workflow_id": "test-wf-001",
@@ -321,7 +321,7 @@ class TestVerifyDesignSubpageContent:
             "retry_count": 0,
         }
         return {
-            "task_url": "https://www.notion.so/task-page-aabbccdd",
+            "task_url": "https://www.notion.so/task-page-aabbccdd11223344aabbccdd11223344",
             "task_name": "テストタスク",
             "repo_path": "/tmp/test",
             "workflow_id": "test-wf-001",

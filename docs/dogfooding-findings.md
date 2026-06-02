@@ -665,11 +665,16 @@ v0.7.0–v0.10.0 で追加した **Step 2/3/4/5** の CLI（`operations` / `grap
 - ⚠ **Notion 接続確認が重い**: `hokusai start` / `continue` 冒頭の「Notion接続確認」が毎回 Claude Code を起動（~21s）。単純な API 疎通確認に LLM CLI を使うのは過剰で、起動レイテンシを押し上げる。
 - ⚠ **ローカル main 同期失敗（継続）**: 「ローカル main の同期に失敗、続行します」。Dropbox 配下の作業ツリーや未コミット状態が影響している可能性（観察のみ）。
 
+### 追加観測（PR #170 マージ後の再実行で判明）
+
+- 🔴 **Phase 2 の subpage ガードは 3 箇所あり、PR #170 は 1 箇所しか直していなかった**: `save_to_subpage_or_create`（保存）を skip 対応しても、直後の `_verify_subpage_content` と完了前の `_verify_notion_state` が **`is_skip_notion()` だけで早期 return** し「task_url が非 Notion」を考慮しないため、`子ページURLが未登録です` で再クラッシュ。Phase 3 の検証関数も同型。**保存と検証で skip 条件が乖離**していた。フォローアップ PR で共有述語 `subpage_persistence_active(task_url)`（= `not is_skip_notion() and _is_notion_page_ref(task_url)`）を導入し、保存・検証の全ガードを同一述語に統一して恒久修正。Phase 4 は presence チェックのみ（raise しない）で影響なし。
+- 🔴 **cleanup 後の resume 衝突 + 非完了 workflow を正規削除する手段が無い**: `hokusai cleanup <wf>` は worktree を消すが **workflow レコード（state）は残す**。`find_workflow_by_task_url` は status を問わず最新 wf を返すため、同じ issue で `hokusai start` すると **cleanup 済み（worktree 欠落）の wf を resume しようとして `Worktree が存在しません` でハードエラー**＝同 issue で fresh start できないデッドロック。`--gc-workflows` は `current_phase >= 10` のみ対象で、Phase 2 等の非完了 wf を消すコマンドが無い。dogfooding では SQLite から `DELETE FROM workflows WHERE workflow_id=...` を手動実行して回避した。
+
 ### 評価 + 次のアクション候補
 
-- **本 PR で修正**: Phase 2 ブロッカー（`save_to_subpage_or_create` の非 Notion task_url クラッシュ）。これにより github_issue backend でも Phase 2 以降へ進めるようになる。回帰テスト `TestSaveToSubpageNonNotionTaskUrl` を追加。
-- **後続候補**: (a) stranded workflow を「マージ済み/完了」として閉じる経路（`hokusai cleanup --mark-merged` 等）。(b) live Workflows DB へ `notion-migrate-schema` 適用（`Operator` 等の欠落プロパティ補完）。(c) `進行中` ラベルの自動作成 or 欠落時の graceful skip 明示。(d) Notion 接続確認を LLM CLI でなく直接 API 疎通に置換（起動高速化）。
-- **完走の継続**: Phase 2 修正後に #169 workflow を再開し、Phase 3〜10（設計/計画/実装/検証/レビュー/PR/記録）の運用穴を継続観察する（本 PR マージ後）。
+- **本 PR で修正**: Phase 2 ブロッカーの恒久修正（保存＝PR #170 + 検証ガード＝本 PR）。共有述語 `subpage_persistence_active` で保存・検証の skip 条件を統一し、github_issue backend でも Phase 2/3 を通過できるようにした。回帰テスト追加（`TestSubpagePersistenceActive` / `test_verify_skips_when_task_url_not_notion`）。
+- **後続候補**: (a) **cleanup の resume 衝突 / 非完了 wf 削除手段**（`hokusai cleanup --purge` で state も削除、または `start` 側で worktree 欠落 wf を resume 対象から除外して fresh start にフォールバック）。(b) stranded workflow を「マージ済み/完了」として閉じる経路。(c) live Workflows DB へ `notion-migrate-schema` 適用（`Operator` 等の欠落補完）。(d) `進行中` ラベルの自動作成 or 欠落時の graceful skip 明示。(e) Notion 接続確認を LLM CLI でなく直接 API 疎通に置換（起動高速化）。
+- **完走の継続**: 本 PR マージ後に #169 workflow を再開し、Phase 3〜10（設計/計画/実装/検証/レビュー/PR/記録）の運用穴を継続観察する。
 
 ---
 

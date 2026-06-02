@@ -258,6 +258,36 @@ class TestSaveToSubpageNonNotionTaskUrl:
         assert result["phase_subpages"][2] == "https://notion.so/new-subpage"
 
 
+class TestSubpagePersistenceActive:
+    """subpage_persistence_active 述語（保存と検証で共有）の検証（§15）"""
+
+    def test_notion_url_active(self, monkeypatch):
+        from hokusai.utils.notion_helpers import subpage_persistence_active
+
+        monkeypatch.delenv("HOKUSAI_SKIP_NOTION", raising=False)
+        url = "https://notion.so/workspace/task-aabbccdd11223344aabbccdd11223344"
+        assert subpage_persistence_active(url) is True
+
+    def test_github_issue_url_inactive(self, monkeypatch):
+        from hokusai.utils.notion_helpers import subpage_persistence_active
+
+        monkeypatch.delenv("HOKUSAI_SKIP_NOTION", raising=False)
+        assert (
+            subpage_persistence_active(
+                "https://github.com/shigenoko/hokusai/issues/169"
+            )
+            is False
+        )
+
+    def test_inactive_when_skip_notion(self, monkeypatch):
+        from hokusai.utils.notion_helpers import subpage_persistence_active
+
+        monkeypatch.setenv("HOKUSAI_SKIP_NOTION", "1")
+        url = "https://notion.so/workspace/task-aabbccdd11223344aabbccdd11223344"
+        # skip-notion なら Notion URL でも False
+        assert subpage_persistence_active(url) is False
+
+
 class TestSaveToSubpageFailFast:
     """子ページ新規作成失敗時のテスト"""
 
