@@ -682,8 +682,10 @@ class GitHubHostingClient(GitHostingClient):
         for node in nodes:
             login = (node.get("login") or "").lower()
             # Copilot のコードレビュー bot は login が
-            # "copilot-pull-request-reviewer" の Bot として現れる
-            if node.get("__typename") == "Bot" and "copilot" in login:
+            # "copilot-pull-request-reviewer" の Bot として現れる。
+            # 他の copilot 系 bot（copilot-swe-agent 等）を誤って拾わないよう
+            # login を完全一致で判定する。
+            if node.get("__typename") == "Bot" and login == "copilot-pull-request-reviewer":
                 bot_id = node.get("id")
                 break
 

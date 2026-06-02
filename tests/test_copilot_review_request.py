@@ -96,6 +96,33 @@ class TestRequestCopilotReview:
         # 未対応ならミューテーションは呼ばない
         assert mock_shell.run_gh.call_count == 1
 
+    def test_other_copilot_bot_not_matched(self):
+        """login が完全一致しない copilot 系 bot は拾わない（copilot-swe-agent 等）"""
+        client = _make_client()
+        payload = {
+            "data": {
+                "repository": {
+                    "pullRequest": {"id": "PR_node1"},
+                    "suggestedActors": {
+                        "nodes": [
+                            # コーディングエージェント等、レビュアー bot ではない copilot 系
+                            {"login": "copilot-swe-agent", "__typename": "Bot", "id": "BOT_swe"},
+                        ]
+                    },
+                }
+            }
+        }
+        mock_shell = Mock()
+        mock_shell.run_gh.return_value = Mock(stdout=json.dumps(payload))
+
+        with patch.object(client, "_get_shell", return_value=mock_shell):
+            result = client.request_copilot_review(42)
+
+        assert result["requested"] is False
+        assert result["available"] is False
+        # 誤って依頼しない（ミューテーションは呼ばない）
+        assert mock_shell.run_gh.call_count == 1
+
     def test_available_but_mutation_fails(self):
         """利用可能だがミューテーションが失敗した場合は requested=False"""
         client = _make_client()
