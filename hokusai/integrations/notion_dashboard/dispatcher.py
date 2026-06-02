@@ -129,8 +129,9 @@ class NotionSyncDispatcher:
         Returns:
             `{env_name: (ok, error_message | None), ...}` の dict。
             - env が設定されていない DB は dict に含めない（skip）
-            - ok=True / error_message=None で share 成功
-            - ok=False / error_message に詳細（"integration not shared (404)" 等）
+            - ok=True / error_message=None で query 可能（同期可）
+            - ok=False / error_message に詳細（query 404 は "DB not queryable
+              (query 404) …"、それ以外の API エラーは status 付きメッセージ）
             is_configured()=False のときは空 dict を返す。
 
         Notes:
