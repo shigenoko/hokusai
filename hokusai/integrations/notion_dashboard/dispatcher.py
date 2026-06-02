@@ -107,12 +107,22 @@ class NotionSyncDispatcher:
         return True
 
     def check_db_share_health(self) -> dict[str, tuple[bool, str | None]]:
-        """各 DB ID env に対し retrieve_database を呼んで integration share 状態を確認する。
+        """各 DB ID env に対し query_database を発行して integration の share 状態を確認する。
 
         Issue #82 / M0.2: `is_configured()` は env が揃っているかだけしか
         見ないため、Notion 側で integration "HOKUSAI" に DB が share されて
         いない場合は dispatch 時の 404 が outbox に積み続けられる。事前に
-        各 DB を retrieve して早期検出する。
+        各 DB を 1 件 query して早期検出する。
+
+        **なぜ retrieve ではなく query か（dogfooding §14）**: `retrieve_database`
+        (GET) は integration が **親ページ経由で DB メタデータを「見られる」だけ**
+        でも 200 を返すため、DB 自体に integration が接続されていなくても成功
+        してしまう（false positive）。一方 dispatch の書き込み経路は
+        `query_database` / `create_page` を使い、これらは **DB へ直接接続** されて
+        いないと 404 になる。したがって health check も同じ capability を試す
+        `query_database(page_size=1)`（read-only・副作用なし）で probe する。
+        これにより「retrieve は通るが sync は 404」という実環境の誤設定
+        （outbox が無言で滞留し続ける状態）を正しく検知できる。
 
         Returns:
             `{env_name: (ok, error_message | None), ...}` の dict。
@@ -171,7 +181,10 @@ class NotionSyncDispatcher:
                 # env 未設定の DB は dogfooding 中も「未設定」が正しい状態なので skip
                 continue
             try:
-                preflight_api.retrieve_database(db_id)
+                # query で probe する（retrieve だと親ページ経由の可視性で
+                # false positive になる。docstring 参照 / dogfooding §14）。
+                # page_size=1 で read-only・最小転送。
+                preflight_api.query_database(db_id, page_size=1)
                 results[env_name] = (True, None)
             except NotionAPIError as e:
                 # 404 (integration not shared) を構造化された status 属性で判定する
@@ -181,7 +194,9 @@ class NotionSyncDispatcher:
                 if e.status == 404:
                     results[env_name] = (
                         False,
-                        f"integration not shared with DB (404): {msg[:160]}",
+                        "integration not shared with DB (query 404): "
+                        f"{msg[:140]} — Notion で DB を開き ⋯ → 接続 → "
+                        '"HOKUSAI" を追加してください',
                     )
                 else:
                     results[env_name] = (False, msg[:200])

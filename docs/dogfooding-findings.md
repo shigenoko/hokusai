@@ -604,6 +604,36 @@ v0.7.0–v0.10.0 で追加した **Step 2/3/4/5** の CLI（`operations` / `grap
 
 ---
 
+## 14. Notion 同期が数週間 stuck していた真因 — integration が DB 未接続 + health check の false positive (2026-06-01)
+
+推奨手順 ②（Notion env 設定 + integration share）の検証として、§10〜13 で一貫して「outbox に 12 件 pending が滞留」「Notion-backed 値がダミー」と記録してきた状態の**真因を特定**した。結論は **§10〜13 の前提（「env 未設定が原因」）が誤り**で、真因は別にあった。
+
+### 観察手順
+
+| Step | 操作 |
+|---|---|
+| 1 | `~/.zshrc` の Notion env 永続化状況を確認 |
+| 2 | API token で Workflows / PR DB を `GET /databases/{id}`（retrieve）|
+| 3 | `NotionSyncDispatcher.retry_pending()` で実 drain を試行 |
+| 4 | 失敗の切り分け: 同一 token で `retrieve` vs `query` vs `search` を生 API で比較 |
+
+### 実観察結果（真因の特定）
+
+- ⚠ **「env 未設定」は誤認だった**: `HOKUSAI_NOTION_API_TOKEN_4HOKUSAI` / `..._WORKFLOWS_DB_ID_4HOKUSAI` / `..._PR_DB_ID_4HOKUSAI` は **`~/.zshrc` に永続化済み**で token も有効。§10〜13 で「未設定」に見えたのは、**dogfooding 観察シェル（Bash tool = bash）が zsh の env を読まなかった**観察アーティファクト。ユーザーの対話 zsh では env は通っていた。
+- ⚠ **retrieve は通るが query が 404**: 同一 token・同一 DB ID・同一 `Notion-Version: 2022-06-28` で、`GET /databases/{id}`（retrieve）は **200**、`POST /databases/{id}/query` は **404 `object_not_found`**（"Make sure the relevant pages and databases are shared with your integration"）。
+- ⚠ **真因 = integration が DB に直接未接続**: 両 DB は親ページ `35e8…4d53` 配下にあり、integration "HOKUSAI" は**親ページ経由で DB メタデータを retrieve できる**が、`POST /v1/search`（直接接続された object のみ返す）の結果に **両 DB が現れない**＝**DB 自体には接続されていない**。Notion では retrieve（メタ可視性）は親ページ共有で漏れて通るが、query / create（同期の書き込み経路）は **DB へ直接接続**しないと 404 になる。これが 2026-05-23 以降 outbox を無言で滞留させていた真因。
+- ⚠ **`check_db_share_health()` が false positive を返していた**: この health check は `retrieve_database`（GET）で probe していたため、上記の「retrieve は通るが query は 404」状態を **OK と誤報告**。`hokusai start` 冒頭の事前警告がまさにこの誤設定を見逃し、数週間サイレントに同期を止めていた。**health check が、同期が実際に必要とする capability を試していなかった**のが盲点。
+- ✅ **drain 自体は堅牢（無害）**: `retry_pending()` は 12 件すべて 404 を受けても `attempts` を 1→2 に進めるだけで（`max_retry_attempts=10`）error 行送りや破損はなし。Notion へは何も書き込まれず。outbox retry 機構の頑健性は実証された。
+
+### 評価 + アクション
+
+- **HOKUSAI 本体の改善（本 PR で実施）**: `check_db_share_health()` の probe を `retrieve_database` → **`query_database(page_size=1)`（read-only・副作用なし）** に変更。同期の書き込み経路と同じ capability を試すことで「retrieve は通るが sync は 404」の誤設定を正しく NG 検知し、`hokusai start` の事前警告で「Notion で DB を開き ⋯ → 接続 → HOKUSAI を追加」と案内する。回帰テスト `test_check_db_share_health_catches_query_404_when_retrieve_would_pass` で固定。
+- **【要・手作業】Notion 側の対処**: ユーザーが Workflows DB / PR DB を**各々フルページで開く → 右上 ⋯ → 接続 / Connections → "HOKUSAI" を追加**する。これで query / create が通り、再 drain で 12 件が実同期される。share 付与は Notion UI 操作で、API/integration からは自己付与できない。
+- **§10〜13 の「Notion 未配線」記述の訂正**: ブロッカーは「env 未設定」ではなく「**integration の DB 未接続 + health check の false positive**」だった。env は設定済み・integration share だけが欠けていた。
+- **dogfooding の収穫**: 「観察ツールがユーザー環境の env を読めない」と「health check が誤った capability を probe する」という 2 つの盲点を、実 drain を試みて初めて炙り出せた。read-only 観察だけでは health check が OK を返し続け、真因に到達できなかった（**書き込み経路を実際に叩く dogfooding の価値**）。
+
+---
+
 ## Appendix A: 観察用に叩いたコマンド
 
 ```bash

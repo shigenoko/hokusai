@@ -3232,9 +3232,11 @@ def test_check_db_share_health_skips_unset_env_vars(store, monkeypatch):
     ]:
         monkeypatch.delenv(env_name, raising=False)
 
-    # NotionAPIClient.retrieve_database が成功するようパッチ
+    # NotionAPIClient.query_database が成功するようパッチ（probe は query 経由）
     monkeypatch.setattr(
-        NotionAPIClient, "retrieve_database", lambda self, db_id: {"id": db_id}
+        NotionAPIClient,
+        "query_database",
+        lambda self, db_id, **kwargs: {"results": [], "has_more": False},
     )
 
     disp = NotionSyncDispatcher(store=store, config=_make_config())
@@ -3249,12 +3251,12 @@ def test_check_db_share_health_detects_404_as_share_missing(store, monkeypatch):
     monkeypatch.setenv("TEST_TOKEN", "secret")
     monkeypatch.setenv("TEST_DB", "db-not-shared")
 
-    def _raise_404(self, db_id):
+    def _raise_404(self, db_id, **kwargs):
         raise NotionAPIError(
             404, "Could not find database with ID: ...", code="object_not_found"
         )
 
-    monkeypatch.setattr(NotionAPIClient, "retrieve_database", _raise_404)
+    monkeypatch.setattr(NotionAPIClient, "query_database", _raise_404)
 
     disp = NotionSyncDispatcher(store=store, config=_make_config())
     results = disp.check_db_share_health()
@@ -3265,15 +3267,49 @@ def test_check_db_share_health_detects_404_as_share_missing(store, monkeypatch):
     assert "404" in msg
 
 
+def test_check_db_share_health_catches_query_404_when_retrieve_would_pass(
+    store, monkeypatch
+):
+    """dogfooding §14 回帰: retrieve は成功するが query は 404 になる実環境の
+    誤設定（integration が親ページ経由で DB を「見られる」が DB 自体には未接続）
+    を health check が NG として検知する。probe を retrieve→query に変えた理由。"""
+    monkeypatch.setenv("TEST_TOKEN", "secret")
+    monkeypatch.setenv("TEST_DB", "db-parent-visible-but-not-connected")
+
+    # retrieve は通る（親ページ経由の可視性）— かつて false positive を生んだ経路
+    monkeypatch.setattr(
+        NotionAPIClient,
+        "retrieve_database",
+        lambda self, db_id: {"id": db_id, "title": []},
+    )
+    # query は 404（DB へ直接接続されていない＝sync の書き込み経路が落ちる状態）
+    def _query_404(self, db_id, **kwargs):
+        raise NotionAPIError(
+            404,
+            "Could not find database with ID: ... Make sure the relevant pages "
+            "and databases are shared with your integration.",
+            code="object_not_found",
+        )
+
+    monkeypatch.setattr(NotionAPIClient, "query_database", _query_404)
+
+    disp = NotionSyncDispatcher(store=store, config=_make_config())
+    results = disp.check_db_share_health()
+    ok, msg = results["TEST_DB"]
+    assert ok is False, "retrieve が通っても query 404 なら NG であるべき"
+    assert msg is not None
+    assert "integration not shared" in msg
+
+
 def test_check_db_share_health_handles_unexpected_exception(store, monkeypatch):
-    """retrieve_database が想定外の例外を投げても fail-open で結果を返す"""
+    """query_database が想定外の例外を投げても fail-open で結果を返す"""
     monkeypatch.setenv("TEST_TOKEN", "secret")
     monkeypatch.setenv("TEST_DB", "db-network-error")
 
-    def _raise_runtime(self, db_id):
+    def _raise_runtime(self, db_id, **kwargs):
         raise RuntimeError("connection refused")
 
-    monkeypatch.setattr(NotionAPIClient, "retrieve_database", _raise_runtime)
+    monkeypatch.setattr(NotionAPIClient, "query_database", _raise_runtime)
 
     disp = NotionSyncDispatcher(store=store, config=_make_config())
     results = disp.check_db_share_health()
@@ -3290,10 +3326,10 @@ def test_check_db_share_health_treats_5xx_as_non_share_error(store, monkeypatch)
     monkeypatch.setenv("TEST_TOKEN", "secret")
     monkeypatch.setenv("TEST_DB", "db-5xx")
 
-    def _raise_5xx(self, db_id):
+    def _raise_5xx(self, db_id, **kwargs):
         raise NotionAPIError(500, "Internal server error", code="server_error")
 
-    monkeypatch.setattr(NotionAPIClient, "retrieve_database", _raise_5xx)
+    monkeypatch.setattr(NotionAPIClient, "query_database", _raise_5xx)
 
     disp = NotionSyncDispatcher(store=store, config=_make_config())
     results = disp.check_db_share_health()
@@ -3490,10 +3526,12 @@ def test_check_db_share_health_uses_preflight_client_with_max_attempts_one(
         original_init(self, api_token, **kwargs)
 
     monkeypatch.setattr(NotionAPIClient, "__init__", _spy_init)
-    # retrieve_database は何でも成功にする（preflight client が使われた
+    # query_database は何でも成功にする（preflight client が使われた
     # ことだけ検証）
     monkeypatch.setattr(
-        NotionAPIClient, "retrieve_database", lambda self, db_id: {"id": db_id}
+        NotionAPIClient,
+        "query_database",
+        lambda self, db_id, **kwargs: {"results": [], "has_more": False},
     )
 
     disp = NotionSyncDispatcher(store=store, config=_make_config())
@@ -3517,7 +3555,7 @@ def test_check_db_share_health_does_not_false_positive_on_404_in_message(
     monkeypatch.setenv("TEST_TOKEN", "secret")
     monkeypatch.setenv("TEST_DB", "db-validation-error")
 
-    def _raise_validation_with_404_in_msg(self, db_id):
+    def _raise_validation_with_404_in_msg(self, db_id, **kwargs):
         # status は 400 だが、message に "404" を含む偶発ケース
         raise NotionAPIError(
             400,
@@ -3526,7 +3564,7 @@ def test_check_db_share_health_does_not_false_positive_on_404_in_message(
         )
 
     monkeypatch.setattr(
-        NotionAPIClient, "retrieve_database", _raise_validation_with_404_in_msg
+        NotionAPIClient, "query_database", _raise_validation_with_404_in_msg
     )
 
     disp = NotionSyncDispatcher(store=store, config=_make_config())
@@ -3549,14 +3587,14 @@ def test_print_notion_db_share_warnings_skips_when_skip_notion_env(
 
     monkeypatch.setenv("HOKUSAI_SKIP_NOTION", "1")
 
-    # NotionAPIClient.retrieve_database が呼ばれたら例外を投げて、
+    # NotionAPIClient.query_database が呼ばれたら例外を投げて、
     # 呼ばれていないことを保証する
-    def _should_not_be_called(self, db_id):
+    def _should_not_be_called(self, db_id, **kwargs):
         raise AssertionError(
-            "retrieve_database should not be called when HOKUSAI_SKIP_NOTION=1"
+            "query_database should not be called when HOKUSAI_SKIP_NOTION=1"
         )
 
-    monkeypatch.setattr(NotionAPIClient, "retrieve_database", _should_not_be_called)
+    monkeypatch.setattr(NotionAPIClient, "query_database", _should_not_be_called)
 
     # share されていない DB がある config を模擬（enabled=True、env も揃って
     # いれば本来 warning が出る状況だが SKIP_NOTION=1 なので何も起きない）。
