@@ -317,18 +317,28 @@ def _is_notion_page_ref(task_url: str) -> bool:
     使う `NotionMCPClient._extract_page_id` と同じ経路で行い、挙動の乖離を防ぐ
     （dogfooding §15: github_issue + notion_dashboard で Phase 2 がクラッシュする問題）。
     """
-    if not task_url or not task_url.strip():
+    if not task_url:
+        return False
+    stripped = task_url.strip()
+    if not stripped:
         return False
     try:
         from ..integrations.notion_mcp import NotionMCPClient
 
-        NotionMCPClient()._extract_page_id(task_url)
+        # strip 済みの値で判定する（前後空白付きの有効な Notion URL/ID を
+        # 末尾 `$` アンカー不一致で取りこぼさないため。Copilot 指摘）。
+        NotionMCPClient()._extract_page_id(stripped)
         return True
     except ValueError:
         # Notion ページ URL / ID として解釈できない（GitHub issue URL 等）
         return False
-    except Exception:
-        # 予期せぬ失敗時は安全側（Notion ページとみなさず skip）に倒す
+    except Exception as e:
+        # 予期せぬ失敗時は安全側（Notion ページとみなさず skip）に倒すが、
+        # 原因追跡のため例外型を debug に残す（握りつぶしによる誤ログ防止）。
+        logger.debug(
+            "_is_notion_page_ref: 予期せぬ例外で False に倒す (type=%s)",
+            type(e).__name__,
+        )
         return False
 
 

@@ -243,6 +243,20 @@ class TestSaveToSubpageNonNotionTaskUrl:
         mock_create.assert_called_once()
         assert result["phase_subpages"][2] == "https://notion.so/new-subpage"
 
+    @patch("hokusai.utils.notion_helpers.create_phase_subpage")
+    def test_whitespace_padded_notion_url_still_creates_subpage(self, mock_create):
+        """前後に空白が付いた有効な Notion URL も Notion ページとして扱う
+        （_is_notion_page_ref は strip 済みで判定する。Copilot 指摘の回帰）"""
+        from hokusai.utils.notion_helpers import save_to_subpage_or_create
+
+        mock_create.return_value = "https://notion.so/new-subpage"
+        padded = "  https://notion.so/workspace/task-aabbccdd11223344aabbccdd11223344  "
+        state = _build_state(task_url=padded)
+        result = save_to_subpage_or_create(state, padded, 2, "コンテンツ", "wf-test")
+
+        mock_create.assert_called_once()
+        assert result["phase_subpages"][2] == "https://notion.so/new-subpage"
+
 
 class TestSaveToSubpageFailFast:
     """子ページ新規作成失敗時のテスト"""
