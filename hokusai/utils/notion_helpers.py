@@ -308,6 +308,40 @@ def sync_phase_page_from_state(state: WorkflowState, phase: int) -> bool:
     return update_subpage_content(subpage_url, content)
 
 
+def _is_notion_page_ref(task_url: str) -> bool:
+    """task_url が Notion ページ（UUID / 末尾32hex の Notion URL）を指すか判定する。
+
+    `task_backend=github_issue` では task_url は GitHub issue URL になり、Notion の
+    親ページとして解決できない。その場合 subpage 機能（親 Notion ページ配下に phase
+    出力を保存）は適用不可なので、呼び出し側は保存を skip する。判定は実際に親解決へ
+    使う `NotionMCPClient._extract_page_id` と同じ経路で行い、挙動の乖離を防ぐ
+    （dogfooding §15: github_issue + notion_dashboard で Phase 2 がクラッシュする問題）。
+    """
+    if not task_url:
+        return False
+    stripped = task_url.strip()
+    if not stripped:
+        return False
+    try:
+        from ..integrations.notion_mcp import NotionMCPClient
+
+        # strip 済みの値で判定する（前後空白付きの有効な Notion URL/ID を
+        # 末尾 `$` アンカー不一致で取りこぼさないため。Copilot 指摘）。
+        NotionMCPClient()._extract_page_id(stripped)
+        return True
+    except ValueError:
+        # Notion ページ URL / ID として解釈できない（GitHub issue URL 等）
+        return False
+    except Exception as e:
+        # 予期せぬ失敗時は安全側（Notion ページとみなさず skip）に倒すが、
+        # 原因追跡のため例外型を debug に残す（握りつぶしによる誤ログ防止）。
+        logger.debug(
+            "_is_notion_page_ref: 予期せぬ例外で False に倒す (type=%s)",
+            type(e).__name__,
+        )
+        return False
+
+
 def save_to_subpage_or_create(
     state: WorkflowState,
     task_url: str,
@@ -338,6 +372,13 @@ def save_to_subpage_or_create(
         `create_phase_subpage` / `update_subpage_content` /
         `append_to_subpage`）と同パターン。Notion 接続が無い環境で workflow
         を止めないため（Issue #75）。
+
+        また `task_url` が Notion ページでない場合（`task_backend=github_issue`
+        で task_url が GitHub issue URL のケース等）も、subpage 機能は親 Notion
+        ページを必要とするため適用不可。この場合は RuntimeError で workflow を
+        止めず、保存を skip して state をそのまま返す（dogfooding §15: 旧実装は
+        Phase 2 で `Invalid Notion page URL or ID` クラッシュしていた）。Notion
+        ダッシュボード同期（workflow status イベント）は別経路のため影響しない。
     """
     if is_skip_notion():
         # Issue #113 Round 1 指摘: profile suffix env でも skip されるため、
@@ -345,6 +386,15 @@ def save_to_subpage_or_create(
         # phase 識別だけ残せば十分なため、active_skip_env_name の呼び出しは省略）。
         logger.info(
             f"Notion接続スキップモード: Phase {phase} 子ページ保存をスキップ"
+        )
+        return state
+
+    if not _is_notion_page_ref(task_url):
+        # task_url が Notion ページでない（github_issue backend 等）→ 親ページが
+        # 無いため subpage 保存は適用不可。workflow を止めず skip する（§15）。
+        logger.info(
+            f"task_url が Notion ページではないため Phase {phase} 子ページ保存を"
+            "スキップ（task_backend=github_issue 等。ダッシュボード同期は影響なし）"
         )
         return state
 

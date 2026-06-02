@@ -133,16 +133,21 @@ class TestSaveToSubpageOrCreateSkipNotion:
         assert "Phase 2" in log_text
 
     def test_normal_path_when_env_unset(self, monkeypatch):
-        """HOKUSAI_SKIP_NOTION 未設定時は通常通り create_phase_subpage を呼ぶ"""
+        """HOKUSAI_SKIP_NOTION 未設定 + Notion task_url 時は通常通り
+        create_phase_subpage を呼ぶ（§15: task_url は Notion ページである必要がある）"""
         monkeypatch.delenv("HOKUSAI_SKIP_NOTION", raising=False)
-        state = {"task_url": "https://example/issue/1", "phase_subpages": {}}
+        # task_url が Notion ページ参照（末尾32hex）でないと subpage 保存は skip される
+        notion_url = (
+            "https://notion.so/workspace/task-aabbccdd11223344aabbccdd11223344"
+        )
+        state = {"task_url": notion_url, "phase_subpages": {}}
 
         with patch(
             "hokusai.utils.notion_helpers.create_phase_subpage"
         ) as mock_create:
             mock_create.return_value = "https://notion.so/subpage-xxx"
             result = save_to_subpage_or_create(
-                state, "https://example/issue/1", phase=2, content="hello"
+                state, notion_url, phase=2, content="hello"
             )
 
         mock_create.assert_called_once()

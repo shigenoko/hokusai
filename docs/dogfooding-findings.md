@@ -644,6 +644,35 @@ v0.7.0–v0.10.0 で追加した **Step 2/3/4/5** の CLI（`operations` / `grap
 
 ---
 
+## 15. 重い dogfooding（実 workflow 完走の試み）で炙り出した運用穴 (2026-06-03)
+
+推奨手順 ④（実 workflow を 1 本完走させ運用穴を観察）として、Notion 配線が通った状態で実 workflow を起動した。**Phase 2 で構造的ブロッカーバグに当たり完走不能**となったが、その過程で複数の運用穴を観測した。本 PR は最重要の Phase 2 ブロッカーを修正する。
+
+### 観察手順
+
+| Step | 操作 |
+|---|---|
+| 1 | 既存 stranded workflow（wf-dbe7b6cd Phase7 / wf-f373fac6 Phase2）の resume を試行 |
+| 2 | 極小 dogfooding issue (#169, docs 改善) を作成し `hokusai start` で新規 workflow 起動 |
+| 3 | Phase 1（準備）→ Phase 2（研究）の挙動・エラーを観測 |
+
+### 実観察結果
+
+- 🔴 **Phase 2 ブロッカーバグ（本 PR で修正）**: `task_backend: github_issue` + `notion_dashboard: enabled`（hokusai profile の正式構成）で、Phase 2 の研究出力を Notion 子ページとして保存する `save_to_subpage_or_create` → `create_phase_subpage` が **`task_url`（GitHub issue URL）を Notion 親ページとして `_extract_page_id` で parse** しようとして `Invalid Notion page URL or ID` で `RuntimeError`。**この構成ではどの workflow も Phase 2 で必ずクラッシュし完走不能**。Phase 1（worktree + AI 命名ブランチ作成）と Phase 2 の LLM 研究自体（Claude Code 60s, 必須セクション 4/4）は成功していたため、Notion 子ページ保存だけが落としていた。修正: task_url が Notion ページでない場合は subpage 保存を graceful に skip（workflow は継続。ダッシュボード同期＝status イベントは別経路で影響なし）。
+- 🔴 **stranded workflow は resume も完走もできない**: 既存 2 workflow は worktree がクリーンアップ済みのため `continue` が `Worktree が存在しません` でハードエラー。wf-dbe7b6cd は実作業が PR #79 で main にマージ済み・リモートブランチも削除済みなのに、**workflow レコードは Phase 7 のまま**で、「完了」にする正規経路が無い（cleanup＝削除 or 新規作成のみ）。状態機械と worktree/ブランチのライフサイクルが乖離すると workflow が永久に取り残される。
+- 🟡 **live Workflows DB のスキーマ drift**: §14 で env を張り替えた live DB に `Operator` プロパティが無く、workflow_started 同期で「`Operator` プロパティが存在しないため除外して再試行」。HOKUSAI は除外して継続するが、live DB と HOKUSAI が期待するスキーマがずれている（旧 `notion-migrate-schema` 未適用の可能性）。
+- 🟡 **GitHub ラベル欠落**: `進行中` ラベルがリポジトリに存在せず、issue へのラベル付与が失敗（継続）。`hokusai start` が前提とするラベルが repo に無い。
+- ⚠ **Notion 接続確認が重い**: `hokusai start` / `continue` 冒頭の「Notion接続確認」が毎回 Claude Code を起動（~21s）。単純な API 疎通確認に LLM CLI を使うのは過剰で、起動レイテンシを押し上げる。
+- ⚠ **ローカル main 同期失敗（継続）**: 「ローカル main の同期に失敗、続行します」。Dropbox 配下の作業ツリーや未コミット状態が影響している可能性（観察のみ）。
+
+### 評価 + 次のアクション候補
+
+- **本 PR で修正**: Phase 2 ブロッカー（`save_to_subpage_or_create` の非 Notion task_url クラッシュ）。これにより github_issue backend でも Phase 2 以降へ進めるようになる。回帰テスト `TestSaveToSubpageNonNotionTaskUrl` を追加。
+- **後続候補**: (a) stranded workflow を「マージ済み/完了」として閉じる経路（`hokusai cleanup --mark-merged` 等）。(b) live Workflows DB へ `notion-migrate-schema` 適用（`Operator` 等の欠落プロパティ補完）。(c) `進行中` ラベルの自動作成 or 欠落時の graceful skip 明示。(d) Notion 接続確認を LLM CLI でなく直接 API 疎通に置換（起動高速化）。
+- **完走の継続**: Phase 2 修正後に #169 workflow を再開し、Phase 3〜10（設計/計画/実装/検証/レビュー/PR/記録）の運用穴を継続観察する（本 PR マージ後）。
+
+---
+
 ## Appendix A: 観察用に叩いたコマンド
 
 ```bash
