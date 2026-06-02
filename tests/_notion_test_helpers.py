@@ -108,3 +108,39 @@ class NotionRecordingAPI:
     def update_page(self, page_id: str, payload: dict) -> dict:
         self.calls.append(("update", {"page_id": page_id, **payload}))
         return {"id": page_id}
+
+
+# 検証が走る（subpage_persistence_active が True になる）有効な Notion task_url。
+# 末尾 32hex を持つため _extract_page_id / _is_notion_page_ref を通る（§15）。
+NOTION_TASK_URL = (
+    "https://www.notion.so/task-page-aabbccdd11223344aabbccdd11223344"
+)
+
+
+def build_subpage_verify_state(**overrides):
+    """Phase 2/3 の subpage 検証テスト用の共通 state を返す（§15）。
+
+    phase2 `_verify_subpage_content` / `_verify_notion_state` と phase3
+    `_verify_design_subpage_content` のテストが同一の fixture を copy-paste して
+    いたのを 1 箇所に集約し、テストコードの重複を解消する。task_url は検証が
+    skip されない有効な Notion URL（`NOTION_TASK_URL`）を既定値にする。
+    """
+    phase_template = {
+        "status": "pending",
+        "started_at": None,
+        "completed_at": None,
+        "error_message": None,
+        "retry_count": 0,
+    }
+    state = {
+        "task_url": NOTION_TASK_URL,
+        "task_name": "テストタスク",
+        "repo_path": "/tmp/test",
+        "workflow_id": "test-wf-001",
+        "phases": {i: {**phase_template} for i in range(1, 11)},
+        "audit_log": [],
+        "schema_change_required": False,
+        "research_result": "",
+    }
+    state.update(overrides)
+    return state

@@ -15,6 +15,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from hokusai.nodes.phase2_research import _extract_research_report
+from tests._notion_test_helpers import build_subpage_verify_state
 
 # ---------------------------------------------------------------------------
 # _extract_research_report テスト
@@ -289,7 +290,7 @@ class TestPhase2DirectPrompt:
             "retry_count": 0,
         }
         return {
-            "task_url": "https://www.notion.so/task-page-aabbccdd11223344aabbccdd11223344",
+            "task_url": "https://www.notion.so/task-page-aabbccdd",
             "task_name": "テストタスク",
             "repo_path": "/tmp/test",
             "workflow_id": "test-wf-001",
@@ -348,23 +349,7 @@ class TestPhase2FailFast:
     """子ページ作成失敗時に Phase 2 が失敗で止まることを検証"""
 
     def _build_state(self):
-        phase_template = {
-            "status": "pending",
-            "started_at": None,
-            "completed_at": None,
-            "error_message": None,
-            "retry_count": 0,
-        }
-        return {
-            "task_url": "https://www.notion.so/task-page-aabbccdd11223344aabbccdd11223344",
-            "task_name": "テストタスク",
-            "repo_path": "/tmp/test",
-            "workflow_id": "test-wf-001",
-            "phases": {i: {**phase_template} for i in range(1, 11)},
-            "audit_log": [],
-            "schema_change_required": False,
-            "research_result": "",
-        }
+        return build_subpage_verify_state()
 
     def test_verify_notion_state_raises_when_no_subpage(self):
         """_verify_notion_state() で phase_subpages[2] 未設定 → RuntimeError"""
@@ -506,7 +491,7 @@ class TestPhase2RawOutputSave:
             "retry_count": 0,
         }
         return {
-            "task_url": "https://www.notion.so/task-page-aabbccdd11223344aabbccdd11223344",
+            "task_url": "https://www.notion.so/task-page-aabbccdd",
             "task_name": "テストタスク",
             "repo_path": "/tmp/test",
             "workflow_id": "test-wf-001",
@@ -572,23 +557,7 @@ class TestVerifySubpageContent:
         monkeypatch.delenv("HOKUSAI_SKIP_NOTION", raising=False)
 
     def _build_state(self):
-        phase_template = {
-            "status": "pending",
-            "started_at": None,
-            "completed_at": None,
-            "error_message": None,
-            "retry_count": 0,
-        }
-        return {
-            "task_url": "https://www.notion.so/task-page-aabbccdd11223344aabbccdd11223344",
-            "task_name": "テストタスク",
-            "repo_path": "/tmp/test",
-            "workflow_id": "test-wf-001",
-            "phases": {i: {**phase_template} for i in range(1, 11)},
-            "audit_log": [],
-            "schema_change_required": False,
-            "research_result": "",
-        }
+        return build_subpage_verify_state()
 
     @patch("hokusai.integrations.notion_mcp.NotionMCPClient")
     def test_passes_when_full_content_saved(self, MockClient):
@@ -986,7 +955,7 @@ class TestValidateResearchOutput:
             "retry_count": 0,
         }
         state = {
-            "task_url": "https://www.notion.so/task-page-aabbccdd11223344aabbccdd11223344",
+            "task_url": "https://www.notion.so/task-page-aabbccdd",
             "task_name": "テストタスク",
             "repo_path": "/tmp/test",
             "workflow_id": "test-wf-001",
@@ -1032,7 +1001,7 @@ class TestPhase2OutputRetry:
             "retry_count": 0,
         }
         return {
-            "task_url": "https://www.notion.so/task-page-aabbccdd11223344aabbccdd11223344",
+            "task_url": "https://www.notion.so/task-page-aabbccdd",
             "task_name": "テストタスク",
             "repo_path": "/tmp/test",
             "workflow_id": "test-wf-001",
@@ -1140,12 +1109,12 @@ class TestPhase2OutputRetry:
         from hokusai.nodes.phase2_research import _build_research_retry_prompt
 
         prompt = _build_research_retry_prompt(
-            task_url="https://www.notion.so/task-page-aabbccdd11223344aabbccdd11223344",
+            task_url="https://www.notion.so/task-page-aabbccdd",
             previous_output="調査完了しました。レポートを出力します。",
             validation_error="Phase 2 出力検証失敗: 許可開始見出しで始まっていません。",
         )
         # 元タスクURLが含まれる
-        assert "https://www.notion.so/task-page-aabbccdd11223344aabbccdd11223344" in prompt
+        assert "https://www.notion.so/task-page-aabbccdd" in prompt
         # 前回出力が含まれる
         assert "調査完了しました。レポートを出力します。" in prompt
         # エラーメッセージが含まれる
