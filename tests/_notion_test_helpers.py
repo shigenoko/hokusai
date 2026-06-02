@@ -135,7 +135,7 @@ def build_subpage_verify_state(**overrides):
     state = {
         "task_url": NOTION_TASK_URL,
         "task_name": "テストタスク",
-        "repo_path": "/tmp/test",
+        "repo_path": "/work/test-repo",  # /tmp は避ける（SonarCloud S5443）
         "workflow_id": "test-wf-001",
         "phases": {i: {**phase_template} for i in range(1, 11)},
         "audit_log": [],
