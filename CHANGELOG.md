@@ -24,7 +24,9 @@ HOKUSAI のすべての特筆すべき変更をこのファイルに記録する
 
 ### Fixed
 
-- **Notion DB share health check の false positive を修正（dogfooding §14）**: `NotionSyncDispatcher.check_db_share_health()`（`hokusai start` 冒頭の事前警告で使用）が `retrieve_database`（GET）で probe していたため、**integration が DB に直接接続されていなくても親ページ経由のメタデータ可視性で 200 が返り、share 不備を OK と誤報告**していた。実 dogfooding で「retrieve は 200 だが `query_database` は 404（`object_not_found`）」という誤設定により Notion 同期 outbox が数週間サイレントに滞留していたことが判明。probe を **`query_database(page_size=1)`（read-only・副作用なし、dispatch の書き込み経路と同じ capability）** に変更し、この状態を正しく NG 検知して「Notion で DB を開き ⋯ → 接続 → "HOKUSAI" を追加」と案内するようにした。回帰テスト `test_check_db_share_health_catches_query_404_when_retrieve_would_pass`（retrieve 成功・query 404 → NG）を追加し、既存 share-health テスト群の probe mock を `retrieve_database` → `query_database` に更新。詳細: [docs/dogfooding-findings.md §14](docs/dogfooding-findings.md)。
+- **Notion DB share health check の false positive を修正（dogfooding §14）**: `NotionSyncDispatcher.check_db_share_health()`（`hokusai start` 冒頭の事前警告で使用）が `retrieve_database`（GET）で probe していたため、**DB が Notion ゴミ箱(in_trash)にある等でメタデータだけ 200 が返る状態を OK と誤報告**していた。実 dogfooding で **env が Notion ゴミ箱の DB ID を指したまま**（retrieve は 200 だが `query_database` は 404 `object_not_found`）により Notion 同期 outbox が数週間サイレントに滞留していたことが判明。probe を **`query_database(page_size=1)`（read-only・副作用なし、dispatch の書き込み経路と同じ capability）** に変更し、この状態を正しく NG 検知。404 の原因は単一でない（env の DB ID が古い/誤り、DB がゴミ箱・削除済み、integration が DB に未接続）ため、メッセージは原因を断定せず確認候補を併記する汎用文言（"DB not queryable (query 404) …"）にした。回帰テスト `test_check_db_share_health_catches_query_404_when_retrieve_would_pass`（retrieve 成功・query 404 → NG）を追加し、既存 share-health テスト群の probe mock を `retrieve_database` → `query_database` に更新。詳細: [docs/dogfooding-findings.md §14](docs/dogfooding-findings.md)。
+
+  - 訂正（dogfooding §14 続報）: 当初は真因を「integration が DB に未接続」としたが、再調査で **「env が Notion ゴミ箱の DB を指したまま（integration は接続済み）」** と確定。404 メッセージを「integration not shared … connect HOKUSAI」から上記の汎用文言へ訂正し、§14 本文も訂正。env を同一スキーマの live DB へ張替後、`retry_pending()` で滞留 12 件の実同期に成功（outbox 12 → 0）。
 
 ## [0.11.0] - 2026-05-31
 

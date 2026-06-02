@@ -107,22 +107,24 @@ class NotionSyncDispatcher:
         return True
 
     def check_db_share_health(self) -> dict[str, tuple[bool, str | None]]:
-        """各 DB ID env に対し query_database を発行して integration の share 状態を確認する。
+        """各 DB ID env に対し query_database を発行して同期可否を事前確認する。
 
         Issue #82 / M0.2: `is_configured()` は env が揃っているかだけしか
-        見ないため、Notion 側で integration "HOKUSAI" に DB が share されて
-        いない場合は dispatch 時の 404 が outbox に積み続けられる。事前に
-        各 DB を 1 件 query して早期検出する。
+        見ないため、env が指す DB に dispatch 時の書き込みができない場合は
+        404 が outbox に積み続けられる。事前に各 DB を 1 件 query して早期検出する。
 
         **なぜ retrieve ではなく query か（dogfooding §14）**: `retrieve_database`
-        (GET) は integration が **親ページ経由で DB メタデータを「見られる」だけ**
-        でも 200 を返すため、DB 自体に integration が接続されていなくても成功
-        してしまう（false positive）。一方 dispatch の書き込み経路は
-        `query_database` / `create_page` を使い、これらは **DB へ直接接続** されて
-        いないと 404 になる。したがって health check も同じ capability を試す
-        `query_database(page_size=1)`（read-only・副作用なし）で probe する。
-        これにより「retrieve は通るが sync は 404」という実環境の誤設定
-        （outbox が無言で滞留し続ける状態）を正しく検知できる。
+        (GET) は DB が **ゴミ箱にある / 親ページ経由でメタデータだけ見える**
+        状態でも 200 を返すため、実際には同期できない DB を OK と誤判定する
+        （false positive）。実環境では **env が Notion ゴミ箱の DB ID を指したまま**
+        で、retrieve は 200 だが query は 404 になり outbox が数週間無言で滞留して
+        いた。dispatch の書き込み経路は `query_database` / `create_page` を使い、
+        これらは DB が live かつアクセス可能でないと 404 になる。したがって
+        health check も同じ capability を試す `query_database(page_size=1)`
+        （read-only・副作用なし）で probe し、「retrieve は通るが sync は 404」を
+        正しく検知する。404 の原因は単一ではない（env の DB ID が古い/誤り、
+        DB がゴミ箱・削除済み、integration が DB に未接続）ため、メッセージは
+        原因を断定せず確認候補を併記する。
 
         Returns:
             `{env_name: (ok, error_message | None), ...}` の dict。
@@ -181,22 +183,27 @@ class NotionSyncDispatcher:
                 # env 未設定の DB は dogfooding 中も「未設定」が正しい状態なので skip
                 continue
             try:
-                # query で probe する（retrieve だと親ページ経由の可視性で
-                # false positive になる。docstring 参照 / dogfooding §14）。
+                # query で probe する（retrieve だと「DB がゴミ箱にある / 親ページ
+                # 経由でメタデータだけ見える」ケースでも 200 が返り false positive に
+                # なる。dogfooding §14 で env がゴミ箱の DB を指していた実例を観測）。
                 # page_size=1 で read-only・最小転送。
                 preflight_api.query_database(db_id, page_size=1)
                 results[env_name] = (True, None)
             except NotionAPIError as e:
-                # 404 (integration not shared) を構造化された status 属性で判定する
+                # 404 (object_not_found) を構造化された status 属性で判定する
                 # （Issue #82 Copilot Round 2 指摘: 文字列 substring 検索だと
                 # DB ID や validation text に "404" が含まれるケースで誤検出する）。
+                # 404 の原因は複数あり（DB がゴミ箱/削除済み、env が古い/誤った DB ID
+                # を指す、integration が DB に未接続）、retrieve でなく query で初めて
+                # 顕在化する。原因を断定せず、確認すべき候補を併記する（dogfooding §14）。
                 msg = str(e)
                 if e.status == 404:
                     results[env_name] = (
                         False,
-                        "integration not shared with DB (query 404): "
-                        f"{msg[:140]} — Notion で DB を開き ⋯ → 接続 → "
-                        '"HOKUSAI" を追加してください',
+                        f"DB not queryable (query 404): {msg[:140]} — "
+                        "env の DB ID が古い/誤り、DB がゴミ箱・削除済み、または "
+                        'integration が DB に未接続のいずれか。Notion で当該 DB '
+                        "の存在と、⋯ → 接続 に \"HOKUSAI\" があるかを確認してください",
                     )
                 else:
                     results[env_name] = (False, msg[:200])
