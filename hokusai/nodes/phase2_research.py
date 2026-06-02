@@ -206,17 +206,19 @@ def _verify_notion_state(state: WorkflowState) -> None:
     失敗時は RuntimeError を送出。
 
     Note:
-        `is_skip_notion()` が True を返す場合（legacy global
-        `HOKUSAI_SKIP_NOTION=1` または profile suffix env
-        `HOKUSAI_SKIP_NOTION_<SLUG>=1`、Issue #113 follow-up で統一）は
-        検証スキップ（早期 return）。
-        SKIP_NOTION 経路では save_to_subpage_or_create も noop で
+        subpage 保存が適用されない経路では検証も skip（早期 return）する。
+        対象は `subpage_persistence_active(task_url)` が False、すなわち
+        (1) `is_skip_notion()` が True（legacy global `HOKUSAI_SKIP_NOTION=1`
+        または profile suffix env `HOKUSAI_SKIP_NOTION_<SLUG>=1`、Issue #113
+        follow-up で統一）、または (2) **`task_url` が Notion ページでない**
+        （`task_backend=github_issue` の GitHub issue URL 等。dogfooding §15）。
+        これらの経路では save_to_subpage_or_create も noop で
         state["phase_subpages"] が空のままになるため、検証すると常に
-        RuntimeError になり phase 2 が完走しない（Issue #77、PR #76 連鎖）。
-        `_verify_subpage_content` も同様に skip で早期 return する。
-        現在は state ベースの検証のみ。実ページの存在確認や
-        親タスクページへの本文混入チェック（notion-fetch による再取得）は
-        追加 LLM 呼び出しコストが高いため後続対応とする。
+        RuntimeError になり phase 2 が完走しない（Issue #77、PR #76 連鎖 /
+        §15 で task_url 非 Notion ケースを追加）。`_verify_subpage_content`
+        も同じ述語で skip する。現在は state ベースの検証のみ。実ページの
+        存在確認や親タスクページへの本文混入チェック（notion-fetch による
+        再取得）は追加 LLM 呼び出しコストが高いため後続対応とする。
     """
     # subpage 保存が適用されない経路（skip-notion / task_url が非 Notion ページ）
     # では phase_subpages が空のままになるため、検証も skip する（§15: 保存と
