@@ -140,7 +140,8 @@ HOKUSAI is an **operational framework** for integrating AI into real-world workf
 ### Standard
 
 - 10-phase LangGraph workflow (research → design → plan → implement → verify → review → branch hygiene → PR draft → unified review loop → record)
-- CLI commands: `start`, `continue`, `status`, `list`, `cleanup`, `pr-status`, `connect`, `notion-setup`, `notion-migrate-schema` (v0.4.8+), `profile`, `prime`, `dashboard`
+- CLI commands: `start`, `continue`, `status`, `list`, `cleanup`, `pr-status`, `connect`, `notion-setup`, `notion-migrate-schema` (v0.4.8+), `profile`, `prime`, `dashboard`, `backup`, `restore`
+- State DB backup/restore (`hokusai backup` / `hokusai restore`) — consistent snapshots of `workflow.db` / `checkpoint.db` via the SQLite online backup API, with generation retention and a safe verify-then-swap restore
 - Operations Console (`hokusai dashboard`) with service connection status, profile display, Basic Auth support, and retry/diagnostic panels
 - SQLite-based persistence and LangGraph checkpointing
 - LLM-based coding agent integration for autonomous implementation (Claude Code by default)
@@ -227,9 +228,35 @@ hokusai llm-gateway-setup
 
 # Enable gateway via env override (no yaml edit required)
 HOKUSAI_LLM_GATEWAY_ENABLED=1 hokusai start <task_url>
+
+# --- State DB backup / restore ---
+
+# Take a consistent snapshot of workflow.db / checkpoint.db
+hokusai backup --label "before-upgrade"
+
+# Keep only the newest 7 generations (prune older snapshots after backup)
+hokusai backup --keep 7
+
+# List existing snapshots (newest first)
+hokusai backup --list
+
+# Restore from the latest snapshot (current DBs are moved to *.pre-restore first)
+hokusai restore --from latest
+
+# Restore a specific snapshot by id (skip the confirmation prompt)
+hokusai restore --from 20260604-202236 --yes
 ```
 
 State is stored under `~/.hokusai/` by default (`workflow.db`, `checkpoint.db`, `logs/`). Override with the `data_dir` config option if needed. For multi-project operation, use profiles to isolate `data_dir`, databases, worktrees, dashboard ports, and environment-variable names per project.
+
+For production operation, schedule regular snapshots so a corrupted or lost state DB never costs you in-progress workflows or audit history. `hokusai backup` uses the SQLite online backup API, so it is safe to run while workflows are active. A daily cron snapshot with 14-generation retention looks like:
+
+```bash
+# Run a profile-aware snapshot every day at 03:00, keeping the newest 14
+0 3 * * * /usr/bin/env hokusai --profile company-a backup --keep 14 >> ~/.hokusai/logs/backup.log 2>&1
+```
+
+To recover, inspect available snapshots with `hokusai backup --list` and restore with `hokusai restore --from <id|latest>`. Restore verifies each snapshot DB with `PRAGMA integrity_check`, moves the current DBs aside to `*.pre-restore`, clears stale `-wal` / `-shm` sidecars, and then swaps the snapshot in — so a failed verification leaves your current state untouched.
 
 `audit list/show` / `llm-gateway-setup` and the `HOKUSAI_LLM_GATEWAY_ENABLED` env override were added in v0.5.1 as LLM Gateway operations tooling (resolving the F1–F4 operational gaps observed in [dogfooding-findings §7–§9](docs/dogfooding-findings.md)). Run `hokusai llm-gateway-setup` before turning on Phase 2 enforcement in production to verify your profile policy is not configured into a silent no-op.
 
