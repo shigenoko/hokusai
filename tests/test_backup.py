@@ -414,6 +414,79 @@ def test_restore_rejects_tampered_component_file(state):
         )
 
 
+def test_read_manifest_handles_invalid_utf8(state):
+    """manifest が不正な UTF-8 でも list_backups が落ちずスキップする。"""
+    snap = create_backup(
+        database_path=state["wf"], checkpoint_db_path=state["ck"],
+        out_dir=state["out"], now=datetime(2026, 6, 4, 11, 0, 0),
+    )
+    mpath = Path(snap["path"]) / "manifest.json"
+    mpath.write_bytes(b"\xff\xfe invalid utf-8 \x80")
+    # 例外を投げず、壊れた manifest はスキップされる
+    assert list_backups(state["out"]) == []
+    assert resolve_snapshot(state["out"], "latest") is None
+
+
+def test_restore_distinguishes_broken_vs_missing_manifest(state, tmp_path):
+    """manifest 破損と不在でエラーメッセージを区別する。"""
+    snap = create_backup(
+        database_path=state["wf"], checkpoint_db_path=state["ck"],
+        out_dir=state["out"], now=datetime(2026, 6, 4, 11, 0, 0),
+    )
+    # 破損: manifest は存在するが JSON 不正
+    (Path(snap["path"]) / "manifest.json").write_text("{ broken json")
+    with pytest.raises(BackupError, match="読めません"):
+        restore_backup(
+            snapshot_dir=snap["path"],
+            database_path=state["wf"], checkpoint_db_path=state["ck"],
+        )
+    # 不在
+    with pytest.raises(BackupError, match="不在"):
+        restore_backup(
+            snapshot_dir=tmp_path / "nope",
+            database_path=state["wf"], checkpoint_db_path=state["ck"],
+        )
+
+
+def test_restore_two_phase_rollback_on_second_component_failure(state, monkeypatch):
+    """2 つ目のコンポーネントで os.replace が失敗しても片肺にならず全て巻き戻る。"""
+    snap = create_backup(
+        database_path=state["wf"], checkpoint_db_path=state["ck"],
+        out_dir=state["out"], now=datetime(2026, 6, 4, 11, 0, 0),
+    )
+    # 現 DB を両方とも MUTATED に変える
+    for p, v in ((state["wf"], "MUT-wf"), (state["ck"], "MUT-ck")):
+        c = sqlite3.connect(p)
+        c.execute("DELETE FROM t")
+        c.execute("INSERT INTO t (v) VALUES (?)", (v,))
+        c.commit()
+        c.close()
+
+    import hokusai.persistence.backup as bk
+    real_replace = bk.os.replace
+
+    def flaky_replace(src, dst, *a, **k):
+        # 2 つ目（checkpoint.db）の配置だけ失敗させる
+        if str(dst).endswith("checkpoint.db"):
+            raise OSError("simulated failure")
+        return real_replace(src, dst, *a, **k)
+
+    monkeypatch.setattr(bk.os, "replace", flaky_replace)
+
+    with pytest.raises(BackupError):
+        restore_backup(
+            snapshot_dir=snap["path"],
+            database_path=state["wf"], checkpoint_db_path=state["ck"],
+        )
+
+    # 片肺にならず、両 DB とも MUTATED のまま（ロールバック済み）
+    assert _read_rows(state["wf"]) == ["MUT-wf"]
+    assert _read_rows(state["ck"]) == ["MUT-ck"]
+    # 一時ファイルが残っていない
+    assert not state["wf"].with_name("workflow.db.restore-tmp").exists()
+    assert not state["ck"].with_name("checkpoint.db.restore-tmp").exists()
+
+
 def test_restore_rejects_non_dict_components(state):
     """components が dict でない壊れた manifest は BackupError。"""
     import json as _json

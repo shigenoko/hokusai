@@ -224,7 +224,9 @@ def _read_manifest(snapshot_dir: Path) -> dict[str, Any] | None:
         return None
     try:
         return json.loads(mpath.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+        # manifest は改竄・破損し得る untrusted ファイル。JSON 不正・encoding
+        # 破損・I/O 失敗のいずれも安全に None へ倒す（一貫した扱い）。
         return None
 
 
@@ -368,6 +370,13 @@ def restore_backup(
     snapshot_dir = Path(snapshot_dir)
     manifest = _read_manifest(snapshot_dir)
     if manifest is None:
+        # 「不在」と「存在するが壊れて読めない（JSON / encoding 破損）」を
+        # 区別して原因切り分けを助ける。
+        if (snapshot_dir / MANIFEST_NAME).exists():
+            raise BackupError(
+                f"manifest を読めません（破損 / 不正な JSON / encoding）: "
+                f"{snapshot_dir / MANIFEST_NAME}"
+            )
         raise BackupError(
             f"スナップショットが見つかりません（manifest 不在）: {snapshot_dir}"
         )
@@ -409,51 +418,83 @@ def restore_backup(
     if not planned:
         raise BackupError("復元対象のコンポーネントがありません")
 
-    restored: list[dict[str, Any]] = []
-    for name, src, target in planned:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        tmp = target.with_name(target.name + ".restore-tmp")
-        pre_restore: Path | None = None
-        try:
-            # 1. まず一時ファイルへコピー。ここで失敗しても現 DB は無傷。
+    # 2 フェーズコミットで「途中失敗による片肺」を避ける。
+    #   Phase A: 全コンポーネントを一時ファイルへコピー（target は一切触らない）
+    #   Phase B: 全 target を pre-restore 退避 → os.replace で配置
+    #   いずれの失敗でも、それまでの変更をまとめてロールバックする。
+    tmps: list[tuple[str, Path, Path]] = []  # (name, tmp, target)
+
+    def _cleanup_tmps() -> None:
+        for _n, _tmp, _t in tmps:
+            if _tmp.exists():
+                try:
+                    _tmp.unlink()
+                except OSError:
+                    pass
+
+    # --- Phase A: コピー（target 未変更）---
+    try:
+        for name, src, target in planned:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            tmp = target.with_name(target.name + ".restore-tmp")
             shutil.copyfile(src, tmp)
-            # 2. 現 DB を退避（pre-restore）。
+            tmps.append((name, tmp, target))
+    except OSError as e:
+        _cleanup_tmps()
+        raise BackupError(f"復元の準備（コピー）に失敗しました: {e}") from e
+
+    # --- Phase B: 退避 + 配置（失敗したら committed + 処理中をまとめてロールバック）---
+    committed: list[tuple[str, Path, Path | None]] = []  # (name, target, pre_restore)
+    # 「target を pre-restore へ退避済みだが os.replace 前 / 失敗」の処理中分。
+    inflight_target: Path | None = None
+    inflight_pre: Path | None = None
+
+    def _rollback_one(target: Path, pre_restore: Path | None) -> None:
+        # 置換済み / 退避済みの target を pre-restore から元に戻す。
+        try:
+            if target.exists():
+                target.unlink()
+            if pre_restore is not None and pre_restore.exists():
+                shutil.move(str(pre_restore), str(target))
+        except OSError:
+            pass
+
+    try:
+        for name, tmp, target in tmps:
+            pre_restore: Path | None = None
             if target.exists():
                 backup_side = target.with_name(target.name + ".pre-restore")
                 if backup_side.exists():
                     backup_side.unlink()
                 shutil.move(str(target), str(backup_side))
                 pre_restore = backup_side
-            # 3. restore 後に古い WAL/SHM が新 DB を上書き隠蔽しないよう除去。
+            # ここで os.replace 前に失敗しても巻き戻せるよう処理中分を記録。
+            inflight_target, inflight_pre = target, pre_restore
+            # restore 後に古い WAL/SHM が新 DB を上書き隠蔽しないよう除去。
             for sidecar in _sidecar_paths(target):
                 if sidecar.exists():
                     sidecar.unlink()
-            # 4. 一時ファイルを atomic に配置（同一ディレクトリなので os.replace は原子的）。
-            os.replace(tmp, target)
-        except OSError as e:
-            # ロールバック: 一時ファイルを掃除し、退避済みで target が
-            # 未配置なら現 DB を元に戻す（"安全側" を担保）。
-            if tmp.exists():
-                try:
-                    tmp.unlink()
-                except OSError:
-                    pass
-            if pre_restore is not None and not target.exists():
-                try:
-                    shutil.move(str(pre_restore), str(target))
-                    pre_restore = None
-                except OSError:
-                    pass
-            raise BackupError(
-                f"復元に失敗しました ({name} → {target}): {e}"
-            ) from e
-        restored.append(
-            {
-                "component": name,
-                "target": str(target),
-                "pre_restore": str(pre_restore) if pre_restore else None,
-            }
-        )
+            os.replace(tmp, target)  # 同一ディレクトリなので原子的
+            committed.append((name, target, pre_restore))
+            inflight_target, inflight_pre = None, None
+    except OSError as e:
+        # 処理中（os.replace 前後で失敗）分を先に巻き戻す。
+        if inflight_target is not None:
+            _rollback_one(inflight_target, inflight_pre)
+        # 既に置換済みの target を新しい順に巻き戻す。
+        for _n, _t, _pre in reversed(committed):
+            _rollback_one(_t, _pre)
+        _cleanup_tmps()
+        raise BackupError(f"復元に失敗しました: {e}") from e
+
+    restored = [
+        {
+            "component": name,
+            "target": str(target),
+            "pre_restore": str(pre_restore) if pre_restore else None,
+        }
+        for name, target, pre_restore in committed
+    ]
 
     return {
         "snapshot_id": manifest.get("snapshot_id"),
