@@ -461,6 +461,63 @@ def test_resolve_latest_takes_precedence_over_cwd_path(state, tmp_path, monkeypa
     assert resolved == (state["out"] / "20260604-110000").resolve()
 
 
+def test_non_str_snapshot_id_does_not_crash_list_prune_resolve(state):
+    """snapshot_id が非 str（数値 / null）に改竄されても落ちない。"""
+    import json as _json
+
+    # 正常な 1 件 + snapshot_id を改竄した 1 件
+    create_backup(database_path=state["wf"], checkpoint_db_path=state["ck"],
+                  out_dir=state["out"], now=datetime(2026, 6, 4, 10, 0, 0))
+    create_backup(database_path=state["wf"], checkpoint_db_path=state["ck"],
+                  out_dir=state["out"], now=datetime(2026, 6, 4, 11, 0, 0))
+    bad = state["out"] / "20260604-110000" / "manifest.json"
+    data = _json.loads(bad.read_text())
+    data["snapshot_id"] = 12345  # 非 str に改竄
+    bad.write_text(_json.dumps(data))
+
+    # list / resolve / prune のいずれも例外を投げない
+    listed = list_backups(state["out"])  # ソートで .split() 例外にならない
+    assert len(listed) == 2
+    assert resolve_snapshot(state["out"], "latest") is not None
+    # prune も TypeError にならず、非 str の方は触らない
+    removed = prune_backups(state["out"], keep=0)
+    assert "20260604-100000" in removed
+
+
+def test_restore_rollback_preserves_original_wal(state, monkeypatch):
+    """復元失敗時、元 DB の WAL/SHM sidecar も削除でなく退避され巻き戻る。"""
+    snap = create_backup(
+        database_path=state["wf"], checkpoint_db_path=state["ck"],
+        out_dir=state["out"], now=datetime(2026, 6, 4, 11, 0, 0),
+    )
+    # 現 workflow.db の sidecar を sentinel として用意（中身を識別可能に）
+    wal = state["wf"].with_name("workflow.db-wal")
+    shm = state["wf"].with_name("workflow.db-shm")
+    wal.write_bytes(b"ORIGINAL-WAL")
+    shm.write_bytes(b"ORIGINAL-SHM")
+
+    import hokusai.persistence.backup as bk
+    real_replace = bk.os.replace
+
+    def flaky_replace(src, dst, *a, **k):
+        # 2 つ目（checkpoint.db）の配置だけ失敗させる
+        if str(dst).endswith("checkpoint.db"):
+            raise OSError("simulated failure")
+        return real_replace(src, dst, *a, **k)
+
+    monkeypatch.setattr(bk.os, "replace", flaky_replace)
+    with pytest.raises(BackupError):
+        restore_backup(
+            snapshot_dir=snap["path"],
+            database_path=state["wf"], checkpoint_db_path=state["ck"],
+        )
+    # ロールバックで元の WAL/SHM が削除されず復元されている
+    assert wal.exists() and wal.read_bytes() == b"ORIGINAL-WAL"
+    assert shm.exists() and shm.read_bytes() == b"ORIGINAL-SHM"
+    # 退避用の中間ファイルは残らない
+    assert not state["wf"].with_name("workflow.db.pre-restore-wal").exists()
+
+
 def test_restore_distinguishes_broken_vs_missing_manifest(state, tmp_path):
     """manifest 破損と不在でエラーメッセージを区別する。"""
     create_backup(
@@ -520,6 +577,27 @@ def test_restore_two_phase_rollback_on_second_component_failure(state, monkeypat
     # 一時ファイルが残っていない
     assert not state["wf"].with_name("workflow.db.restore-tmp").exists()
     assert not state["ck"].with_name("checkpoint.db.restore-tmp").exists()
+
+
+def test_handle_backup_rejects_negative_keep_before_create(state):
+    """CLI: --keep 負値は作成前にエラー終了し、snapshot を増やさない（原子性）。"""
+    from types import SimpleNamespace
+
+    from hokusai.cli_main import _handle_backup
+
+    cfg = SimpleNamespace(
+        data_dir=state["out"].parent,
+        database_path=state["wf"],
+        checkpoint_db_path=state["ck"],
+    )
+    args = SimpleNamespace(
+        out=str(state["out"]), label=None, keep=-1,
+        list=False, output="text", dry_run=False, profile=None,
+    )
+    rc = _handle_backup(args, cfg)
+    assert rc == 1
+    # 失敗したのに snapshot が増える、が起きていない
+    assert list_backups(state["out"]) == []
 
 
 def test_restore_rejects_non_dict_components(state):

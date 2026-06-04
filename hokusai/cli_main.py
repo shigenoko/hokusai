@@ -2108,6 +2108,13 @@ def _handle_backup(args, config) -> int:
 
     keep = getattr(args, "keep", None)
 
+    # --keep は作成「前」に検証する。作成後に prune_backups で弾くと、失敗
+    # （exit 1）したのにスナップショットだけ増える非原子的な状態になるため
+    # （PR #174 Copilot 5 巡目指摘）。
+    if keep is not None and keep < 0:
+        print("✗ --keep は 0 以上である必要があります", file=sys.stderr)
+        return 1
+
     # トップレベル --dry-run: 作成・刈り込みを行わず予定内容のみ出力（backfill /
     # cleanup と同じ規約）。
     if getattr(args, "dry_run", False):

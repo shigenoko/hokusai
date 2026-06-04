@@ -47,13 +47,18 @@ def _snapshot_id(now: datetime) -> str:
     return now.strftime("%Y%m%d-%H%M%S")
 
 
-def _snapshot_sort_key(snapshot_id: str) -> tuple[str, int]:
+def _snapshot_sort_key(snapshot_id: Any) -> tuple[str, int]:
     """snapshot_id を (timestamp, numeric_suffix) に分解したソートキーを返す。
 
     snapshot_id はベースが `YYYYMMDD-HHMMSS`（`-` を 1 つ含む）で、同一秒衝突時は
     `-N`（N は整数）が付く。文字列降順でそのまま並べると `...-10` が `...-2` より
     古い扱いになる（辞書順の罠）ため、suffix を整数として比較する。
+
+    manifest は改竄され得る untrusted input なので、`snapshot_id` が str 以外
+    （None / 数値 等）の場合は最小キー扱いにして `.split()` 例外を避ける。
     """
+    if not isinstance(snapshot_id, str):
+        return ("", 0)
     parts = snapshot_id.split("-")
     # ベース ts 部分は最初の 2 要素（YYYYMMDD, HHMMSS）。3 要素目があり数値なら suffix。
     if len(parts) >= 3 and parts[2].isdigit():
@@ -278,9 +283,10 @@ def prune_backups(out_dir: str | Path, keep: int) -> list[str]:
     removed: list[str] = []
     for manifest in to_remove:
         sid = manifest.get("snapshot_id")
-        if not sid:
-            # snapshot_id 不明の manifest は触らない（path を信頼して
-            # out_dir 自体や外を誤削除しないため）。
+        if not isinstance(sid, str) or not sid:
+            # snapshot_id が str でない / 空の manifest は触らない（path を
+            # 信頼して out_dir 自体や外を誤削除しない。`out_dir / sid` の
+            # TypeError も防ぐ）。
             continue
         # manifest の `path` は信頼せず snapshot_id から out_dir 配下の
         # ディレクトリを再構成し、out_dir 直下の正規ディレクトリであることを
@@ -320,7 +326,8 @@ def resolve_snapshot(out_dir: str | Path, ref: str) -> Path | None:
         # manifest の `path` は信頼せず（改竄され得る）、snapshot_id から
         # out_dir 配下のディレクトリを再構成・検証する（prune_backups と同方針）。
         sid = backups[0].get("snapshot_id")
-        if not sid:
+        if not isinstance(sid, str) or not sid:
+            # 非 str / 空（改竄）は `out_dir / sid` の TypeError を避けて None。
             return None
         latest = (out_dir / sid).resolve()
         if latest.parent != out_dir.resolve() or not latest.is_dir():
@@ -359,9 +366,11 @@ def restore_backup(
 
     手順（コンポーネントごと）:
       1. スナップショット DB の integrity_check（verify=True のとき）
-      2. 現 DB が存在すれば `<db>.pre-restore` に退避（既存退避は上書き）
-      3. 現 DB の stale な `-wal` / `-shm` を除去
-      4. スナップショット DB を現 DB パスへコピー
+      2. 全コンポーネントを一時ファイルへコピー（target は未変更）
+      3. 現 DB と その `-wal` / `-shm` を `<db>.pre-restore[-wal/-shm]` に退避
+         （削除でなく退避。失敗時に元 WAL も含め完全復元できるよう保持する）
+      4. 一時ファイルを `os.replace` で原子的に配置
+      失敗時は処理中分・配置済み分・退避した sidecar をまとめてロールバックする。
 
     Args:
         snapshot_dir: スナップショットディレクトリ。
@@ -457,13 +466,27 @@ def restore_backup(
     inflight_target: Path | None = None
     inflight_pre: Path | None = None
 
+    def _suffix_of(target: Path, sidecar: Path) -> str:
+        # "workflow.db" と "workflow.db-wal" から "-wal" を取り出す。
+        return sidecar.name[len(target.name):]
+
     def _rollback_one(target: Path, pre_restore: Path | None) -> None:
         # 置換済み / 退避済みの target を pre-restore から元に戻す。
+        # WAL/SHM sidecar も退避先（pre_restore + suffix）から復元する。
         try:
             if target.exists():
                 target.unlink()
+            for sidecar in _sidecar_paths(target):
+                if sidecar.exists():
+                    sidecar.unlink()
             if pre_restore is not None and pre_restore.exists():
                 shutil.move(str(pre_restore), str(target))
+            if pre_restore is not None:
+                for sidecar in _sidecar_paths(target):
+                    suffix = _suffix_of(target, sidecar)
+                    saved = pre_restore.with_name(pre_restore.name + suffix)
+                    if saved.exists():
+                        shutil.move(str(saved), str(sidecar))
         except OSError:
             pass
 
@@ -476,12 +499,19 @@ def restore_backup(
                     backup_side.unlink()
                 shutil.move(str(target), str(backup_side))
                 pre_restore = backup_side
+                # 古い WAL/SHM は「削除」ではなく pre-restore 側へ退避する。
+                # 削除してしまうと、後段失敗→ロールバックで元 DB は戻っても
+                # WAL に残っていた未反映コミットが失われ得るため（SQLiteStore は
+                # WAL 前提。失敗時も元 state を完全復元できるよう保持する）。
+                for sidecar in _sidecar_paths(target):
+                    if sidecar.exists():
+                        suffix = _suffix_of(target, sidecar)
+                        dest = backup_side.with_name(backup_side.name + suffix)
+                        if dest.exists():
+                            dest.unlink()
+                        shutil.move(str(sidecar), str(dest))
             # ここで os.replace 前に失敗しても巻き戻せるよう処理中分を記録。
             inflight_target, inflight_pre = target, pre_restore
-            # restore 後に古い WAL/SHM が新 DB を上書き隠蔽しないよう除去。
-            for sidecar in _sidecar_paths(target):
-                if sidecar.exists():
-                    sidecar.unlink()
             os.replace(tmp, target)  # 同一ディレクトリなので原子的
             committed.append((name, target, pre_restore))
             inflight_target, inflight_pre = None, None
