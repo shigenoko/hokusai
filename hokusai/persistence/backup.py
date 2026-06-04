@@ -119,10 +119,13 @@ def _online_backup(src: Path, dst: Path) -> None:
 
 
 def _component_paths(database_path: str | Path, checkpoint_db_path: str | Path) -> dict[str, Path]:
-    """論理コンポーネント名 → 実 DB パスの対応を返す。"""
+    """論理コンポーネント名 → 実 DB パスの対応を返す。
+
+    パス文字列は `expanduser()` を通す（`~/...` を展開。リポジトリ方針と統一）。
+    """
     return {
-        "workflow": Path(database_path),
-        "checkpoint": Path(checkpoint_db_path),
+        "workflow": Path(database_path).expanduser(),
+        "checkpoint": Path(checkpoint_db_path).expanduser(),
     }
 
 
@@ -154,7 +157,7 @@ def create_backup(
         BackupError: 退避対象 DB が 1 つも存在しない場合、backup に失敗した場合。
     """
     now = now or datetime.now()
-    out_dir = Path(out_dir)
+    out_dir = Path(out_dir).expanduser()
     snapshot_id = _snapshot_id(now)
 
     snapshot_dir = out_dir / snapshot_id
@@ -245,7 +248,7 @@ def list_backups(out_dir: str | Path) -> list[dict[str, Any]]:
 
     manifest を持つディレクトリのみを対象とする。
     """
-    out_dir = Path(out_dir)
+    out_dir = Path(out_dir).expanduser()
     if not out_dir.exists():
         return []
     found = []
@@ -277,7 +280,7 @@ def prune_backups(out_dir: str | Path, keep: int) -> list[str]:
     """
     if keep < 0:
         raise BackupError(f"--keep は 0 以上である必要があります: {keep}")
-    out_dir = Path(out_dir).resolve()
+    out_dir = Path(out_dir).expanduser().resolve()
     backups = list_backups(out_dir)
     to_remove = backups[keep:]
     removed: list[str] = []
@@ -314,7 +317,7 @@ def resolve_snapshot(out_dir: str | Path, ref: str) -> Path | None:
 
     見つからなければ None。
     """
-    out_dir = Path(out_dir)
+    out_dir = Path(out_dir).expanduser()
 
     # 1. 予約語 "latest" はパス解決より先に扱う。
     #    （cwd 等に `latest/manifest.json` が存在しても、破壊的な restore で
@@ -334,8 +337,8 @@ def resolve_snapshot(out_dir: str | Path, ref: str) -> Path | None:
             return None
         return latest
 
-    # 2. 直接パス指定
-    candidate = Path(ref)
+    # 2. 直接パス指定（`~/...` を展開）
+    candidate = Path(ref).expanduser()
     if candidate.is_dir() and _read_manifest(candidate) is not None:
         return candidate
 

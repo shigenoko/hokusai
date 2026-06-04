@@ -95,6 +95,32 @@ def test_create_backup_while_db_open(state):
         conn.close()
 
 
+def test_paths_expanduser(tmp_path, monkeypatch):
+    """out_dir / db パス / --from の `~` がホーム展開される。"""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))  # Windows 互換
+    # DB を ~/db 配下に作る
+    wf = home / "db" / "workflow.db"
+    ck = home / "db" / "checkpoint.db"
+    _make_db(wf, ["x"])
+    _make_db(ck, ["y"])
+
+    manifest = create_backup(
+        database_path="~/db/workflow.db",
+        checkpoint_db_path="~/db/checkpoint.db",
+        out_dir="~/backups",
+        now=datetime(2026, 6, 4, 11, 0, 0),
+    )
+    # out_dir / db パスが ~ 展開され、ホーム配下に作成されている
+    assert Path(manifest["path"]).is_relative_to(home / "backups")
+    assert manifest["components"]["workflow"]["integrity_ok"] is True
+    # resolve_snapshot も ~ を展開して latest / 直接パスを解決できる
+    assert resolve_snapshot("~/backups", "latest") == (home / "backups" / "20260604-110000").resolve()
+    assert resolve_snapshot("~/backups", "~/backups/20260604-110000") is not None
+
+
 def test_create_backup_no_target_raises(tmp_path):
     with pytest.raises(BackupError):
         create_backup(

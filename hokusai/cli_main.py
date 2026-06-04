@@ -2053,10 +2053,11 @@ def _resolve_backup_dir(args, config) -> Path:
     """backup / restore のスナップショット親ディレクトリを解決する。
 
     `--out` 指定があればそれを、無ければ `<data_dir>/backups`。
+    `--out` はユーザー入力なので `expanduser()` で `~/...` を展開する。
     """
     out = getattr(args, "out", None)
     if out:
-        return Path(out)
+        return Path(out).expanduser()
     return Path(config.data_dir) / "backups"
 
 
