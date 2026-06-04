@@ -431,6 +431,36 @@ def test_read_manifest_handles_invalid_utf8(state):
     assert resolve_snapshot(state["out"], "latest") is None
 
 
+def test_read_manifest_rejects_non_dict_json_root(state):
+    """manifest が dict 以外の有効 JSON（[] / "text"）でも list が落ちない。"""
+    create_backup(
+        database_path=state["wf"], checkpoint_db_path=state["ck"],
+        out_dir=state["out"], now=datetime(2026, 6, 4, 11, 0, 0),
+    )
+    mpath = state["out"] / "20260604-110000" / "manifest.json"
+    mpath.write_text("[]")  # 有効 JSON だが dict ではない
+    # AttributeError を出さず、dict でない manifest はスキップされる
+    assert list_backups(state["out"]) == []
+    assert resolve_snapshot(state["out"], "latest") is None
+
+
+def test_resolve_latest_takes_precedence_over_cwd_path(state, tmp_path, monkeypatch):
+    """予約語 latest はパス解決より優先（cwd の latest/ に引っ張られない）。"""
+    create_backup(
+        database_path=state["wf"], checkpoint_db_path=state["ck"],
+        out_dir=state["out"], now=datetime(2026, 6, 4, 11, 0, 0),
+    )
+    # cwd に紛らわしい `latest/manifest.json` を置く
+    work = tmp_path / "cwd"
+    decoy = work / "latest"
+    decoy.mkdir(parents=True)
+    (decoy / "manifest.json").write_text('{"snapshot_id": "decoy"}')
+    monkeypatch.chdir(work)
+    resolved = resolve_snapshot(state["out"], "latest")
+    # decoy ではなく out_dir 内の最新に解決される
+    assert resolved == (state["out"] / "20260604-110000").resolve()
+
+
 def test_restore_distinguishes_broken_vs_missing_manifest(state, tmp_path):
     """manifest 破損と不在でエラーメッセージを区別する。"""
     create_backup(

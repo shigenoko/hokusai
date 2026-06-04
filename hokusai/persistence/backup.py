@@ -223,11 +223,16 @@ def _read_manifest(snapshot_dir: Path) -> dict[str, Any] | None:
     if not mpath.exists():
         return None
     try:
-        return json.loads(mpath.read_text(encoding="utf-8"))
+        data = json.loads(mpath.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, UnicodeDecodeError, OSError):
         # manifest は改竄・破損し得る untrusted ファイル。JSON 不正・encoding
         # 破損・I/O 失敗のいずれも安全に None へ倒す（一貫した扱い）。
         return None
+    # ルートが dict 以外（[] / "text" / 数値 等）の有効 JSON も untrusted として
+    # None 扱いにする（呼び出し側の m.get(...) で AttributeError にしない）。
+    if not isinstance(data, dict):
+        return None
+    return data
 
 
 def list_backups(out_dir: str | Path) -> list[dict[str, Any]]:
@@ -294,22 +299,20 @@ def prune_backups(out_dir: str | Path, keep: int) -> list[str]:
 
 
 def resolve_snapshot(out_dir: str | Path, ref: str) -> Path | None:
-    """`--from` 引数（id / "latest" / パス）からスナップショットディレクトリを解決する。
+    """`--from` 引数（"latest" / id / パス）からスナップショットディレクトリを解決する。
 
-    - 実在するパス（manifest を持つディレクトリ）ならそれを使う
-    - "latest" なら out_dir 内の最新
-    - それ以外は out_dir 配下の snapshot_id とみなす
+    解決順:
+    1. 予約語 "latest" → out_dir 内の最新（パス解決より優先）
+    2. 実在するパス（manifest を持つディレクトリ）
+    3. out_dir 配下の snapshot_id
 
     見つからなければ None。
     """
     out_dir = Path(out_dir)
 
-    # 1. 直接パス指定
-    candidate = Path(ref)
-    if candidate.is_dir() and _read_manifest(candidate) is not None:
-        return candidate
-
-    # 2. latest
+    # 1. 予約語 "latest" はパス解決より先に扱う。
+    #    （cwd 等に `latest/manifest.json` が存在しても、破壊的な restore で
+    #    意図せずそちらを復元元に採らないようにする。）
     if ref == "latest":
         backups = list_backups(out_dir)
         if not backups:
@@ -323,6 +326,11 @@ def resolve_snapshot(out_dir: str | Path, ref: str) -> Path | None:
         if latest.parent != out_dir.resolve() or not latest.is_dir():
             return None
         return latest
+
+    # 2. 直接パス指定
+    candidate = Path(ref)
+    if candidate.is_dir() and _read_manifest(candidate) is not None:
+        return candidate
 
     # 3. id 指定
     by_id = out_dir / ref
