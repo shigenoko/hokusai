@@ -13,6 +13,14 @@ from ..claude_code import ClaudeCodeClient
 from .base import GitHostingClient, PullRequest, ReviewComment
 
 
+class GitHubGraphQLError(Exception):
+    """GitHub GraphQL API がエラー（`errors` フィールド）を返したことを表す例外。
+
+    `gh api graphql` は GraphQL の `errors` を含むレスポンスでも exit code 0 を
+    返すことがあるため、汎用例外ではなく専用例外で「取得失敗」を明示する。
+    """
+
+
 class GitHubHostingClient(GitHostingClient):
     """GitHub CLI を使用するクライアント"""
 
@@ -630,6 +638,171 @@ class GitHubHostingClient(GitHostingClient):
                 "has_approval": False,
                 "checks_passing": None,
             }
+
+    @staticmethod
+    def _graphql_error_message(data: dict) -> str | None:
+        """GraphQL レスポンスの `errors` をメッセージ文字列に変換する。
+
+        `gh api graphql` は GraphQL の `errors` を含むレスポンスでも
+        exit code 0 を返すことがあるため、JSON 内の `errors` を明示的に
+        確認する必要がある。
+
+        Args:
+            data: パース済みの GraphQL レスポンス
+
+        Returns:
+            エラーがあればメッセージ（複数は "; " 区切り）、なければ None
+        """
+        errors = data.get("errors")
+        if not errors:
+            return None
+        messages = [str(e.get("message", e)) for e in errors]
+        return "; ".join(messages)
+
+    def _resolve_copilot_reviewer(
+        self, owner: str, repo: str, pr_number: int
+    ) -> tuple[str | None, str | None]:
+        """PR の node ID と Copilot レビュアー bot の node ID を取得する。
+
+        suggestedActors(capabilities: [CAN_BE_REVIEWER]) を問い合わせ、
+        Copilot コードレビューが有効なリポジトリでのみ bot が候補に現れる。
+        これを事前チェックとして利用する。
+
+        Args:
+            owner: リポジトリオーナー
+            repo: リポジトリ名
+            pr_number: PR番号
+
+        Returns:
+            (pr_node_id, bot_id) のタプル。
+            bot_id が None の場合はこのリポジトリで Copilot レビューが利用不可。
+        """
+        query = """
+        query($owner: String!, $repo: String!, $number: Int!) {
+          repository(owner: $owner, name: $repo) {
+            pullRequest(number: $number) { id }
+            suggestedActors(capabilities: [CAN_BE_REVIEWER], first: 100) {
+              nodes {
+                login
+                __typename
+                ... on Bot { id }
+                ... on User { id }
+              }
+            }
+          }
+        }
+        """
+        shell = self._get_shell()
+        result = shell.run_gh(
+            "api", "graphql",
+            "-f", f"query={query}",
+            "-F", f"owner={owner}",
+            "-F", f"repo={repo}",
+            "-F", f"number={pr_number}",
+            check=True,
+        )
+        data = json.loads(result.stdout)
+        # gh api graphql は errors を含んでも exit 0 を返すことがあるため明示的に確認。
+        # ここで raise し、上位で「取得失敗」として扱う（未対応と区別する）。
+        error_message = self._graphql_error_message(data)
+        if error_message:
+            raise GitHubGraphQLError(f"GraphQL errors: {error_message}")
+
+        repo_data = data.get("data", {}).get("repository", {}) or {}
+        pr_node_id = (repo_data.get("pullRequest") or {}).get("id")
+
+        nodes = (repo_data.get("suggestedActors") or {}).get("nodes", [])
+        bot_id = None
+        for node in nodes:
+            login = (node.get("login") or "").lower()
+            # Copilot のコードレビュー bot は login が
+            # "copilot-pull-request-reviewer" の Bot として現れる。
+            # 他の copilot 系 bot（copilot-swe-agent 等）を誤って拾わないよう
+            # login を完全一致で判定する。
+            if node.get("__typename") == "Bot" and login == "copilot-pull-request-reviewer":
+                bot_id = node.get("id")
+                break
+
+        return pr_node_id, bot_id
+
+    def request_copilot_review(self, pr_number: int) -> dict:
+        """Copilot にコードレビューを依頼する。
+
+        GitHub Copilot のコードレビューは REST のレビュアー追加 API では
+        指定できず、GraphQL の requestReviews(botIds:) 経由でのみ依頼できる。
+        事前に suggestedActors を問い合わせ、Copilot レビュアー bot が
+        利用可能なリポジトリでのみ依頼する。
+
+        Args:
+            pr_number: PR番号
+
+        Returns:
+            {
+                "requested": bool,    # 依頼を実際に送信したか
+                "available": bool,    # Copilot レビューが利用可能か
+                "reason": str | None, # 利用不可/失敗の理由（成功時はNone）
+            }
+        """
+        try:
+            owner, repo = self.get_repo_info()
+        except Exception as e:
+            return {"requested": False, "available": False, "reason": f"リポジトリ情報取得失敗: {e}"}
+
+        # 1. PR node ID と Copilot レビュアー bot の利用可否を取得（事前チェック）
+        try:
+            pr_node_id, bot_id = self._resolve_copilot_reviewer(owner, repo, pr_number)
+        except Exception as e:
+            return {"requested": False, "available": False, "reason": f"レビュアー候補取得失敗: {e}"}
+
+        if bot_id is None:
+            return {
+                "requested": False,
+                "available": False,
+                "reason": "Copilotコードレビューがこのリポジトリで有効化されていません",
+            }
+        if pr_node_id is None:
+            return {"requested": False, "available": True, "reason": "PR node ID を取得できませんでした"}
+
+        # 2. requestReviews ミューテーションで依頼
+        #    union: true で既存のレビュアー（人間など）を維持したまま追加する
+        mutation = """
+        mutation($prId: ID!, $botId: ID!) {
+          requestReviews(input: {pullRequestId: $prId, botIds: [$botId], union: true}) {
+            pullRequest { id }
+          }
+        }
+        """
+        try:
+            shell = self._get_shell()
+            result = shell.run_gh(
+                "api", "graphql",
+                "-f", f"query={mutation}",
+                "-f", f"prId={pr_node_id}",
+                "-f", f"botId={bot_id}",
+                check=True,
+            )
+        except ShellError as e:
+            return {
+                "requested": False,
+                "available": True,
+                "reason": f"レビュー依頼に失敗しました: {e.result.stderr}",
+            }
+
+        # gh api graphql は errors を含んでも exit 0 を返すことがあるため、
+        # レスポンス JSON の errors を確認し、存在すれば依頼失敗として扱う。
+        try:
+            # json.JSONDecodeError は ValueError のサブクラスなので ValueError で捕捉できる
+            error_message = self._graphql_error_message(json.loads(result.stdout))
+        except ValueError:
+            error_message = None
+        if error_message:
+            return {
+                "requested": False,
+                "available": True,
+                "reason": f"レビュー依頼に失敗しました: {error_message}",
+            }
+
+        return {"requested": True, "available": True, "reason": None}
 
     def get_pr_status_from_github(
         self, pr_number: int

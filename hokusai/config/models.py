@@ -419,6 +419,12 @@ class WorkflowConfig:
     submodule_enabled: bool = False
     submodule_path: str = ""
 
+    # Copilot コードレビュー設定
+    # Draft PR 作成時に Copilot へコードレビューを自動依頼するか
+    # （GraphQL requestReviews 経由。リポジトリで Copilot レビューが
+    #   有効な場合のみ依頼され、未対応なら自動でスキップする）
+    request_copilot_review: bool = True
+
     # リトライ設定
     max_retry_count: int = 10
     retry_delay_seconds: int = 5

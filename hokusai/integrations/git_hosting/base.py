@@ -330,3 +330,27 @@ class GitHostingClient(ABC):
         """
         # デフォルト実装
         return None
+
+    def request_copilot_review(self, pr_number: int) -> dict:
+        """
+        Copilot にコードレビューを依頼する
+
+        Args:
+            pr_number: PR番号
+
+        Returns:
+            {
+                "requested": bool,    # 依頼を実際に送信したか
+                "available": bool,    # Copilot レビューが利用可能か
+                "reason": str | None, # 利用不可/失敗の理由（成功時はNone）
+            }
+
+        Note:
+            デフォルト実装は「未対応」を返す。
+            各プロバイダー（GitHub等）でオーバーライドして使用する。
+        """
+        return {
+            "requested": False,
+            "available": False,
+            "reason": "このプロバイダーはCopilotレビュー依頼に未対応です",
+        }
