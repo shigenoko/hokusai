@@ -381,34 +381,38 @@ def test_resolve_latest_ignores_tampered_manifest_path(state):
     """latest 解決は manifest の path を信頼せず snapshot_id から再構成する。"""
     import json as _json
 
-    snap = create_backup(
+    create_backup(
         database_path=state["wf"], checkpoint_db_path=state["ck"],
         out_dir=state["out"], now=datetime(2026, 6, 4, 11, 0, 0),
     )
-    mpath = Path(snap["path"]) / "manifest.json"
+    # snapshot_id は now から決定的。fixture 由来パス + literal で組み立てて
+    # taint 解析の path-injection 誤検知（関数戻り値からのパス構築）を避ける。
+    snap_dir = state["out"] / "20260604-110000"
+    mpath = snap_dir / "manifest.json"
     data = _json.loads(mpath.read_text())
     data["path"] = "/etc"  # 改竄
     mpath.write_text(_json.dumps(data))
     resolved = resolve_snapshot(state["out"], "latest")
     # /etc ではなく out_dir 直下の実ディレクトリに解決される
-    assert resolved == (state["out"] / snap["snapshot_id"]).resolve()
+    assert resolved == snap_dir.resolve()
 
 
 def test_restore_rejects_tampered_component_file(state):
     """manifest の component file が traversal 風なら BackupError（KeyError でなく）。"""
     import json as _json
 
-    snap = create_backup(
+    create_backup(
         database_path=state["wf"], checkpoint_db_path=state["ck"],
         out_dir=state["out"], now=datetime(2026, 6, 4, 11, 0, 0),
     )
-    mpath = Path(snap["path"]) / "manifest.json"
+    snap_dir = state["out"] / "20260604-110000"
+    mpath = snap_dir / "manifest.json"
     data = _json.loads(mpath.read_text())
     data["components"]["workflow"]["file"] = "../../evil.db"
     mpath.write_text(_json.dumps(data))
     with pytest.raises(BackupError):
         restore_backup(
-            snapshot_dir=snap["path"],
+            snapshot_dir=snap_dir,
             database_path=state["wf"],
             checkpoint_db_path=state["ck"],
         )
@@ -416,11 +420,11 @@ def test_restore_rejects_tampered_component_file(state):
 
 def test_read_manifest_handles_invalid_utf8(state):
     """manifest が不正な UTF-8 でも list_backups が落ちずスキップする。"""
-    snap = create_backup(
+    create_backup(
         database_path=state["wf"], checkpoint_db_path=state["ck"],
         out_dir=state["out"], now=datetime(2026, 6, 4, 11, 0, 0),
     )
-    mpath = Path(snap["path"]) / "manifest.json"
+    mpath = state["out"] / "20260604-110000" / "manifest.json"
     mpath.write_bytes(b"\xff\xfe invalid utf-8 \x80")
     # 例外を投げず、壊れた manifest はスキップされる
     assert list_backups(state["out"]) == []
@@ -429,15 +433,16 @@ def test_read_manifest_handles_invalid_utf8(state):
 
 def test_restore_distinguishes_broken_vs_missing_manifest(state, tmp_path):
     """manifest 破損と不在でエラーメッセージを区別する。"""
-    snap = create_backup(
+    create_backup(
         database_path=state["wf"], checkpoint_db_path=state["ck"],
         out_dir=state["out"], now=datetime(2026, 6, 4, 11, 0, 0),
     )
+    snap_dir = state["out"] / "20260604-110000"
     # 破損: manifest は存在するが JSON 不正
-    (Path(snap["path"]) / "manifest.json").write_text("{ broken json")
+    (snap_dir / "manifest.json").write_text("{ broken json")
     with pytest.raises(BackupError, match="読めません"):
         restore_backup(
-            snapshot_dir=snap["path"],
+            snapshot_dir=snap_dir,
             database_path=state["wf"], checkpoint_db_path=state["ck"],
         )
     # 不在
@@ -491,17 +496,18 @@ def test_restore_rejects_non_dict_components(state):
     """components が dict でない壊れた manifest は BackupError。"""
     import json as _json
 
-    snap = create_backup(
+    create_backup(
         database_path=state["wf"], checkpoint_db_path=state["ck"],
         out_dir=state["out"], now=datetime(2026, 6, 4, 11, 0, 0),
     )
-    mpath = Path(snap["path"]) / "manifest.json"
+    snap_dir = state["out"] / "20260604-110000"
+    mpath = snap_dir / "manifest.json"
     data = _json.loads(mpath.read_text())
     data["components"] = ["not", "a", "dict"]
     mpath.write_text(_json.dumps(data))
     with pytest.raises(BackupError):
         restore_backup(
-            snapshot_dir=snap["path"],
+            snapshot_dir=snap_dir,
             database_path=state["wf"],
             checkpoint_db_path=state["ck"],
         )
