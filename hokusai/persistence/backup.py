@@ -24,6 +24,7 @@ HOKUSAI workflow 本体の挙動には一切影響しない（state を読むだ
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sqlite3
 from datetime import datetime
@@ -44,6 +45,20 @@ class BackupError(Exception):
 def _snapshot_id(now: datetime) -> str:
     """`YYYYMMDD-HHMMSS` 形式のスナップショット ID を返す。"""
     return now.strftime("%Y%m%d-%H%M%S")
+
+
+def _snapshot_sort_key(snapshot_id: str) -> tuple[str, int]:
+    """snapshot_id を (timestamp, numeric_suffix) に分解したソートキーを返す。
+
+    snapshot_id はベースが `YYYYMMDD-HHMMSS`（`-` を 1 つ含む）で、同一秒衝突時は
+    `-N`（N は整数）が付く。文字列降順でそのまま並べると `...-10` が `...-2` より
+    古い扱いになる（辞書順の罠）ため、suffix を整数として比較する。
+    """
+    parts = snapshot_id.split("-")
+    # ベース ts 部分は最初の 2 要素（YYYYMMDD, HHMMSS）。3 要素目があり数値なら suffix。
+    if len(parts) >= 3 and parts[2].isdigit():
+        return ("-".join(parts[:2]), int(parts[2]))
+    return (snapshot_id, 0)
 
 
 def integrity_check(db_path: str | Path) -> bool:
@@ -204,7 +219,10 @@ def list_backups(out_dir: str | Path) -> list[dict[str, Any]]:
         manifest = _read_manifest(child)
         if manifest is not None:
             found.append(manifest)
-    found.sort(key=lambda m: m.get("snapshot_id", ""), reverse=True)
+    found.sort(
+        key=lambda m: _snapshot_sort_key(m.get("snapshot_id", "")),
+        reverse=True,
+    )
     return found
 
 
@@ -223,13 +241,29 @@ def prune_backups(out_dir: str | Path, keep: int) -> list[str]:
     """
     if keep < 0:
         raise BackupError(f"--keep は 0 以上である必要があります: {keep}")
+    out_dir = Path(out_dir).resolve()
     backups = list_backups(out_dir)
     to_remove = backups[keep:]
     removed: list[str] = []
     for manifest in to_remove:
-        snapshot_dir = Path(manifest["path"])
-        shutil.rmtree(snapshot_dir, ignore_errors=True)
-        removed.append(manifest.get("snapshot_id", snapshot_dir.name))
+        sid = manifest.get("snapshot_id")
+        if not sid:
+            # snapshot_id 不明の manifest は触らない（path を信頼して
+            # out_dir 自体や外を誤削除しないため）。
+            continue
+        # manifest の `path` は信頼せず snapshot_id から out_dir 配下の
+        # ディレクトリを再構成し、out_dir 直下の正規ディレクトリであることを
+        # 検証してから削除する（path traversal / 誤削除の防止）。
+        snapshot_dir = (out_dir / sid).resolve()
+        if snapshot_dir.parent != out_dir or not snapshot_dir.is_dir():
+            continue
+        try:
+            shutil.rmtree(snapshot_dir)
+        except OSError as e:
+            raise BackupError(
+                f"スナップショットの削除に失敗しました ({snapshot_dir}): {e}"
+            ) from e
+        removed.append(sid)
     return removed
 
 
@@ -330,23 +364,46 @@ def restore_backup(
     restored: list[dict[str, Any]] = []
     for name, src, target in planned:
         target.parent.mkdir(parents=True, exist_ok=True)
-        pre_restore: str | None = None
-        if target.exists():
-            backup_side = target.with_name(target.name + ".pre-restore")
-            if backup_side.exists():
-                backup_side.unlink()
-            shutil.move(str(target), str(backup_side))
-            pre_restore = str(backup_side)
-        # restore 後に古い WAL/SHM が新 DB を上書き隠蔽しないよう除去
-        for sidecar in _sidecar_paths(target):
-            if sidecar.exists():
-                sidecar.unlink()
-        shutil.copyfile(src, target)
+        tmp = target.with_name(target.name + ".restore-tmp")
+        pre_restore: Path | None = None
+        try:
+            # 1. まず一時ファイルへコピー。ここで失敗しても現 DB は無傷。
+            shutil.copyfile(src, tmp)
+            # 2. 現 DB を退避（pre-restore）。
+            if target.exists():
+                backup_side = target.with_name(target.name + ".pre-restore")
+                if backup_side.exists():
+                    backup_side.unlink()
+                shutil.move(str(target), str(backup_side))
+                pre_restore = backup_side
+            # 3. restore 後に古い WAL/SHM が新 DB を上書き隠蔽しないよう除去。
+            for sidecar in _sidecar_paths(target):
+                if sidecar.exists():
+                    sidecar.unlink()
+            # 4. 一時ファイルを atomic に配置（同一ディレクトリなので os.replace は原子的）。
+            os.replace(tmp, target)
+        except OSError as e:
+            # ロールバック: 一時ファイルを掃除し、退避済みで target が
+            # 未配置なら現 DB を元に戻す（"安全側" を担保）。
+            if tmp.exists():
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+            if pre_restore is not None and not target.exists():
+                try:
+                    shutil.move(str(pre_restore), str(target))
+                    pre_restore = None
+                except OSError:
+                    pass
+            raise BackupError(
+                f"復元に失敗しました ({name} → {target}): {e}"
+            ) from e
         restored.append(
             {
                 "component": name,
                 "target": str(target),
-                "pre_restore": pre_restore,
+                "pre_restore": str(pre_restore) if pre_restore else None,
             }
         )
 

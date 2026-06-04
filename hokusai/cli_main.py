@@ -2103,6 +2103,36 @@ def _handle_backup(args, config) -> int:
         return 0
 
     keep = getattr(args, "keep", None)
+
+    # トップレベル --dry-run: 作成・刈り込みを行わず予定内容のみ出力（backfill /
+    # cleanup と同じ規約）。
+    if getattr(args, "dry_run", False):
+        targets = {
+            "workflow": Path(config.database_path),
+            "checkpoint": Path(config.checkpoint_db_path),
+        }
+        present = {n: p for n, p in targets.items() if p.exists()}
+        if output == "json":
+            print(json.dumps(
+                {
+                    "dry_run": True,
+                    "out_dir": str(out_dir),
+                    "would_backup": {n: str(p) for n, p in present.items()},
+                    "keep": keep,
+                },
+                ensure_ascii=False, indent=2, default=str,
+            ))
+        else:
+            print(f"[dry-run] スナップショットを作成します（実行なし）: {out_dir}")
+            if present:
+                for n, p in present.items():
+                    print(f"  - {n}: {p}")
+            else:
+                print("  対象 DB が見つかりません")
+            if keep is not None:
+                print(f"  作成後に新しい {keep} 世代を残して刈り込み")
+        return 0
+
     try:
         manifest = create_backup(
             database_path=config.database_path,
@@ -2165,6 +2195,27 @@ def _handle_restore(args, config) -> int:
             file=sys.stderr,
         )
         return 1
+
+    # トップレベル --dry-run: 破壊的操作のため、解決したスナップショットと
+    # 復元先パスを表示するだけで実行しない（確認プロンプトもスキップ）。
+    if getattr(args, "dry_run", False):
+        if output == "json":
+            print(json.dumps(
+                {
+                    "dry_run": True,
+                    "snapshot_dir": str(snapshot_dir),
+                    "targets": {
+                        "workflow": str(config.database_path),
+                        "checkpoint": str(config.checkpoint_db_path),
+                    },
+                },
+                ensure_ascii=False, indent=2, default=str,
+            ))
+        else:
+            print(f"[dry-run] 復元します（実行なし）: {snapshot_dir}")
+            print(f"  workflow.db   → {config.database_path}")
+            print(f"  checkpoint.db → {config.checkpoint_db_path}")
+        return 0
 
     # 確認プロンプト（--yes で省略）。現 DB を上書きする破壊的操作のため。
     if not getattr(args, "yes", False):

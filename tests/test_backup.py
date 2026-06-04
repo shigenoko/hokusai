@@ -157,6 +157,27 @@ def test_list_backups_empty(tmp_path):
     assert list_backups(tmp_path / "nope") == []
 
 
+def test_list_backups_numeric_suffix_order(state):
+    """同一秒衝突で suffix が 10 以上になっても numeric 順で正しく並ぶ。
+
+    辞書順ソートだと `...-10` が `...-2` より古い扱いになる罠（Copilot 指摘）の
+    回帰テスト。
+    """
+    now = datetime(2026, 6, 4, 11, 30, 0)
+    # 同一秒に 11 個作る → base, base-1, ..., base-10
+    for _ in range(11):
+        create_backup(
+            database_path=state["wf"], checkpoint_db_path=state["ck"],
+            out_dir=state["out"], now=now,
+        )
+    listed = [m["snapshot_id"] for m in list_backups(state["out"])]
+    # 新しい順: suffix 10 が先頭、suffix なし（=0）が末尾
+    assert listed[0] == "20260604-113000-10"
+    assert listed[-1] == "20260604-113000"
+    # 辞書順なら "-2" が "-10" より後ろに来るが、numeric key で -10 が先
+    assert listed.index("20260604-113000-10") < listed.index("20260604-113000-2")
+
+
 def test_prune_backups_keeps_newest(state):
     for h in (8, 9, 10, 11):
         create_backup(database_path=state["wf"], checkpoint_db_path=state["ck"],
@@ -170,6 +191,41 @@ def test_prune_backups_keeps_newest(state):
 def test_prune_negative_raises(state):
     with pytest.raises(BackupError):
         prune_backups(state["out"], keep=-1)
+
+
+def test_prune_propagates_delete_failure(state, monkeypatch):
+    """削除に失敗したら成功扱いにせず BackupError を伝播する（Copilot 指摘）。"""
+    for h in (8, 9, 10):
+        create_backup(database_path=state["wf"], checkpoint_db_path=state["ck"],
+                      out_dir=state["out"], now=datetime(2026, 6, 4, h, 0, 0))
+
+    def _boom(path):
+        raise OSError("permission denied")
+
+    monkeypatch.setattr("hokusai.persistence.backup.shutil.rmtree", _boom)
+    with pytest.raises(BackupError):
+        prune_backups(state["out"], keep=1)
+
+
+def test_prune_skips_tampered_snapshot_id(state):
+    """manifest の snapshot_id が out_dir 直下の正規 dir を指さないなら触らない。"""
+    create_backup(database_path=state["wf"], checkpoint_db_path=state["ck"],
+                  out_dir=state["out"], now=datetime(2026, 6, 4, 9, 0, 0))
+    snap = create_backup(database_path=state["wf"], checkpoint_db_path=state["ck"],
+                         out_dir=state["out"], now=datetime(2026, 6, 4, 10, 0, 0))
+    # 古い方の manifest の snapshot_id を path traversal 風に改竄
+    old_dir = state["out"] / "20260604-090000"
+    manifest_path = old_dir / "manifest.json"
+    import json as _json
+    data = _json.loads(manifest_path.read_text())
+    data["snapshot_id"] = "../evil"
+    manifest_path.write_text(_json.dumps(data))
+    # keep=1 で古い方が刈り込み対象になるが、改竄 id は触らず removed に載らない
+    removed = prune_backups(state["out"], keep=1)
+    assert removed == []
+    # out_dir 自体・新しいスナップショットは無傷
+    assert state["out"].is_dir()
+    assert (state["out"] / snap["snapshot_id"]).is_dir()
 
 
 def test_resolve_snapshot_by_id_latest_and_path(state):
