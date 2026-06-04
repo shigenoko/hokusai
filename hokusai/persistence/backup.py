@@ -481,17 +481,20 @@ def restore_backup(
         # だった（pre_restore=None）ケースでも sidecar を巻き戻せる。
         backup_side = _pre_restore_path(target)
         try:
+            # 配置済みの新 DB を除去（pre_restore の有無に依らず）。
             if target.exists():
                 target.unlink()
-            for sidecar in _sidecar_paths(target):
-                if sidecar.exists():
-                    sidecar.unlink()
             if pre_restore is not None and pre_restore.exists():
                 shutil.move(str(pre_restore), str(target))
+            # sidecar は「退避済み（saved がある）」もののみ巻き戻す。退避先が
+            # 無い suffix の target 側 sidecar は『まだ退避していない元のまま』
+            # なので消さずに残す（sidecar 退避の途中失敗でも元を失わない）。
             for sidecar in _sidecar_paths(target):
                 suffix = _suffix_of(target, sidecar)
                 saved = backup_side.with_name(backup_side.name + suffix)
                 if saved.exists():
+                    if sidecar.exists():
+                        sidecar.unlink()
                     shutil.move(str(saved), str(sidecar))
         except OSError:
             pass
@@ -500,11 +503,16 @@ def restore_backup(
         for name, tmp, target in tmps:
             backup_side = _pre_restore_path(target)
             pre_restore: Path | None = None
+            # target を触る前に処理中分を記録する。pre-restore 退避 / sidecar
+            # 退避の途中で OSError が起きてもロールバックが走るようにするため
+            # （inflight を sidecar 退避後に記録すると取りこぼす）。
+            inflight_target, inflight_pre = target, None
             if target.exists():
                 if backup_side.exists():
                     backup_side.unlink()
                 shutil.move(str(target), str(backup_side))
                 pre_restore = backup_side
+                inflight_pre = pre_restore
             # 古い WAL/SHM は「削除」ではなく pre-restore 側へ退避する。
             # 削除してしまうと、後段失敗→ロールバックで元 DB は戻っても WAL に
             # 残っていた未反映コミットが失われ得るため（SQLiteStore は WAL 前提）。
@@ -517,8 +525,6 @@ def restore_backup(
                     if dest.exists():
                         dest.unlink()
                     shutil.move(str(sidecar), str(dest))
-            # ここで os.replace 前に失敗しても巻き戻せるよう処理中分を記録。
-            inflight_target, inflight_pre = target, pre_restore
             os.replace(tmp, target)  # 同一ディレクトリなので原子的
             committed.append((name, target, pre_restore))
             inflight_target, inflight_pre = None, None
