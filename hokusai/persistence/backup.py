@@ -61,6 +61,16 @@ def _snapshot_sort_key(snapshot_id: str) -> tuple[str, int]:
     return (snapshot_id, 0)
 
 
+def _ro_uri(db_path: Path) -> str:
+    """read-only 接続用の URI を返す。
+
+    URI 構築は `Path.as_uri()` を使う（スペース / `#` / `?` 等の予約文字を
+    percent-encode して silent な接続失敗を防ぐ。`ReadOnlyStore` と同方針＝
+    hokusai/operations.py）。
+    """
+    return f"{db_path.resolve().as_uri()}?mode=ro"
+
+
 def integrity_check(db_path: str | Path) -> bool:
     """`PRAGMA integrity_check` が ok を返すかを read-only で確認する。
 
@@ -71,10 +81,10 @@ def integrity_check(db_path: str | Path) -> bool:
         return False
     conn = None
     try:
-        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        conn = sqlite3.connect(_ro_uri(db_path), uri=True)
         row = conn.execute("PRAGMA integrity_check").fetchone()
         return bool(row) and row[0] == "ok"
-    except sqlite3.Error:
+    except (sqlite3.Error, ValueError, OSError):
         return False
     finally:
         if conn is not None:
@@ -90,11 +100,11 @@ def _online_backup(src: Path, dst: Path) -> None:
     src_conn = None
     dst_conn = None
     try:
-        src_conn = sqlite3.connect(f"file:{src}?mode=ro", uri=True)
+        src_conn = sqlite3.connect(_ro_uri(src), uri=True)
         dst_conn = sqlite3.connect(dst)
         with dst_conn:
             src_conn.backup(dst_conn)
-    except sqlite3.Error as e:
+    except (sqlite3.Error, ValueError, OSError) as e:
         raise BackupError(f"backup に失敗しました ({src}): {e}") from e
     finally:
         if src_conn is not None:
@@ -159,7 +169,12 @@ def create_backup(
             f"(workflow={paths['workflow']} / checkpoint={paths['checkpoint']})"
         )
 
-    snapshot_dir.mkdir(parents=True, exist_ok=False)
+    try:
+        snapshot_dir.mkdir(parents=True, exist_ok=False)
+    except OSError as e:
+        raise BackupError(
+            f"スナップショットディレクトリを作成できません ({snapshot_dir}): {e}"
+        ) from e
 
     components: dict[str, Any] = {}
     try:
@@ -172,24 +187,33 @@ def create_backup(
                 "size_bytes": dst.stat().st_size,
                 "integrity_ok": integrity_check(dst),
             }
-    except BaseException:
+
+        manifest = {
+            "snapshot_id": snapshot_id,
+            "created_at": now.isoformat(),
+            "hokusai_version": version,
+            "profile": profile,
+            "label": label,
+            "components": components,
+            "path": str(snapshot_dir),
+        }
+        # manifest 書き込み失敗も「DB だけ残った中途半端なスナップショット」を
+        # 生むため、DB コピーと同じ try で包んで失敗時に snapshot_dir を掃除する。
+        (snapshot_dir / MANIFEST_NAME).write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except BaseException as e:
         # 途中失敗時は中途半端なスナップショットを残さない。
         shutil.rmtree(snapshot_dir, ignore_errors=True)
+        # OSError（manifest 書き込み等）は操作コマンドとして BackupError 化する
+        # （_online_backup の sqlite/OSError は既に BackupError）。
+        if isinstance(e, OSError):
+            raise BackupError(
+                f"スナップショットの書き込みに失敗しました ({snapshot_dir}): {e}"
+            ) from e
         raise
 
-    manifest = {
-        "snapshot_id": snapshot_id,
-        "created_at": now.isoformat(),
-        "hokusai_version": version,
-        "profile": profile,
-        "label": label,
-        "components": components,
-        "path": str(snapshot_dir),
-    }
-    (snapshot_dir / MANIFEST_NAME).write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
     return manifest
 
 
@@ -288,7 +312,15 @@ def resolve_snapshot(out_dir: str | Path, ref: str) -> Path | None:
         backups = list_backups(out_dir)
         if not backups:
             return None
-        return Path(backups[0]["path"])
+        # manifest の `path` は信頼せず（改竄され得る）、snapshot_id から
+        # out_dir 配下のディレクトリを再構成・検証する（prune_backups と同方針）。
+        sid = backups[0].get("snapshot_id")
+        if not sid:
+            return None
+        latest = (out_dir / sid).resolve()
+        if latest.parent != out_dir.resolve() or not latest.is_dir():
+            return None
+        return latest
 
     # 3. id 指定
     by_id = out_dir / ref
@@ -342,6 +374,11 @@ def restore_backup(
 
     targets = _component_paths(database_path, checkpoint_db_path)
     components = manifest.get("components", {})
+    # manifest は手動編集 / 破損し得る untrusted input。components が dict で
+    # ない、各 entry の構造が想定外、file 名が出力ディレクトリ外を指す等は
+    # KeyError/TypeError を出さず BackupError として扱う。
+    if not isinstance(components, dict):
+        raise BackupError("manifest の components が不正です（dict ではない）")
 
     # 先に全コンポーネントの integrity を検証してから差し替える
     # （途中まで適用して片肺になるのを避ける）。
@@ -349,7 +386,18 @@ def restore_backup(
     for name, info in components.items():
         if name not in targets:
             continue
-        src = snapshot_dir / info["file"]
+        if not isinstance(info, dict) or not isinstance(info.get("file"), str):
+            raise BackupError(
+                f"manifest のコンポーネント定義が不正です: {name}"
+            )
+        # file はファイル名のみを想定。パス区切りを含む値は snapshot_dir 外を
+        # 指し得るため拒否する（path traversal の防止）。
+        file_name = info["file"]
+        if "/" in file_name or "\\" in file_name or file_name in ("", ".", ".."):
+            raise BackupError(
+                f"manifest のコンポーネント file 名が不正です: {name}={file_name!r}"
+            )
+        src = snapshot_dir / file_name
         if not src.exists():
             raise BackupError(f"スナップショット DB が欠落しています: {src}")
         if verify and not integrity_check(src):

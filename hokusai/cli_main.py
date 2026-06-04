@@ -2097,9 +2097,13 @@ def _handle_backup(args, config) -> int:
             else:
                 print(f"スナップショット一覧（{out_dir}）:")
                 for m in backups:
-                    comps = ", ".join(m.get("components", {}).keys())
+                    # manifest.json は手動編集 / 破損し得るのでキー欠落でも
+                    # 落ちないよう .get() ベースで表示する。
+                    sid = m.get("snapshot_id", "(unknown)")
+                    comp_map = m.get("components") or {}
+                    comps = ", ".join(comp_map.keys()) if isinstance(comp_map, dict) else ""
                     label = f" [{m['label']}]" if m.get("label") else ""
-                    print(f"  {m['snapshot_id']}  ({comps}){label}")
+                    print(f"  {sid}  ({comps}){label}")
         return 0
 
     keep = getattr(args, "keep", None)

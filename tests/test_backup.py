@@ -319,3 +319,116 @@ def test_restore_missing_manifest_raises(tmp_path, state):
             database_path=state["wf"],
             checkpoint_db_path=state["ck"],
         )
+
+
+def test_backup_handles_path_with_special_chars(tmp_path):
+    """スペース等の予約文字を含むパスでも as_uri 経由で接続が壊れない。"""
+    base = tmp_path / "with space #and?weird"
+    wf = base / "workflow.db"
+    ck = base / "checkpoint.db"
+    _make_db(wf, ["x"])
+    _make_db(ck, ["y"])
+    manifest = create_backup(
+        database_path=wf, checkpoint_db_path=ck,
+        out_dir=base / "back ups",
+        now=datetime(2026, 6, 4, 11, 0, 0),
+    )
+    assert manifest["components"]["workflow"]["integrity_ok"] is True
+    assert _read_rows(Path(manifest["path"]) / "workflow.db") == ["x"]
+
+
+def test_create_backup_mkdir_failure_raises_backup_error(state, monkeypatch):
+    """snapshot_dir 作成失敗（OSError）を BackupError 化する。"""
+    import pathlib
+
+    orig = pathlib.Path.mkdir
+
+    def boom(self, *a, **k):
+        if self.parent == state["out"]:
+            raise OSError("permission denied")
+        return orig(self, *a, **k)
+
+    monkeypatch.setattr(pathlib.Path, "mkdir", boom)
+    with pytest.raises(BackupError):
+        create_backup(
+            database_path=state["wf"], checkpoint_db_path=state["ck"],
+            out_dir=state["out"], now=datetime(2026, 6, 4, 11, 0, 0),
+        )
+
+
+def test_create_backup_manifest_write_failure_cleans_up(state, monkeypatch):
+    """manifest 書き込み失敗時は BackupError + 中途半端なスナップショットを残さない。"""
+    import pathlib
+
+    orig = pathlib.Path.write_text
+
+    def boom(self, *a, **k):
+        if self.name == "manifest.json":
+            raise OSError("disk full")
+        return orig(self, *a, **k)
+
+    monkeypatch.setattr(pathlib.Path, "write_text", boom)
+    with pytest.raises(BackupError):
+        create_backup(
+            database_path=state["wf"], checkpoint_db_path=state["ck"],
+            out_dir=state["out"], now=datetime(2026, 6, 4, 11, 30, 0),
+        )
+    # DB だけ残った中途半端なスナップショットが残っていない
+    assert not (state["out"] / "20260604-113000").exists()
+
+
+def test_resolve_latest_ignores_tampered_manifest_path(state):
+    """latest 解決は manifest の path を信頼せず snapshot_id から再構成する。"""
+    import json as _json
+
+    snap = create_backup(
+        database_path=state["wf"], checkpoint_db_path=state["ck"],
+        out_dir=state["out"], now=datetime(2026, 6, 4, 11, 0, 0),
+    )
+    mpath = Path(snap["path"]) / "manifest.json"
+    data = _json.loads(mpath.read_text())
+    data["path"] = "/etc"  # 改竄
+    mpath.write_text(_json.dumps(data))
+    resolved = resolve_snapshot(state["out"], "latest")
+    # /etc ではなく out_dir 直下の実ディレクトリに解決される
+    assert resolved == (state["out"] / snap["snapshot_id"]).resolve()
+
+
+def test_restore_rejects_tampered_component_file(state):
+    """manifest の component file が traversal 風なら BackupError（KeyError でなく）。"""
+    import json as _json
+
+    snap = create_backup(
+        database_path=state["wf"], checkpoint_db_path=state["ck"],
+        out_dir=state["out"], now=datetime(2026, 6, 4, 11, 0, 0),
+    )
+    mpath = Path(snap["path"]) / "manifest.json"
+    data = _json.loads(mpath.read_text())
+    data["components"]["workflow"]["file"] = "../../evil.db"
+    mpath.write_text(_json.dumps(data))
+    with pytest.raises(BackupError):
+        restore_backup(
+            snapshot_dir=snap["path"],
+            database_path=state["wf"],
+            checkpoint_db_path=state["ck"],
+        )
+
+
+def test_restore_rejects_non_dict_components(state):
+    """components が dict でない壊れた manifest は BackupError。"""
+    import json as _json
+
+    snap = create_backup(
+        database_path=state["wf"], checkpoint_db_path=state["ck"],
+        out_dir=state["out"], now=datetime(2026, 6, 4, 11, 0, 0),
+    )
+    mpath = Path(snap["path"]) / "manifest.json"
+    data = _json.loads(mpath.read_text())
+    data["components"] = ["not", "a", "dict"]
+    mpath.write_text(_json.dumps(data))
+    with pytest.raises(BackupError):
+        restore_backup(
+            snapshot_dir=snap["path"],
+            database_path=state["wf"],
+            checkpoint_db_path=state["ck"],
+        )
