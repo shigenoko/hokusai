@@ -368,7 +368,8 @@ def restore_backup(
       1. スナップショット DB の integrity_check（verify=True のとき）
       2. 全コンポーネントを一時ファイルへコピー（target は未変更）
       3. 現 DB と その `-wal` / `-shm` を `<db>.pre-restore[-wal/-shm]` に退避
-         （削除でなく退避。失敗時に元 WAL も含め完全復元できるよう保持する）
+         （削除でなく退避。失敗時に元 WAL も含め完全復元できるよう保持する。
+         DB 本体が欠落し sidecar だけ残るケースでも sidecar は必ず退避して除去）
       4. 一時ファイルを `os.replace` で原子的に配置
       失敗時は処理中分・配置済み分・退避した sidecar をまとめてロールバックする。
 
@@ -470,9 +471,15 @@ def restore_backup(
         # "workflow.db" と "workflow.db-wal" から "-wal" を取り出す。
         return sidecar.name[len(target.name):]
 
+    def _pre_restore_path(target: Path) -> Path:
+        return target.with_name(target.name + ".pre-restore")
+
     def _rollback_one(target: Path, pre_restore: Path | None) -> None:
         # 置換済み / 退避済みの target を pre-restore から元に戻す。
-        # WAL/SHM sidecar も退避先（pre_restore + suffix）から復元する。
+        # WAL/SHM sidecar も退避先（<pre-restore> + suffix）から復元する。
+        # 退避先名は target から決定的に導くため、DB 本体が無く sidecar だけ
+        # だった（pre_restore=None）ケースでも sidecar を巻き戻せる。
+        backup_side = _pre_restore_path(target)
         try:
             if target.exists():
                 target.unlink()
@@ -481,35 +488,35 @@ def restore_backup(
                     sidecar.unlink()
             if pre_restore is not None and pre_restore.exists():
                 shutil.move(str(pre_restore), str(target))
-            if pre_restore is not None:
-                for sidecar in _sidecar_paths(target):
-                    suffix = _suffix_of(target, sidecar)
-                    saved = pre_restore.with_name(pre_restore.name + suffix)
-                    if saved.exists():
-                        shutil.move(str(saved), str(sidecar))
+            for sidecar in _sidecar_paths(target):
+                suffix = _suffix_of(target, sidecar)
+                saved = backup_side.with_name(backup_side.name + suffix)
+                if saved.exists():
+                    shutil.move(str(saved), str(sidecar))
         except OSError:
             pass
 
     try:
         for name, tmp, target in tmps:
+            backup_side = _pre_restore_path(target)
             pre_restore: Path | None = None
             if target.exists():
-                backup_side = target.with_name(target.name + ".pre-restore")
                 if backup_side.exists():
                     backup_side.unlink()
                 shutil.move(str(target), str(backup_side))
                 pre_restore = backup_side
-                # 古い WAL/SHM は「削除」ではなく pre-restore 側へ退避する。
-                # 削除してしまうと、後段失敗→ロールバックで元 DB は戻っても
-                # WAL に残っていた未反映コミットが失われ得るため（SQLiteStore は
-                # WAL 前提。失敗時も元 state を完全復元できるよう保持する）。
-                for sidecar in _sidecar_paths(target):
-                    if sidecar.exists():
-                        suffix = _suffix_of(target, sidecar)
-                        dest = backup_side.with_name(backup_side.name + suffix)
-                        if dest.exists():
-                            dest.unlink()
-                        shutil.move(str(sidecar), str(dest))
+            # 古い WAL/SHM は「削除」ではなく pre-restore 側へ退避する。
+            # 削除してしまうと、後段失敗→ロールバックで元 DB は戻っても WAL に
+            # 残っていた未反映コミットが失われ得るため（SQLiteStore は WAL 前提）。
+            # DB 本体が欠落し sidecar だけ残る（クラッシュ後等）ケースでも、
+            # stale な WAL/SHM が新 DB に紐づいて破損扱いされないよう必ず退避する。
+            for sidecar in _sidecar_paths(target):
+                if sidecar.exists():
+                    suffix = _suffix_of(target, sidecar)
+                    dest = backup_side.with_name(backup_side.name + suffix)
+                    if dest.exists():
+                        dest.unlink()
+                    shutil.move(str(sidecar), str(dest))
             # ここで os.replace 前に失敗しても巻き戻せるよう処理中分を記録。
             inflight_target, inflight_pre = target, pre_restore
             os.replace(tmp, target)  # 同一ディレクトリなので原子的

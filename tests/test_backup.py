@@ -518,6 +518,31 @@ def test_restore_rollback_preserves_original_wal(state, monkeypatch):
     assert not state["wf"].with_name("workflow.db.pre-restore-wal").exists()
 
 
+def test_restore_removes_orphan_sidecar_when_db_missing(state):
+    """DB 本体が無く sidecar だけ残る場合でも stale WAL/SHM を退避・除去する。"""
+    snap = create_backup(
+        database_path=state["wf"], checkpoint_db_path=state["ck"],
+        out_dir=state["out"], now=datetime(2026, 6, 4, 11, 0, 0),
+    )
+    # workflow.db を消し、orphan な -wal / -shm だけ残す（クラッシュ後を模す）
+    state["wf"].unlink()
+    orphan_wal = state["wf"].with_name("workflow.db-wal")
+    orphan_shm = state["wf"].with_name("workflow.db-shm")
+    orphan_wal.write_bytes(b"ORPHAN-WAL")
+    orphan_shm.write_bytes(b"ORPHAN-SHM")
+
+    restore_backup(
+        snapshot_dir=snap["path"],
+        database_path=state["wf"], checkpoint_db_path=state["ck"],
+    )
+    # 新 DB が配置され、orphan な sidecar は target から除去されている
+    assert state["wf"].exists()
+    assert not orphan_wal.exists()
+    assert not orphan_shm.exists()
+    # stale WAL に邪魔されず読める
+    assert _read_rows(state["wf"]) == ["a", "b"]
+
+
 def test_restore_distinguishes_broken_vs_missing_manifest(state, tmp_path):
     """manifest 破損と不在でエラーメッセージを区別する。"""
     create_backup(
