@@ -466,6 +466,9 @@ def restore_backup(
     # 「target を pre-restore へ退避済みだが os.replace 前 / 失敗」の処理中分。
     inflight_target: Path | None = None
     inflight_pre: Path | None = None
+    # 元 DB を退避（または新 DB を配置）済みか。退避前に失敗した場合に
+    # ロールバックで元 DB を誤って消さないための区別。
+    inflight_swapped: bool = False
 
     def _suffix_of(target: Path, sidecar: Path) -> str:
         # "workflow.db" と "workflow.db-wal" から "-wal" を取り出す。
@@ -474,17 +477,23 @@ def restore_backup(
     def _pre_restore_path(target: Path) -> Path:
         return target.with_name(target.name + ".pre-restore")
 
-    def _rollback_one(target: Path, pre_restore: Path | None) -> None:
+    def _rollback_one(target: Path, pre_restore: Path | None, swapped: bool) -> None:
         # 置換済み / 退避済みの target を pre-restore から元に戻す。
         # WAL/SHM sidecar も退避先（<pre-restore> + suffix）から復元する。
         # 退避先名は target から決定的に導くため、DB 本体が無く sidecar だけ
         # だった（pre_restore=None）ケースでも sidecar を巻き戻せる。
+        #
+        # swapped=False は「元 DB をまだ退避していない / 新 DB を配置していない」
+        # ＝ target に残っているのは『退避前の元 DB そのもの』なので、絶対に
+        # unlink しない（退避前の move 失敗等で元 DB を失わないため）。
         backup_side = _pre_restore_path(target)
         try:
-            # 配置済みの新 DB を除去（pre_restore の有無に依らず）。
-            if target.exists():
+            # 配置済みの新 DB / 退避でずれた target のみ除去してよい。
+            if swapped and target.exists():
                 target.unlink()
             if pre_restore is not None and pre_restore.exists():
+                if target.exists():
+                    target.unlink()
                 shutil.move(str(pre_restore), str(target))
             # sidecar は「退避済み（saved がある）」もののみ巻き戻す。退避先が
             # 無い suffix の target 側 sidecar は『まだ退避していない元のまま』
@@ -506,13 +515,14 @@ def restore_backup(
             # target を触る前に処理中分を記録する。pre-restore 退避 / sidecar
             # 退避の途中で OSError が起きてもロールバックが走るようにするため
             # （inflight を sidecar 退避後に記録すると取りこぼす）。
-            inflight_target, inflight_pre = target, None
+            inflight_target, inflight_pre, inflight_swapped = target, None, False
             if target.exists():
                 if backup_side.exists():
                     backup_side.unlink()
                 shutil.move(str(target), str(backup_side))
                 pre_restore = backup_side
                 inflight_pre = pre_restore
+                inflight_swapped = True  # 元 DB を退避済み
             # 古い WAL/SHM は「削除」ではなく pre-restore 側へ退避する。
             # 削除してしまうと、後段失敗→ロールバックで元 DB は戻っても WAL に
             # 残っていた未反映コミットが失われ得るため（SQLiteStore は WAL 前提）。
@@ -527,14 +537,15 @@ def restore_backup(
                     shutil.move(str(sidecar), str(dest))
             os.replace(tmp, target)  # 同一ディレクトリなので原子的
             committed.append((name, target, pre_restore))
-            inflight_target, inflight_pre = None, None
+            inflight_target, inflight_pre, inflight_swapped = None, None, False
     except OSError as e:
-        # 処理中（os.replace 前後で失敗）分を先に巻き戻す。
+        # 処理中（os.replace 前後で失敗）分を先に巻き戻す。退避前で失敗した
+        # 場合（inflight_swapped=False）は target が元 DB のままなので消さない。
         if inflight_target is not None:
-            _rollback_one(inflight_target, inflight_pre)
-        # 既に置換済みの target を新しい順に巻き戻す。
+            _rollback_one(inflight_target, inflight_pre, inflight_swapped)
+        # 既に置換済みの target は必ず新 DB なので swapped=True で巻き戻す。
         for _n, _t, _pre in reversed(committed):
-            _rollback_one(_t, _pre)
+            _rollback_one(_t, _pre, swapped=True)
         _cleanup_tmps()
         raise BackupError(f"復元に失敗しました: {e}") from e
 

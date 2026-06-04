@@ -554,6 +554,35 @@ def test_restore_rollback_on_sidecar_move_failure(state, monkeypatch):
     assert not state["wf"].with_name("workflow.db.pre-restore-wal").exists()
 
 
+def test_restore_does_not_delete_db_when_move_fails_before_swap(state, monkeypatch):
+    """退避前（move 失敗）のロールバックで元 DB を削除しない。"""
+    snap = create_backup(
+        database_path=state["wf"], checkpoint_db_path=state["ck"],
+        out_dir=state["out"], now=datetime(2026, 6, 4, 11, 0, 0),
+    )
+    orig = state["wf"].read_bytes()
+
+    import hokusai.persistence.backup as bk
+    real_move = bk.shutil.move
+
+    def flaky_move(src, dst, *a, **k):
+        # 元 DB → pre-restore への退避 move 自体を失敗させる（退避前の失敗）
+        if str(dst).endswith("workflow.db.pre-restore"):
+            raise OSError("simulated failure")
+        return real_move(src, dst, *a, **k)
+
+    monkeypatch.setattr(bk.shutil, "move", flaky_move)
+    with pytest.raises(BackupError):
+        restore_backup(
+            snapshot_dir=snap["path"],
+            database_path=state["wf"], checkpoint_db_path=state["ck"],
+        )
+    # 退避前の失敗で元 DB が消されず、内容も元のまま
+    assert state["wf"].exists()
+    assert state["wf"].read_bytes() == orig
+    assert _read_rows(state["wf"]) == ["a", "b"]
+
+
 def test_restore_removes_orphan_sidecar_when_db_missing(state):
     """DB 本体が無く sidecar だけ残る場合でも stale WAL/SHM を退避・除去する。"""
     snap = create_backup(
