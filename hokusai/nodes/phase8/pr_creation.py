@@ -284,6 +284,40 @@ def _trigger_ci_for_new_prs(repos, branch_name: str) -> None:
             logger.warning(f"{repo.name}: CI トリガー失敗: {e}")
 
 
+def _request_copilot_reviews(new_prs: list) -> None:
+    """新規作成した Draft PR に対して Copilot コードレビューを依頼する。
+
+    Copilot レビューが有効なリポジトリでのみ依頼し、未対応 / 失敗時は
+    workflow を止めずにログのみ残す。実際のレビュー結果は後続の
+    統合レビューループ（phase8b_unified_wait）が待って処理する。
+
+    Args:
+        new_prs: (repo, pr_info) タプルのリスト
+    """
+    for repo, pr_info in new_prs:
+        pr_number = pr_info.get("number")
+        if not pr_number:
+            continue
+        try:
+            git_hosting = GitHubHostingClient(working_dir=repo.path)
+            result = git_hosting.request_copilot_review(pr_number)
+            if result.get("requested"):
+                print(f"   🤖 {repo.name}: Copilotレビューを依頼しました (PR #{pr_number})")
+            elif not result.get("available"):
+                print(f"   ⏭️ {repo.name}: Copilotレビュー未対応のためスキップ")
+                logger.info(
+                    "%s: Copilotレビュー利用不可: %s",
+                    repo.name, result.get("reason"),
+                )
+            else:
+                logger.warning(
+                    "%s: Copilotレビュー依頼に失敗: %s",
+                    repo.name, result.get("reason"),
+                )
+        except Exception as e:
+            logger.warning("%s: Copilotレビュー依頼でエラー: %s", repo.name, e)
+
+
 def phase8a_pr_draft_node(state: WorkflowState) -> WorkflowState:
     """Phase 8a: Draft PR作成（複数リポジトリ対応）"""
     state = update_phase_status(state, 8, PhaseStatus.IN_PROGRESS)
@@ -312,6 +346,7 @@ def phase8a_pr_draft_node(state: WorkflowState) -> WorkflowState:
         pull_requests = state.get("pull_requests", [])
         created_count = 0
         new_pr_repos = []  # CI トリガー対象
+        new_prs = []  # Copilot レビュー依頼対象: (repo, pr_info) のタプル
 
         for repo in repositories:
             pr_info = _create_pr_for_repository(
@@ -328,6 +363,7 @@ def phase8a_pr_draft_node(state: WorkflowState) -> WorkflowState:
                     pull_requests.append(pr_info)
                     created_count += 1
                     new_pr_repos.append(repo)
+                    new_prs.append((repo, pr_info))
 
 
         state["pull_requests"] = pull_requests
@@ -337,6 +373,11 @@ def phase8a_pr_draft_node(state: WorkflowState) -> WorkflowState:
         # 空コミットを push して synchronize イベントを発生させる
         if new_pr_repos:
             _trigger_ci_for_new_prs(new_pr_repos, branch_name)
+
+        # 新規 PR に対して Copilot コードレビューを依頼する
+        # （config で有効、かつ Copilot レビューが利用可能なリポジトリのみ）
+        if new_prs and getattr(config, "request_copilot_review", True):
+            _request_copilot_reviews(new_prs)
 
         # NotionタスクにPR情報を追記（差分がある場合のみ）
         if created_count > 0:
@@ -381,8 +422,9 @@ def phase8a_pr_draft_node(state: WorkflowState) -> WorkflowState:
                 type(e).__name__,
             )
 
-        # Note: Copilotレビュー待ちは統合レビューループ（phase8b_unified_wait）で処理する。
-        # Phase 8a はPR作成のみを担当し、後続の phase8b_unified_wait へ進む。
+        # Note: Phase 8a はPR作成と Copilot レビュー依頼までを担当する。
+        # Copilotレビューの結果待ち・指摘対応は統合レビューループ
+        # （phase8b_unified_wait）で処理する。
 
     except Exception as e:
         state = update_phase_status(state, 8, PhaseStatus.FAILED, str(e))
