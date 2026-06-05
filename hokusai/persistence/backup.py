@@ -33,10 +33,6 @@ from typing import Any
 
 MANIFEST_NAME = "manifest.json"
 
-#: スナップショットに含める論理コンポーネント名 → config 上の属性名。
-#: 値は CLI 側で `config.<attr>` を解決して渡す。
-COMPONENTS = ("workflow", "checkpoint")
-
 
 class BackupError(Exception):
     """backup / restore の操作的失敗（typed）。"""
@@ -388,7 +384,7 @@ def restore_backup(
     Raises:
         BackupError: manifest 不在 / integrity NG / コピー失敗。
     """
-    snapshot_dir = Path(snapshot_dir)
+    snapshot_dir = Path(snapshot_dir).expanduser()
     manifest = _read_manifest(snapshot_dir)
     if manifest is None:
         # 「不在」と「存在するが壊れて読めない（JSON / encoding 破損）」を

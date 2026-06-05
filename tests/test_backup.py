@@ -120,6 +120,16 @@ def test_paths_expanduser(tmp_path, monkeypatch):
     assert resolve_snapshot("~/backups", "latest") == (home / "backups" / "20260604-110000").resolve()
     assert resolve_snapshot("~/backups", "~/backups/20260604-110000") is not None
 
+    # restore_backup も snapshot_dir の ~ を展開できる
+    wf.unlink()
+    result = restore_backup(
+        snapshot_dir="~/backups/20260604-110000",
+        database_path="~/db/workflow.db",
+        checkpoint_db_path="~/db/checkpoint.db",
+    )
+    assert wf.exists()
+    assert result["snapshot_id"] == "20260604-110000"
+
 
 def test_create_backup_no_target_raises(tmp_path):
     with pytest.raises(BackupError):
