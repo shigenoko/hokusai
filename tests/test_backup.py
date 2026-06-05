@@ -590,6 +590,37 @@ def test_restore_rollback_on_sidecar_move_failure(state, monkeypatch):
     assert not state["wf"].with_name("workflow.db.pre-restore-wal").exists()
 
 
+def test_restore_surfaces_rollback_failure(state, monkeypatch):
+    """ロールバック自体が失敗したら握り潰さず BackupError で可視化する。"""
+    snap = create_backup(
+        database_path=state["wf"], checkpoint_db_path=state["ck"],
+        out_dir=state["out"], now=datetime(2026, 6, 4, 11, 0, 0),
+    )
+    import hokusai.persistence.backup as bk
+    real_replace = bk.os.replace
+    real_move = bk.shutil.move
+
+    def flaky_replace(src, dst, *a, **k):
+        # 2 つ目で失敗させてロールバックを誘発
+        if str(dst).endswith("checkpoint.db"):
+            raise OSError("replace fail")
+        return real_replace(src, dst, *a, **k)
+
+    def flaky_move(src, dst, *a, **k):
+        # ロールバックの復元 move（src が pre-restore 由来）だけ失敗させる
+        if ".pre-restore" in str(src):
+            raise OSError("rollback move fail")
+        return real_move(src, dst, *a, **k)
+
+    monkeypatch.setattr(bk.os, "replace", flaky_replace)
+    monkeypatch.setattr(bk.shutil, "move", flaky_move)
+    with pytest.raises(BackupError, match="ロールバックも一部失敗"):
+        restore_backup(
+            snapshot_dir=snap["path"],
+            database_path=state["wf"], checkpoint_db_path=state["ck"],
+        )
+
+
 def test_restore_does_not_delete_db_when_move_fails_before_swap(state, monkeypatch):
     """退避前（move 失敗）のロールバックで元 DB を削除しない。"""
     snap = create_backup(

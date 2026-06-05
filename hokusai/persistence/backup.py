@@ -476,8 +476,9 @@ def restore_backup(
     def _pre_restore_path(target: Path) -> Path:
         return target.with_name(target.name + ".pre-restore")
 
-    def _rollback_one(target: Path, pre_restore: Path | None, swapped: bool) -> None:
+    def _rollback_one(target: Path, pre_restore: Path | None, swapped: bool) -> list[str]:
         # 置換済み / 退避済みの target を pre-restore から元に戻す。
+        # ロールバック中に起きた失敗の説明を list で返す（握り潰さず可視化する）。
         # WAL/SHM sidecar も退避先（<pre-restore> + suffix）から復元する。
         # 退避先名は target から決定的に導くため、DB 本体が無く sidecar だけ
         # だった（pre_restore=None）ケースでも sidecar を巻き戻せる。
@@ -486,6 +487,7 @@ def restore_backup(
         # ＝ target に残っているのは『退避前の元 DB そのもの』なので、絶対に
         # unlink しない（退避前の move 失敗等で元 DB を失わないため）。
         backup_side = _pre_restore_path(target)
+        errors: list[str] = []
         try:
             # 配置済みの新 DB / 退避でずれた target のみ除去してよい。
             if swapped and target.exists():
@@ -494,18 +496,23 @@ def restore_backup(
                 if target.exists():
                     target.unlink()
                 shutil.move(str(pre_restore), str(target))
-            # sidecar は「退避済み（saved がある）」もののみ巻き戻す。退避先が
-            # 無い suffix の target 側 sidecar は『まだ退避していない元のまま』
-            # なので消さずに残す（sidecar 退避の途中失敗でも元を失わない）。
-            for sidecar in _sidecar_paths(target):
-                suffix = _suffix_of(target, sidecar)
-                saved = backup_side.with_name(backup_side.name + suffix)
-                if saved.exists():
+        except OSError as e:
+            errors.append(f"{target} の本体復元に失敗: {e}")
+        # sidecar は「退避済み（saved がある）」もののみ巻き戻す。退避先が
+        # 無い suffix の target 側 sidecar は『まだ退避していない元のまま』
+        # なので消さずに残す（sidecar 退避の途中失敗でも元を失わない）。
+        # 本体復元が失敗しても sidecar は best-effort で戻し、失敗は集約する。
+        for sidecar in _sidecar_paths(target):
+            suffix = _suffix_of(target, sidecar)
+            saved = backup_side.with_name(backup_side.name + suffix)
+            if saved.exists():
+                try:
                     if sidecar.exists():
                         sidecar.unlink()
                     shutil.move(str(saved), str(sidecar))
-        except OSError:
-            pass
+                except OSError as e:
+                    errors.append(f"{sidecar} の sidecar 復元に失敗: {e}")
+        return errors
 
     try:
         for name, tmp, target in tmps:
@@ -540,13 +547,23 @@ def restore_backup(
     except OSError as e:
         # 処理中（os.replace 前後で失敗）分を先に巻き戻す。退避前で失敗した
         # 場合（inflight_swapped=False）は target が元 DB のままなので消さない。
+        rb_errors: list[str] = []
         if inflight_target is not None:
-            _rollback_one(inflight_target, inflight_pre, inflight_swapped)
+            rb_errors += _rollback_one(inflight_target, inflight_pre, inflight_swapped)
         # 既に置換済みの target は必ず新 DB なので swapped=True で巻き戻す。
         for _n, _t, _pre in reversed(committed):
-            _rollback_one(_t, _pre, swapped=True)
+            rb_errors += _rollback_one(_t, _pre, swapped=True)
         _cleanup_tmps()
-        raise BackupError(f"復元に失敗しました: {e}") from e
+        msg = f"復元に失敗しました: {e}"
+        if rb_errors:
+            # ロールバックも失敗した場合は握り潰さず可視化する（state が片肺の
+            # 可能性があり、手動確認が必要なことを運用者に伝える）。
+            msg += (
+                "。さらにロールバックも一部失敗しました"
+                "（state が片肺の可能性があるため手動確認が必要）: "
+                + " / ".join(rb_errors)
+            )
+        raise BackupError(msg) from e
 
     restored = [
         {
