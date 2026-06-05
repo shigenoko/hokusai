@@ -400,6 +400,7 @@ If sending fails (timeout, HTTP error, network error), the workflow continues ru
 - Implementation prompts: `prompts/`
 - Phase node sources: `hokusai/nodes/`
 - Configuration model: `hokusai/config/models.py`
+- Production readiness runbook: `docs/production-readiness-runbook.md`
 - Profile operation guide: `docs/profile-operation-guide.md`
 - Notion dashboard operation guide: `docs/notion-dashboard-operation-guide.md`
 - Figma / Miro operation guide: `docs/figma-miro-integration-operation-guide.md`
