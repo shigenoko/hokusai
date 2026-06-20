@@ -31,14 +31,14 @@ def _config(monkeypatch):
 
 
 def _args(**kw):
-    base = dict(
-        doc_subcommand="start",
-        type="requirements",
-        topic="DOM指摘",
-        feature_page="feat-123",
-        max_rounds=1,
-        mode="auto",
-    )
+    base = {
+        "doc_subcommand": "start",
+        "type": "requirements",
+        "topic": "DOM指摘",
+        "feature_page": "feat-123",
+        "max_rounds": 1,
+        "mode": "auto",
+    }
     base.update(kw)
     return SimpleNamespace(**base)
 
@@ -117,7 +117,7 @@ def test_design_title_naming():
     doc_cli.set_notion_client_factory(lambda: fake)
     state = doc_cli.run_doc_workflow("design", "プレビュー機構", feature_page_id="f")
     doc_cli.notion_output_sink(state)
-    assert fake.calls[0][1] == "【設計書】プレビュー機構"
+    assert fake.calls and fake.calls[0][1] == "【設計書】プレビュー機構"
 
 
 def test_notion_sink_without_feature_page_falls_back_to_stdout(capsys):

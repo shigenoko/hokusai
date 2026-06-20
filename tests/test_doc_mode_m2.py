@@ -33,7 +33,7 @@ def test_dispatch_claude_code(monkeypatch):
 def test_dispatch_gemini(monkeypatch):
     class FakeGemini:
         def __init__(self, *a, **k):
-            pass
+            pass  # テスト用スタブ: 初期化不要
 
         def generate(self, prompt):
             return "gemini-text"
@@ -45,7 +45,7 @@ def test_dispatch_gemini(monkeypatch):
 def test_dispatch_codex_dict_is_coerced(monkeypatch):
     class FakeCodex:
         def __init__(self, *a, **k):
-            pass
+            pass  # テスト用スタブ: 初期化不要
 
         def review_document(self, document, review_prompt):
             return {"summary": "codex-review"}

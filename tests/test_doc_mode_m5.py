@@ -43,14 +43,14 @@ def test_rounds_defaults_from_config_when_arg_none():
 
 
 def _args(**kw):
-    base = dict(
-        doc_subcommand="start",
-        type="requirements",
-        topic="DOM指摘",
-        feature_page="",
-        max_rounds=1,
-        mode="auto",
-    )
+    base = {
+        "doc_subcommand": "start",
+        "type": "requirements",
+        "topic": "DOM指摘",
+        "feature_page": "",
+        "max_rounds": 1,
+        "mode": "auto",
+    }
     base.update(kw)
     return SimpleNamespace(**base)
 

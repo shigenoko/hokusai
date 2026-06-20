@@ -2024,7 +2024,12 @@ def _load_baseline_fixtures(path: str) -> list:
     """
     import json
 
-    with open(path, encoding="utf-8") as f:
+    # 構築されたパスをファイルアクセス前に検証する（path traversal 防止 / SonarQube）。
+    resolved = Path(path).expanduser().resolve()
+    if not resolved.is_file():
+        raise ValueError(f"baseline ファイルが存在しません: {path!r}")
+
+    with open(resolved, encoding="utf-8") as f:
         data = json.load(f)
     if isinstance(data, dict) and isinstance(data.get("fixtures"), list):
         return data["fixtures"]

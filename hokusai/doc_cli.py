@@ -157,6 +157,34 @@ def run_doc_workflow(
     return app.invoke(state)
 
 
+def _resolve_max_rounds(args, doc_cfg) -> int:
+    """--max-rounds 未指定時は doc_orchestration.rounds を既定反映する。"""
+    max_rounds = getattr(args, "max_rounds", None)
+    if max_rounds is not None:
+        return max_rounds
+    return getattr(doc_cfg, "rounds", 1) if doc_cfg is not None else 1
+
+
+def _emit_doc_output(state: DocWorkflowState, template_ok: bool) -> bool:
+    """確定稿を出力する。成功なら True、DocOutputError なら False。"""
+    try:
+        if _output_sink is not None:
+            # 明示的に差し替えられたシンクを最優先（NG 判定は呼び出し側責務）
+            _output_sink(state)
+        elif state.get("feature_page_id") and template_ok:
+            # --feature-page 指定 かつ 型OK のときのみ実 Notion 出力。
+            # 型NG の不完全な成果物を Notion に残さない安全弁（HITL/型準拠）。
+            notion_output_sink(state)
+        else:
+            print(render_doc_output(state))
+            if state.get("feature_page_id") and not template_ok:
+                print("\n（型NG のため Notion 出力をスキップしました）")
+    except DocOutputError as exc:
+        print(f"出力に失敗しました: {exc}")
+        return False
+    return True
+
+
 def handle_doc(args) -> int:
     """`hokusai doc ...` のエントリ。終了コードを返す。"""
     if getattr(args, "doc_subcommand", None) != "start":
@@ -175,17 +203,13 @@ def handle_doc(args) -> int:
         )
         return 1
 
-    max_rounds = getattr(args, "max_rounds", None)
-    if max_rounds is None:
-        max_rounds = getattr(doc_cfg, "rounds", 1) if doc_cfg is not None else 1
-
     try:
         state = run_doc_workflow(
             doc_type=args.type,
             topic=args.topic,
             feature_page_id=getattr(args, "feature_page", "") or "",
             run_mode=getattr(args, "mode", "auto") or "auto",
-            max_rounds=max_rounds,
+            max_rounds=_resolve_max_rounds(args, doc_cfg),
         )
     except Exception as exc:  # noqa: BLE001 - CLI 境界でユーザに要約表示する
         logger.warning("doc-mode 実行に失敗: %s", exc)
@@ -193,21 +217,7 @@ def handle_doc(args) -> int:
         return 1
 
     template_ok = bool((state.get("template_check") or {}).get("ok"))
-
-    try:
-        if _output_sink is not None:
-            # 明示的に差し替えられたシンクを最優先（NG 判定は呼び出し側責務）
-            _output_sink(state)
-        elif state.get("feature_page_id") and template_ok:
-            # --feature-page 指定 かつ 型OK のときのみ実 Notion 出力。
-            # 型NG の不完全な成果物を Notion に残さない安全弁（HITL/型準拠）。
-            notion_output_sink(state)
-        else:
-            print(render_doc_output(state))
-            if state.get("feature_page_id") and not template_ok:
-                print("\n（型NG のため Notion 出力をスキップしました）")
-    except DocOutputError as exc:
-        print(f"出力に失敗しました: {exc}")
+    if not _emit_doc_output(state, template_ok):
         return 1
 
     print()

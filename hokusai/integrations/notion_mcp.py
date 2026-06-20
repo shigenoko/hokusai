@@ -310,8 +310,8 @@ mcp__notion__notion-search ツールを使って "test" で検索し、
             )
             return None
 
-        except Exception as e:
-            logger.error(f"Notion 子ページ作成に失敗: {e}")
+        except Exception:
+            logger.exception("Notion 子ページ作成に失敗")
             raise
 
     def replace_content_block(self, page_url: str, old_str: str, new_str: str) -> bool:
