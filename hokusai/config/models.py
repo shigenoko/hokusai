@@ -61,6 +61,32 @@ class CrossReviewConfig:
     max_correction_rounds: int = 2
 
 
+@dataclass
+class DocOrchestrationConfig:
+    """Phase 0 doc-mode（Multi-LLM ドキュメント・オーケストレーション）設定
+
+    上流の要件定義書 / 設計書を、役割（ideator / drafter / reviewer / finalizer）
+    ごとに provider を割り当てて生成・チェックする doc-mode の設定。
+    既存 ``CrossReviewConfig`` と同じ設計哲学（provider 可変・設定で上書き）。
+
+    M1 では ``drafter`` / ``reviewer`` / ``finalizer`` の3役割のみを使用する。
+    """
+
+    enabled: bool = False
+    rounds: int = 1
+    # role 名 -> {"provider": "<claude_code|codex|gemini>"}
+    roles: dict = field(
+        default_factory=lambda: {
+            "ideator": {"provider": "codex"},
+            "drafter": {"provider": "claude_code"},
+            "reviewer": {"provider": "codex"},
+            "finalizer": {"provider": "gemini"},
+        }
+    )
+    # dispatch に渡す model 名（空なら provider 既定に委ねる）
+    model: str = ""
+
+
 # Slack 通知のサポートイベント名
 SLACK_NOTIFICATION_EVENTS = (
     "workflow_started",
@@ -466,6 +492,11 @@ class WorkflowConfig:
 
     # クロスLLMレビュー設定
     cross_review: CrossReviewConfig = field(default_factory=CrossReviewConfig)
+
+    # Phase 0 doc-mode（Multi-LLM ドキュメント・オーケストレーション）設定
+    doc_orchestration: DocOrchestrationConfig = field(
+        default_factory=DocOrchestrationConfig
+    )
 
     # 通知設定（Slack 等）
     notifications: NotificationConfig = field(default_factory=NotificationConfig)
