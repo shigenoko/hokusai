@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .loaders import (
     _parse_cross_review_config,
+    _parse_doc_orchestration_config,
     _parse_figma_config,
     _parse_git_hosting_config,
     _parse_llm_gateway_config,
@@ -166,6 +167,9 @@ def create_config_from_env_and_file(
     # cross_review をパース
     cross_review = _parse_cross_review_config(config_dict)
 
+    # doc_orchestration をパース（Phase 0 doc-mode）
+    doc_orchestration = _parse_doc_orchestration_config(config_dict)
+
     # repositories をパース（複数リポジトリ対応）
     default_base_branch = config_dict.get("base_branch", "main")
     repositories = _parse_repositories(config_dict, default_base_branch)
@@ -194,6 +198,7 @@ def create_config_from_env_and_file(
         "review_checklist",
         "devin_check",
         "cross_review",
+        "doc_orchestration",
         "repositories",
         "notifications",
         "notion_dashboard",
@@ -211,6 +216,7 @@ def create_config_from_env_and_file(
         review_checklist=review_checklist,
         devin_check=devin_check,
         cross_review=cross_review,
+        doc_orchestration=doc_orchestration,
         repositories=repositories,
         notifications=notifications,
         notion_dashboard=notion_dashboard,

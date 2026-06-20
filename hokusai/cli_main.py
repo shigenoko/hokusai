@@ -536,6 +536,52 @@ def _build_parser():
         ),
     )
 
+    # doc コマンド: doc-mode（要件/設計の Multi-LLM 生成）。Issue #176 / Phase 0
+    doc_parser = subparsers.add_parser(
+        "doc",
+        help="doc-mode（要件定義/設計書の Multi-LLM 生成）",
+        parents=[shared_options],
+    )
+    doc_subparsers = doc_parser.add_subparsers(
+        dest="doc_subcommand",
+        help="doc サブコマンド",
+    )
+    doc_start_parser = doc_subparsers.add_parser(
+        "start",
+        help="doc-mode を開始する",
+        parents=[shared_options],
+    )
+    doc_start_parser.add_argument(
+        "--type",
+        required=True,
+        choices=["requirements", "design"],
+        help="生成する文書種別",
+    )
+    doc_start_parser.add_argument(
+        "--topic",
+        required=True,
+        help="トピック/ブリーフ",
+    )
+    doc_start_parser.add_argument(
+        "--feature-page",
+        dest="feature_page",
+        default="",
+        help="出力先 Notion 機能ページ ID（任意）",
+    )
+    doc_start_parser.add_argument(
+        "--max-rounds",
+        dest="max_rounds",
+        type=int,
+        default=None,
+        help="crosscheck の周回数（未指定時は doc_orchestration.rounds、既定 1）",
+    )
+    doc_start_parser.add_argument(
+        "--mode",
+        choices=["step", "auto"],
+        default="auto",
+        help="実行モード（既定 auto）",
+    )
+
     # audit コマンド: SQLite `audit_logs` を CLI から覗く（F3 / PR #123）
     audit_parser = subparsers.add_parser(
         "audit",
@@ -1280,6 +1326,12 @@ def main():
     if args.command == "llm-gateway-setup":
         sys.exit(_handle_llm_gateway_setup(args, config))
 
+    # doc コマンド: doc-mode（Phase 0 / Issue #176）
+    if args.command == "doc":
+        from .doc_cli import handle_doc
+
+        sys.exit(handle_doc(args))
+
     # 環境設定チェック（start/continueコマンドの場合）
     if args.command in ("start", "continue"):
         env_warnings = check_environment()
@@ -1972,7 +2024,12 @@ def _load_baseline_fixtures(path: str) -> list:
     """
     import json
 
-    with open(path, encoding="utf-8") as f:
+    # 構築されたパスをファイルアクセス前に検証する（path traversal 防止 / SonarQube）。
+    resolved = Path(path).expanduser().resolve()
+    if not resolved.is_file():
+        raise ValueError(f"baseline ファイルが存在しません: {path!r}")
+
+    with open(resolved, encoding="utf-8") as f:
         data = json.load(f)
     if isinstance(data, dict) and isinstance(data.get("fixtures"), list):
         return data["fixtures"]
