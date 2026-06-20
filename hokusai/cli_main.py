@@ -536,6 +536,50 @@ def _build_parser():
         ),
     )
 
+    # doc コマンド: doc-mode（要件/設計の Multi-LLM 生成）。Issue #176 / Phase 0
+    doc_parser = subparsers.add_parser(
+        "doc",
+        help="doc-mode（要件定義/設計書の Multi-LLM 生成）",
+    )
+    doc_subparsers = doc_parser.add_subparsers(
+        dest="doc_subcommand",
+        help="doc サブコマンド",
+    )
+    doc_start_parser = doc_subparsers.add_parser(
+        "start",
+        help="doc-mode を開始する",
+    )
+    doc_start_parser.add_argument(
+        "--type",
+        required=True,
+        choices=["requirements", "design"],
+        help="生成する文書種別",
+    )
+    doc_start_parser.add_argument(
+        "--topic",
+        required=True,
+        help="トピック/ブリーフ",
+    )
+    doc_start_parser.add_argument(
+        "--feature-page",
+        dest="feature_page",
+        default="",
+        help="出力先 Notion 機能ページ ID（任意）",
+    )
+    doc_start_parser.add_argument(
+        "--max-rounds",
+        dest="max_rounds",
+        type=int,
+        default=1,
+        help="crosscheck の周回数（既定 1）",
+    )
+    doc_start_parser.add_argument(
+        "--mode",
+        choices=["step", "auto"],
+        default="auto",
+        help="実行モード（既定 auto）",
+    )
+
     # audit コマンド: SQLite `audit_logs` を CLI から覗く（F3 / PR #123）
     audit_parser = subparsers.add_parser(
         "audit",
@@ -1279,6 +1323,12 @@ def main():
     # （F2 / PR #125）。
     if args.command == "llm-gateway-setup":
         sys.exit(_handle_llm_gateway_setup(args, config))
+
+    # doc コマンド: doc-mode（Phase 0 / Issue #176）
+    if args.command == "doc":
+        from .doc_cli import handle_doc
+
+        sys.exit(handle_doc(args))
 
     # 環境設定チェック（start/continueコマンドの場合）
     if args.command in ("start", "continue"):
