@@ -158,6 +158,42 @@ def check_template(doc_type: str, text: str) -> dict:
     return {"ok": not missing, "missing": missing}
 
 
+# 壁打ちルールブック（M3）。出力ゲートではなく「方法のプロンプト」として注入する。
+IDEATION_RULEBOOK = (
+    "以下の技法を用いて発散的に検討せよ（これは出力ゲートではなく方法である）:\n"
+    "- 代替案を3つ以上挙げる\n"
+    "- 各案に steelman（最強の反論）を付す\n"
+    "- 暗黙の前提を可視化する\n"
+    "- red-team: リスク・破綻シナリオを先回りする\n"
+    "- SCAMPER で発想を広げる\n"
+)
+
+
+def _ideation_prompt(state: DocWorkflowState) -> str:
+    return (
+        f"トピック: {state['topic']}\n\n"
+        f"{IDEATION_RULEBOOK}\n"
+        f"上記に沿って、{state['doc_type']} の検討材料を発散的に出力せよ。"
+    )
+
+
+def phase0a_ideation_node(state: DocWorkflowState) -> DocWorkflowState:
+    """ideator が壁打ちルールブックに沿って発散検討を行う（軽い統制）。"""
+    provider, model = _role_provider("ideator")
+    state["ideation_result"] = invoke_llm(
+        provider,
+        model,
+        _ideation_prompt(state),
+        purpose="ideation",
+        workflow_id=state["workflow_id"],
+    )
+    state["current_step"] = "ideation"
+    add_audit_log(
+        state, PHASE, "phase0a_ideation", "completed", {"provider": provider}
+    )
+    return state
+
+
 def _draft_prompt(state: DocWorkflowState) -> str:
     return (
         f"次のトピックについて、{state['doc_type']} を型に沿って作成してください。\n"
@@ -233,12 +269,42 @@ def phase0d_finalize_node(state: DocWorkflowState) -> DocWorkflowState:
     )
     state["final_doc"] = final
     state["template_check"] = check_template(state["doc_type"], final)
+    state["finalize_attempts"] = state.get("finalize_attempts", 0) + 1
     state["current_step"] = "finalize"
     add_audit_log(
         state,
         PHASE,
         "phase0d_finalize",
         "completed",
-        {"provider": provider, "template_ok": state["template_check"]["ok"]},
+        {
+            "provider": provider,
+            "template_ok": state["template_check"]["ok"],
+            "finalize_attempts": state["finalize_attempts"],
+        },
     )
     return state
+
+
+# === ルーティング（M4: rounds ループ / 型NG→draft 戻し、上限つき）===
+
+# 条件分岐の戻り値。グラフ側のマッピングキーと一致させる。
+ROUTE_CROSSCHECK = "phase0c_crosscheck"
+ROUTE_FINALIZE = "phase0d_finalize"
+ROUTE_DRAFT = "phase0b_draft"
+ROUTE_END = "END"
+
+
+def should_continue_crosscheck(state: DocWorkflowState) -> str:
+    """crosscheck を ``max_rounds`` 回まで繰り返し、それ以外は finalize へ。"""
+    if state.get("round", 0) < state.get("max_rounds", 1):
+        return ROUTE_CROSSCHECK
+    return ROUTE_FINALIZE
+
+
+def should_fix_template(state: DocWorkflowState) -> str:
+    """型NG かつ上限未満なら draft に戻して再生成、そうでなければ終了。"""
+    check = state.get("template_check") or {}
+    attempts = state.get("finalize_attempts", 0)
+    if not check.get("ok", True) and attempts < state.get("max_finalize_rounds", 2):
+        return ROUTE_DRAFT
+    return ROUTE_END

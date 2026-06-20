@@ -65,13 +65,18 @@ def test_one_pass_with_injected_backend(monkeypatch):
     assert result["template_check"]["ok"] is True
     assert result["template_check"]["missing"] == []
 
-    # Gateway を draft/review/finalize の順で、phase=0 で経由している
-    assert [p for p, _ in dispatched] == ["draft", "review", "finalize"]
+    # Gateway を ideation/draft/review/finalize の順で、phase=0 で経由している
+    assert [p for p, _ in dispatched] == ["ideation", "draft", "review", "finalize"]
     assert all(phase == 0 for _, phase in dispatched)
 
-    # 監査ログが3ノード分積まれている
+    # 監査ログが各ノード分積まれている
     actions = [e["action"] for e in result["audit_log"]]
-    assert actions == ["phase0b_draft", "phase0c_crosscheck", "phase0d_finalize"]
+    assert actions == [
+        "phase0a_ideation",
+        "phase0b_draft",
+        "phase0c_crosscheck",
+        "phase0d_finalize",
+    ]
 
 
 def test_template_check_detects_missing_sections():

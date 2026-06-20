@@ -10,25 +10,52 @@ Issue #176 / 設計書「Phase 0 doc-mode ワークフロー」§3・§6 に対�
 from langgraph.graph import END, StateGraph
 
 from .nodes.phase0_doc import (
+    phase0a_ideation_node,
     phase0b_draft_node,
     phase0c_crosscheck_node,
     phase0d_finalize_node,
+    should_continue_crosscheck,
+    should_fix_template,
 )
 from .state import DocWorkflowState
 
 
 def create_doc_workflow() -> StateGraph:
-    """doc-mode の StateGraph を構築する（未コンパイル）。"""
+    """doc-mode の StateGraph を構築する（未コンパイル）。
+
+    M3+M4: ideation → draft → crosscheck（rounds ループ）→ finalize
+    （型NG なら draft へ戻す、上限つき）。
+    """
     workflow = StateGraph(DocWorkflowState)
 
+    workflow.add_node("phase0a_ideation", phase0a_ideation_node)
     workflow.add_node("phase0b_draft", phase0b_draft_node)
     workflow.add_node("phase0c_crosscheck", phase0c_crosscheck_node)
     workflow.add_node("phase0d_finalize", phase0d_finalize_node)
 
-    workflow.set_entry_point("phase0b_draft")
+    workflow.set_entry_point("phase0a_ideation")
+    workflow.add_edge("phase0a_ideation", "phase0b_draft")
     workflow.add_edge("phase0b_draft", "phase0c_crosscheck")
-    workflow.add_edge("phase0c_crosscheck", "phase0d_finalize")
-    workflow.add_edge("phase0d_finalize", END)
+
+    # crosscheck: max_rounds 回まで繰り返してから finalize へ
+    workflow.add_conditional_edges(
+        "phase0c_crosscheck",
+        should_continue_crosscheck,
+        {
+            "phase0c_crosscheck": "phase0c_crosscheck",
+            "phase0d_finalize": "phase0d_finalize",
+        },
+    )
+
+    # finalize: 型NG なら draft に戻す（上限到達で END）
+    workflow.add_conditional_edges(
+        "phase0d_finalize",
+        should_fix_template,
+        {
+            "phase0b_draft": "phase0b_draft",
+            "END": END,
+        },
+    )
 
     return workflow
 

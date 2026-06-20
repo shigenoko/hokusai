@@ -909,6 +909,8 @@ class DocWorkflowState(TypedDict):
     review_notes: list  # round ごとの指摘（list[str]）
     round: int
     max_rounds: int
+    finalize_attempts: int  # 型NG で draft に戻った回数
+    max_finalize_rounds: int  # 型NG ループの上限（無限ループ防止）
     template_check: dict  # {"ok": bool, "missing": list[str]}
     final_doc: str
     approved: bool
@@ -925,6 +927,7 @@ def create_doc_workflow_state(
     feature_page_id: str = "",
     run_mode: str = "auto",
     max_rounds: int = 1,
+    max_finalize_rounds: int = 2,
 ) -> DocWorkflowState:
     """doc-mode 用の初期状態を生成する。"""
     now = datetime.now().isoformat()
@@ -940,6 +943,8 @@ def create_doc_workflow_state(
         review_notes=[],
         round=0,
         max_rounds=max_rounds,
+        finalize_attempts=0,
+        max_finalize_rounds=max_finalize_rounds,
         template_check={},
         final_doc="",
         approved=False,
