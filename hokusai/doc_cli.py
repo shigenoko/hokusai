@@ -26,10 +26,73 @@ OutputSink = Callable[[DocWorkflowState], None]
 _output_sink: Optional[OutputSink] = None
 
 
+class DocOutputError(RuntimeError):
+    """doc-mode の出力（Notion 書き込み等）に失敗したことを表す。"""
+
+
+# Notion クライアント factory（テストで差し替え可能）
+_notion_client_factory: Optional[Callable[[], object]] = None
+
+
+def _default_notion_client():
+    from .integrations.notion_mcp import NotionMCPClient
+
+    return NotionMCPClient()
+
+
+def set_notion_client_factory(fn: Optional[Callable[[], object]]) -> None:
+    """Notion クライアント factory を差し替える（None で既定に戻す）。"""
+    global _notion_client_factory
+    _notion_client_factory = fn
+
+
 def set_output_sink(fn: Optional[OutputSink]) -> None:
-    """確定稿の出力先を差し替える（None で stdout に戻す）。"""
+    """確定稿の出力先を差し替える（None で既定動作に戻す）。"""
     global _output_sink
     _output_sink = fn
+
+
+def _doc_title(state: DocWorkflowState) -> str:
+    """IA の命名規約に沿った子ページタイトルを返す。"""
+    if state.get("doc_type") == "design":
+        return f"【設計書】{state.get('topic')}"
+    return f"要件整理：{state.get('topic')}"
+
+
+def _notion_body(state: DocWorkflowState) -> str:
+    """Notion 子ページ本文（メタ callout + final_doc）を組み立てる。"""
+    tc = state.get("template_check") or {}
+    status = "OK" if tc.get("ok") else "NG"
+    return "\n".join(
+        [
+            f"> 📐 doc-mode 生成（workflow: {state.get('workflow_id')} / 型準拠: {status}）",
+            f"> 承認: {'済' if state.get('approved') else '未（HITL 承認待ち）'}",
+            "",
+            state.get("final_doc", ""),
+        ]
+    )
+
+
+def notion_output_sink(state: DocWorkflowState) -> None:
+    """確定稿を IA に従って機能ページ配下の子ページとして保存する。
+
+    ``feature_page_id`` 未指定なら stdout にフォールバックする（graceful）。
+    保存失敗時は ``DocOutputError`` を送出する。
+    """
+    feature = state.get("feature_page_id")
+    if not feature:
+        print(render_doc_output(state))
+        print("\n（feature-page 未指定のため Notion 出力をスキップしました）")
+        return
+
+    factory = _notion_client_factory or _default_notion_client
+    client = factory()
+    url = client.create_subpage(feature, _doc_title(state), _notion_body(state))
+    if url is None:
+        raise DocOutputError(
+            f"Notion への出力に失敗しました（feature_page={feature}）"
+        )
+    print(f"→ Notion に確定稿を保存しました: {url or '(URL 不明)'}")
 
 
 def render_doc_output(state: DocWorkflowState) -> str:
@@ -100,10 +163,18 @@ def handle_doc(args) -> int:
         print(f"doc-mode 実行に失敗しました: {exc}")
         return 1
 
-    if _output_sink is not None:
-        _output_sink(state)
-    else:
-        print(render_doc_output(state))
+    try:
+        if _output_sink is not None:
+            # 明示的に差し替えられたシンクを最優先
+            _output_sink(state)
+        elif state.get("feature_page_id"):
+            # --feature-page 指定時は実 Notion 出力（機能ページ配下に子ページ作成）
+            notion_output_sink(state)
+        else:
+            print(render_doc_output(state))
+    except DocOutputError as exc:
+        print(f"出力に失敗しました: {exc}")
+        return 1
 
     print()
     print("→ この確定稿は Issue 化のインプット（運用フロー）として利用できます。")
