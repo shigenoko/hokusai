@@ -540,6 +540,7 @@ def _build_parser():
     doc_parser = subparsers.add_parser(
         "doc",
         help="doc-mode（要件定義/設計書の Multi-LLM 生成）",
+        parents=[shared_options],
     )
     doc_subparsers = doc_parser.add_subparsers(
         dest="doc_subcommand",
@@ -548,6 +549,7 @@ def _build_parser():
     doc_start_parser = doc_subparsers.add_parser(
         "start",
         help="doc-mode を開始する",
+        parents=[shared_options],
     )
     doc_start_parser.add_argument(
         "--type",
@@ -570,8 +572,8 @@ def _build_parser():
         "--max-rounds",
         dest="max_rounds",
         type=int,
-        default=1,
-        help="crosscheck の周回数（既定 1）",
+        default=None,
+        help="crosscheck の周回数（未指定時は doc_orchestration.rounds、既定 1）",
     )
     doc_start_parser.add_argument(
         "--mode",

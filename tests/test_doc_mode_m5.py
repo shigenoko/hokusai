@@ -6,6 +6,7 @@ import pytest
 
 from hokusai import doc_cli
 from hokusai.config import WorkflowConfig, reset_config, set_config
+from hokusai.config.models import DocOrchestrationConfig
 from hokusai.nodes import phase0_doc
 
 OK_TEXT = "背景 業務要件 スコープ 受入基準 制約 参照"
@@ -14,13 +15,31 @@ OK_TEXT = "背景 業務要件 スコープ 受入基準 制約 参照"
 @pytest.fixture(autouse=True)
 def _config(monkeypatch):
     reset_config()
-    set_config(WorkflowConfig())
+    set_config(WorkflowConfig(doc_orchestration=DocOrchestrationConfig(enabled=True)))
     monkeypatch.setattr(phase0_doc, "dispatch_via_gateway", lambda **k: None)
     phase0_doc.set_generation_backend(lambda p, m, prompt: OK_TEXT)
     yield
     reset_config()
     phase0_doc.set_generation_backend(None)
     doc_cli.set_output_sink(None)
+
+
+def test_handle_doc_disabled_returns_one():
+    set_config(WorkflowConfig(doc_orchestration=DocOrchestrationConfig(enabled=False)))
+    assert doc_cli.handle_doc(_args()) == 1
+
+
+def test_rounds_defaults_from_config_when_arg_none():
+    set_config(
+        WorkflowConfig(
+            doc_orchestration=DocOrchestrationConfig(enabled=True, rounds=3)
+        )
+    )
+    captured = {}
+    doc_cli.set_output_sink(lambda state: captured.update(state))
+    rc = doc_cli.handle_doc(_args(max_rounds=None))
+    assert rc == 0
+    assert captured["round"] == 3  # config.rounds が max_rounds に反映
 
 
 def _args(**kw):

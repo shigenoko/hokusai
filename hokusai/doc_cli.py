@@ -15,9 +15,11 @@ from __future__ import annotations
 import uuid
 from typing import Callable, Optional
 
+from .config import get_config
 from .doc_graph import create_compiled_doc_workflow
 from .logging_config import get_logger
 from .state import DocWorkflowState, create_doc_workflow_state
+from .utils.skip_notion import is_skip_notion
 
 logger = get_logger("doc_cli")
 
@@ -85,9 +87,23 @@ def notion_output_sink(state: DocWorkflowState) -> None:
         print("\n（feature-page 未指定のため Notion 出力をスキップしました）")
         return
 
+    # HOKUSAI_SKIP_NOTION 等が有効なら既存ヘルパーと同様に skip して stdout へ
+    if is_skip_notion():
+        print(render_doc_output(state))
+        print("\n（Notion skip 設定が有効のため Notion 出力をスキップしました）")
+        return
+
     factory = _notion_client_factory or _default_notion_client
-    client = factory()
-    url = client.create_subpage(feature, _doc_title(state), _notion_body(state))
+    try:
+        client = factory()
+        url = client.create_subpage(feature, _doc_title(state), _notion_body(state))
+    except DocOutputError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - CLI 境界で Notion/Claude 例外を要約
+        raise DocOutputError(
+            f"Notion への出力に失敗しました（feature_page={feature}）: {exc}"
+        ) from exc
+
     if url is None:
         raise DocOutputError(
             f"Notion への出力に失敗しました（feature_page={feature}）"
@@ -150,28 +166,46 @@ def handle_doc(args) -> int:
         )
         return 1
 
+    # doc_orchestration の enabled ガードと rounds→max_rounds 既定反映
+    doc_cfg = getattr(get_config(), "doc_orchestration", None)
+    if doc_cfg is not None and not getattr(doc_cfg, "enabled", False):
+        print(
+            "doc-mode は無効です。config の doc_orchestration.enabled: true "
+            "で有効化してください。"
+        )
+        return 1
+
+    max_rounds = getattr(args, "max_rounds", None)
+    if max_rounds is None:
+        max_rounds = getattr(doc_cfg, "rounds", 1) if doc_cfg is not None else 1
+
     try:
         state = run_doc_workflow(
             doc_type=args.type,
             topic=args.topic,
             feature_page_id=getattr(args, "feature_page", "") or "",
             run_mode=getattr(args, "mode", "auto") or "auto",
-            max_rounds=getattr(args, "max_rounds", 1) or 1,
+            max_rounds=max_rounds,
         )
     except Exception as exc:  # noqa: BLE001 - CLI 境界でユーザに要約表示する
         logger.warning("doc-mode 実行に失敗: %s", exc)
         print(f"doc-mode 実行に失敗しました: {exc}")
         return 1
 
+    template_ok = bool((state.get("template_check") or {}).get("ok"))
+
     try:
         if _output_sink is not None:
-            # 明示的に差し替えられたシンクを最優先
+            # 明示的に差し替えられたシンクを最優先（NG 判定は呼び出し側責務）
             _output_sink(state)
-        elif state.get("feature_page_id"):
-            # --feature-page 指定時は実 Notion 出力（機能ページ配下に子ページ作成）
+        elif state.get("feature_page_id") and template_ok:
+            # --feature-page 指定 かつ 型OK のときのみ実 Notion 出力。
+            # 型NG の不完全な成果物を Notion に残さない安全弁（HITL/型準拠）。
             notion_output_sink(state)
         else:
             print(render_doc_output(state))
+            if state.get("feature_page_id") and not template_ok:
+                print("\n（型NG のため Notion 出力をスキップしました）")
     except DocOutputError as exc:
         print(f"出力に失敗しました: {exc}")
         return 1
@@ -179,4 +213,4 @@ def handle_doc(args) -> int:
     print()
     print("→ この確定稿は Issue 化のインプット（運用フロー）として利用できます。")
 
-    return 0 if (state.get("template_check") or {}).get("ok") else 2
+    return 0 if template_ok else 2

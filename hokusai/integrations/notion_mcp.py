@@ -286,15 +286,28 @@ mcp__notion__notion-search ツールを使って "test" で検索し、
                 prompt, timeout=180, allow_mcp_tools=True
             )
 
-            if "作成完了" in result or "created" in result.lower():
-                import re
+            import re
 
-                match = re.search(r"https?://[^\s)\"']+", result)
-                url = match.group(0) if match else ""
+            lowered = result.lower()
+            # 失敗キーワードを先に判定（"not created" 等で success 誤判定しないため）
+            failure_markers_ja = ("作成失敗", "失敗")
+            failure_markers_en = ("error", "failed", "not created")
+            if any(m in result for m in failure_markers_ja) or any(
+                m in lowered for m in failure_markers_en
+            ):
+                logger.warning(f"Notion 子ページ作成失敗: {result[:300]}")
+                return None
+
+            # 成功扱いには URL 抽出を必須とする（曖昧な出力を成功にしない）
+            match = re.search(r"https?://[^\s)\"']+", result)
+            if match and ("作成完了" in result or "created" in lowered):
+                url = match.group(0)
                 logger.info(f"Notion 子ページ作成成功（親: {parent_id}）: {url}")
                 return url
 
-            logger.warning(f"Notion 子ページ作成失敗: {result[:300]}")
+            logger.warning(
+                f"Notion 子ページ作成の結果が不明確（失敗扱い）: {result[:300]}"
+            )
             return None
 
         except Exception as e:
