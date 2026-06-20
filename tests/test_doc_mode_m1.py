@@ -80,9 +80,14 @@ def test_template_check_detects_missing_sections():
     assert "スコープ" in result["missing"]
 
 
-def test_invoke_llm_requires_backend(monkeypatch):
-    """生成バックエンド未束縛なら NotImplementedError（沈黙の捏造を防ぐ）。"""
+def test_invoke_llm_falls_back_to_default_backend(monkeypatch):
+    """バックエンド未注入なら default_generation_backend にフォールバックする（M2）。"""
     monkeypatch.setattr(phase0_doc, "dispatch_via_gateway", lambda **k: None)
+    monkeypatch.setattr(
+        phase0_doc,
+        "default_generation_backend",
+        lambda provider, model, prompt: f"DEFAULT:{provider}",
+    )
     phase0_doc.set_generation_backend(None)
-    with pytest.raises(NotImplementedError):
-        phase0_doc.invoke_llm("claude_code", "", "prompt", purpose="draft")
+    out = phase0_doc.invoke_llm("claude_code", "", "prompt", purpose="draft")
+    assert out == "DEFAULT:claude_code"

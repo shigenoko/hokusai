@@ -90,13 +90,65 @@ def invoke_llm(
         workflow_id=workflow_id,
         phase=PHASE,
     )
-    backend = _generation_backend
-    if backend is None:
-        raise NotImplementedError(
-            "doc-mode の生成バックエンドが未束縛です（M1 は配線のみ）。"
-            "set_generation_backend(fn) で注入するか、M2 で provider client を束ねてください。"
-        )
+    backend = _generation_backend or default_generation_backend
     return backend(provider, model, prompt)
+
+
+class DocModeProviderError(RuntimeError):
+    """provider client の実行に失敗したことを表す（CLI 未導入等）。"""
+
+
+def _coerce_text(value: object) -> str:
+    """provider client の戻り値（str / dict）をテキストに正規化する。"""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        for key in ("final_doc", "document", "summary", "review", "content", "text"):
+            if value.get(key):
+                return str(value[key])
+        import json
+
+        return json.dumps(value, ensure_ascii=False)
+    return str(value)
+
+
+def default_generation_backend(provider: str, model: str, prompt: str) -> str:
+    """M2: role→provider を実 client に束ねた既定の生成バックエンド。
+
+    provider ごとに能力が異なるため、最も自然な生成系メソッドへ振り分ける:
+    - ``claude_code`` → ``ClaudeCodeClient.execute_prompt``
+    - ``gemini``      → ``GeminiClient.generate``
+    - ``codex``       → ``CodexClient.review_document``（レビュー特化のため流用）
+
+    provider CLI 未導入等で実行できない場合は ``DocModeProviderError`` を送出し、
+    どの provider で失敗したかを明示する（graceful degrade: 例外を握り潰さず
+    呼び出し側で扱えるようにする）。
+    """
+    try:
+        if provider == "claude_code":
+            from ..integrations.claude_code import ClaudeCodeClient
+
+            return ClaudeCodeClient().execute_prompt(prompt)
+        if provider == "gemini":
+            from ..integrations.gemini import GeminiClient
+
+            client = GeminiClient(model=model) if model else GeminiClient()
+            return client.generate(prompt)
+        if provider == "codex":
+            from ..integrations.codex import CodexClient
+
+            client = CodexClient(model=model) if model else CodexClient()
+            result = client.review_document(
+                document=prompt,
+                review_prompt="次の文書をレビューし、修正案を日本語で挙げてください。",
+            )
+            return _coerce_text(result)
+    except (FileNotFoundError, RuntimeError, TimeoutError) as exc:
+        raise DocModeProviderError(
+            f"provider '{provider}' の実行に失敗しました（CLI 未導入の可能性）: {exc}"
+        ) from exc
+
+    raise ValueError(f"未知の provider: {provider}")
 
 
 def check_template(doc_type: str, text: str) -> dict:
