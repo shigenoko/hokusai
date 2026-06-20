@@ -579,7 +579,22 @@ def _build_parser():
         "--mode",
         choices=["step", "auto"],
         default="auto",
-        help="実行モード（既定 auto）",
+        help="実行モード（既定 auto）。step は HITL 承認ゲートで停止する",
+    )
+
+    # doc continue: HITL 承認で doc-mode（step）を再開
+    doc_continue_parser = doc_subparsers.add_parser(
+        "continue",
+        help="HITL 承認で doc-mode（step）を再開する",
+        parents=[shared_options],
+    )
+    doc_continue_parser.add_argument("workflow_id", help="再開する doc workflow ID")
+    doc_continue_group = doc_continue_parser.add_mutually_exclusive_group()
+    doc_continue_group.add_argument(
+        "--approve", action="store_true", help="確定稿を承認する（既定）"
+    )
+    doc_continue_group.add_argument(
+        "--reject", action="store_true", help="確定稿を却下する"
     )
 
     # audit コマンド: SQLite `audit_logs` を CLI から覗く（F3 / PR #123）

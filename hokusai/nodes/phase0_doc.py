@@ -17,6 +17,8 @@ from __future__ import annotations
 
 from typing import Callable, Optional
 
+from langgraph.types import interrupt
+
 from ..config import get_config
 from ..llm_gateway import dispatch_via_gateway
 from ..logging_config import get_logger
@@ -291,6 +293,7 @@ def phase0d_finalize_node(state: DocWorkflowState) -> DocWorkflowState:
 ROUTE_CROSSCHECK = "phase0c_crosscheck"
 ROUTE_FINALIZE = "phase0d_finalize"
 ROUTE_DRAFT = "phase0b_draft"
+ROUTE_HUMAN_GATE = "phase0_human_gate"
 ROUTE_END = "END"
 
 
@@ -302,9 +305,54 @@ def should_continue_crosscheck(state: DocWorkflowState) -> str:
 
 
 def should_fix_template(state: DocWorkflowState) -> str:
-    """型NG かつ上限未満なら draft に戻して再生成、そうでなければ終了。"""
+    """型NG かつ上限未満なら draft に戻して再生成。型OK なら HITL ゲートへ。
+
+    型NG のまま上限到達時は、不完全な成果物で承認を求めない安全側として
+    そのまま終了する（人間ゲートに載せない）。
+    """
     check = state.get("template_check") or {}
     attempts = state.get("finalize_attempts", 0)
     if not check.get("ok", True) and attempts < state.get("max_finalize_rounds", 2):
         return ROUTE_DRAFT
+    if check.get("ok"):
+        return ROUTE_HUMAN_GATE
     return ROUTE_END
+
+
+def _verdict_to_bool(verdict: object) -> bool:
+    """HITL の resume 値（bool / 文字列）を承認可否に正規化する。"""
+    if isinstance(verdict, bool):
+        return verdict
+    if isinstance(verdict, str):
+        return verdict.strip().lower() in {"approve", "approved", "yes", "y", "true", "ok"}
+    return bool(verdict)
+
+
+def phase0_human_gate_node(state: DocWorkflowState) -> DocWorkflowState:
+    """HITL 承認ゲート。
+
+    - ``run_mode == "step"``: ``interrupt()`` で一時停止し、``hokusai doc continue``
+      で渡される resume 値（approve/reject）を承認可否に反映する（要 checkpointer）。
+    - それ以外（auto）: ゲートを通過するだけで **自動承認はしない**（approved は
+      変更しない＝承認待ちのまま）。沈黙の確定を避ける HITL 原則。
+    """
+    if state.get("run_mode") == "step":
+        verdict = interrupt(
+            {
+                "message": "この確定稿を承認しますか？（approve / reject）",
+                "doc_type": state.get("doc_type"),
+                "template_check": state.get("template_check"),
+                "final_doc": state.get("final_doc", ""),
+            }
+        )
+        state["approved"] = _verdict_to_bool(verdict)
+
+    state["current_step"] = "human_gate"
+    add_audit_log(
+        state,
+        PHASE,
+        "phase0_human_gate",
+        "completed",
+        {"approved": state.get("approved", False), "run_mode": state.get("run_mode")},
+    )
+    return state

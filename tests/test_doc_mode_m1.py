@@ -59,13 +59,15 @@ def test_one_pass_with_injected_backend(monkeypatch):
     assert result["draft"]
     assert result["review_notes"] and len(result["review_notes"]) == 1
     assert result["final_doc"]
-    assert result["current_step"] == "finalize"
+    # 型OK 後は HITL 承認ゲートを通過して終了（auto は自動承認しない）
+    assert result["current_step"] == "human_gate"
 
     # 型準拠チェックが OK（必須セクション網羅）
     assert result["template_check"]["ok"] is True
     assert result["template_check"]["missing"] == []
 
     # Gateway を ideation/draft/review/finalize の順で、phase=0 で経由している
+    # （human_gate は LLM を呼ばないので dispatch には現れない）
     assert [p for p, _ in dispatched] == ["ideation", "draft", "review", "finalize"]
     assert all(phase == 0 for _, phase in dispatched)
 
@@ -76,6 +78,7 @@ def test_one_pass_with_injected_backend(monkeypatch):
         "phase0b_draft",
         "phase0c_crosscheck",
         "phase0d_finalize",
+        "phase0_human_gate",
     ]
 
 
