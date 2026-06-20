@@ -33,7 +33,7 @@ def _config(monkeypatch):
 
 
 def test_step_interrupts_at_human_gate():
-    wid, result, interrupted = doc_cli.start_doc_step("requirements", "T", workflow_id="wf-hitl-1")
+    _, result, interrupted = doc_cli.start_doc_step("requirements", "T", workflow_id="wf-hitl-1")
     assert interrupted is True
     # ゲート前に finalize 済み（確定稿はある）が、まだ承認されていない
     assert result.get("final_doc") == OK_TEXT
