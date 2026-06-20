@@ -190,6 +190,9 @@ def _get_doc_app():
         conn = sqlite3.connect(
             str(data_dir / "doc_checkpoint.db"), check_same_thread=False
         )
+        # 別プロセスからの `doc continue` でのロック耐性（graph.py と同じ PRAGMA）
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
         checkpointer = SqliteSaver(conn)
         checkpointer.setup()
         _doc_checkpointer = checkpointer

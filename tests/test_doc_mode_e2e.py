@@ -16,9 +16,9 @@ import shutil
 
 import pytest
 
+from hokusai import doc_cli
 from hokusai.config import WorkflowConfig, reset_config, set_config
 from hokusai.config.models import DocOrchestrationConfig
-from hokusai import doc_cli
 
 _E2E = os.environ.get("HOKUSAI_DOC_E2E") == "1"
 _PROVIDER = os.environ.get("HOKUSAI_DOC_E2E_PROVIDER", "claude_code")
@@ -47,8 +47,15 @@ def _config():
 
 
 def test_e2e_real_provider_auto_run(_config):
-    cli = _PROVIDER_CLI.get(_PROVIDER)
-    if cli is None or shutil.which(cli) is None:
+    # 未知 provider は設定ミスとして明示 fail（黙って skip しない）
+    if _PROVIDER not in _PROVIDER_CLI:
+        pytest.fail(
+            f"未知の HOKUSAI_DOC_E2E_PROVIDER='{_PROVIDER}'"
+            f"（claude_code / codex / gemini のいずれか）"
+        )
+    cli = _PROVIDER_CLI[_PROVIDER]
+    # CLI 未導入のときのみ skip
+    if shutil.which(cli) is None:
         pytest.skip(f"provider CLI '{cli}' が未導入のためスキップ")
 
     # backend 未注入 → default_generation_backend（実 provider client）が走る
