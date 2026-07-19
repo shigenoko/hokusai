@@ -5,9 +5,9 @@ doc-mode グラフ（ideation→draft→crosscheck→finalize）を1周実行し
 出力する。出力は既定で stdout、``set_output_sink`` で Notion 出力等へ差し替え可能。
 確定稿は次の Issue 化（運用フロー）のインプットになる。
 
-HITL 承認の本格的な interrupt/continue は後続課題。M5 では確定稿を「承認待ち」
-として提示し、人間の承認を経て Issue 化する運用を前提とする（auto でも自動承認
-しない＝沈黙の確定を避ける）。
+HITL 承認は本格対応済み: ``--mode step`` で確定稿の前に承認ゲートへ interrupt し、
+``hokusai doc continue <wid> --approve|--reject`` で再開する（LangGraph interrupt +
+checkpointer）。auto モードは自動承認しない（承認待ちのまま＝沈黙の確定を避ける）。
 """
 
 from __future__ import annotations
@@ -157,6 +157,82 @@ def run_doc_workflow(
     return app.invoke(state)
 
 
+# === HITL（interrupt / continue）===========================================
+# step モードでは HITL 承認ゲートで interrupt するため、checkpointer 付きの
+# コンパイル済みアプリを使い、thread_id=workflow_id で start/continue を跨ぐ。
+
+_doc_checkpointer = None
+_doc_app = None
+
+
+def set_doc_checkpointer(checkpointer) -> None:
+    """doc-mode（HITL）の checkpointer を差し替える（テストで MemorySaver 注入）。
+
+    None を渡すと既定（SqliteSaver）に戻す。差し替え時はアプリを作り直す。
+    """
+    global _doc_checkpointer, _doc_app
+    _doc_checkpointer = checkpointer
+    _doc_app = None
+
+
+def _get_doc_app():
+    """checkpointer 付きのコンパイル済み doc-mode アプリ（HITL 用、再利用）。"""
+    global _doc_checkpointer, _doc_app
+    if _doc_app is not None:
+        return _doc_app
+    if _doc_checkpointer is None:
+        import sqlite3
+
+        from langgraph.checkpoint.sqlite import SqliteSaver
+
+        data_dir = get_config().data_dir
+        data_dir.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(
+            str(data_dir / "doc_checkpoint.db"), check_same_thread=False
+        )
+        # 別プロセスからの `doc continue` でのロック耐性（graph.py と同じ PRAGMA）
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        checkpointer = SqliteSaver(conn)
+        checkpointer.setup()
+        _doc_checkpointer = checkpointer
+    _doc_app = create_compiled_doc_workflow(_doc_checkpointer)
+    return _doc_app
+
+
+def start_doc_step(
+    doc_type: str,
+    topic: str,
+    feature_page_id: str = "",
+    max_rounds: int = 1,
+    workflow_id: Optional[str] = None,
+):
+    """step モードで開始。HITL ゲートで interrupt し (wid, state, interrupted) を返す。"""
+    wid = workflow_id or f"doc-{uuid.uuid4().hex[:8]}"
+    app = _get_doc_app()
+    state = create_doc_workflow_state(
+        workflow_id=wid,
+        doc_type=doc_type,
+        topic=topic,
+        feature_page_id=feature_page_id,
+        run_mode="step",
+        max_rounds=max_rounds,
+    )
+    config = {"configurable": {"thread_id": wid}}
+    result = app.invoke(state, config=config)
+    interrupted = "__interrupt__" in result
+    return wid, result, interrupted
+
+
+def continue_doc(workflow_id: str, approve: bool) -> DocWorkflowState:
+    """interrupt 中の doc-mode を承認/却下で再開し、確定 state を返す。"""
+    from langgraph.types import Command
+
+    app = _get_doc_app()
+    config = {"configurable": {"thread_id": workflow_id}}
+    return app.invoke(Command(resume=bool(approve)), config=config)
+
+
 def _resolve_max_rounds(args, doc_cfg) -> int:
     """--max-rounds 未指定時は doc_orchestration.rounds を既定反映する。"""
     max_rounds = getattr(args, "max_rounds", None)
@@ -185,12 +261,22 @@ def _emit_doc_output(state: DocWorkflowState, template_ok: bool) -> bool:
     return True
 
 
+def _issue_handoff_note() -> None:
+    print()
+    print("→ この確定稿は Issue 化のインプット（運用フロー）として利用できます。")
+
+
 def handle_doc(args) -> int:
     """`hokusai doc ...` のエントリ。終了コードを返す。"""
-    if getattr(args, "doc_subcommand", None) != "start":
+    sub = getattr(args, "doc_subcommand", None)
+    if sub == "continue":
+        return handle_doc_continue(args)
+    if sub != "start":
         print(
-            "usage: hokusai doc start --type <requirements|design> "
-            "--topic <text> [--feature-page <id>] [--max-rounds N] [--mode step|auto]"
+            "usage:\n"
+            "  hokusai doc start --type <requirements|design> --topic <text> "
+            "[--feature-page <id>] [--max-rounds N] [--mode step|auto]\n"
+            "  hokusai doc continue <workflow-id> [--approve|--reject]"
         )
         return 1
 
@@ -203,13 +289,19 @@ def handle_doc(args) -> int:
         )
         return 1
 
+    max_rounds = _resolve_max_rounds(args, doc_cfg)
+    mode = getattr(args, "mode", "auto") or "auto"
+
+    if mode == "step":
+        return _handle_doc_start_step(args, max_rounds)
+
     try:
         state = run_doc_workflow(
             doc_type=args.type,
             topic=args.topic,
             feature_page_id=getattr(args, "feature_page", "") or "",
-            run_mode=getattr(args, "mode", "auto") or "auto",
-            max_rounds=_resolve_max_rounds(args, doc_cfg),
+            run_mode="auto",
+            max_rounds=max_rounds,
         )
     except Exception as exc:  # noqa: BLE001 - CLI 境界でユーザに要約表示する
         logger.warning("doc-mode 実行に失敗: %s", exc)
@@ -219,8 +311,59 @@ def handle_doc(args) -> int:
     template_ok = bool((state.get("template_check") or {}).get("ok"))
     if not _emit_doc_output(state, template_ok):
         return 1
+    _issue_handoff_note()
+    return 0 if template_ok else 2
 
-    print()
-    print("→ この確定稿は Issue 化のインプット（運用フロー）として利用できます。")
 
+def _handle_doc_start_step(args, max_rounds: int) -> int:
+    """step モード: HITL ゲートで停止し、continue を促す。"""
+    try:
+        wid, result, interrupted = start_doc_step(
+            doc_type=args.type,
+            topic=args.topic,
+            feature_page_id=getattr(args, "feature_page", "") or "",
+            max_rounds=max_rounds,
+        )
+    except Exception as exc:  # noqa: BLE001 - CLI 境界でユーザに要約表示する
+        logger.warning("doc-mode（step）実行に失敗: %s", exc)
+        print(f"doc-mode 実行に失敗しました: {exc}")
+        return 1
+
+    if interrupted:
+        print("【HITL】確定稿のレビューをお願いします（承認待ち）。\n")
+        print(render_doc_output(result))
+        print(f"\n承認: hokusai doc continue {wid} --approve")
+        print(f"却下: hokusai doc continue {wid} --reject")
+        return 0
+
+    # interrupt されなかった（型NG が上限到達で終了した等）→ そのまま出力
+    template_ok = bool((result.get("template_check") or {}).get("ok"))
+    if not _emit_doc_output(result, template_ok):
+        return 1
+    return 0 if template_ok else 2
+
+
+def handle_doc_continue(args) -> int:
+    """`hokusai doc continue <wid> [--approve|--reject]` のハンドラ。"""
+    wid = getattr(args, "workflow_id", None)
+    if not wid:
+        print("usage: hokusai doc continue <workflow-id> [--approve|--reject]")
+        return 1
+
+    approve = not getattr(args, "reject", False)  # 既定は承認（--reject で却下）
+    try:
+        final = continue_doc(wid, approve)
+    except Exception as exc:  # noqa: BLE001 - CLI 境界でユーザに要約表示する
+        logger.warning("doc-mode 再開に失敗: %s", exc)
+        print(f"doc-mode の再開に失敗しました: {exc}")
+        return 1
+
+    if not final.get("approved", False):
+        print("却下されました。Notion 出力はスキップします。")
+        return 1
+
+    template_ok = bool((final.get("template_check") or {}).get("ok"))
+    if not _emit_doc_output(final, template_ok):
+        return 1
+    _issue_handoff_note()
     return 0 if template_ok else 2

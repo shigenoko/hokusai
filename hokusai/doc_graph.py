@@ -10,6 +10,7 @@ Issue #176 / 設計書「Phase 0 doc-mode ワークフロー」§3・§6 に対�
 from langgraph.graph import END, StateGraph
 
 from .nodes.phase0_doc import (
+    phase0_human_gate_node,
     phase0a_ideation_node,
     phase0b_draft_node,
     phase0c_crosscheck_node,
@@ -23,8 +24,8 @@ from .state import DocWorkflowState
 def create_doc_workflow() -> StateGraph:
     """doc-mode の StateGraph を構築する（未コンパイル）。
 
-    M3+M4: ideation → draft → crosscheck（rounds ループ）→ finalize
-    （型NG なら draft へ戻す、上限つき）。
+    ideation → draft → crosscheck（rounds ループ）→ finalize
+    （型NG なら draft へ戻す、上限つき）→ HITL 承認ゲート → END。
     """
     workflow = StateGraph(DocWorkflowState)
 
@@ -32,6 +33,7 @@ def create_doc_workflow() -> StateGraph:
     workflow.add_node("phase0b_draft", phase0b_draft_node)
     workflow.add_node("phase0c_crosscheck", phase0c_crosscheck_node)
     workflow.add_node("phase0d_finalize", phase0d_finalize_node)
+    workflow.add_node("phase0_human_gate", phase0_human_gate_node)
 
     workflow.set_entry_point("phase0a_ideation")
     workflow.add_edge("phase0a_ideation", "phase0b_draft")
@@ -47,15 +49,19 @@ def create_doc_workflow() -> StateGraph:
         },
     )
 
-    # finalize: 型NG なら draft に戻す（上限到達で END）
+    # finalize: 型NG→draft 戻し（上限到達で END）、型OK→HITL ゲート
     workflow.add_conditional_edges(
         "phase0d_finalize",
         should_fix_template,
         {
             "phase0b_draft": "phase0b_draft",
+            "phase0_human_gate": "phase0_human_gate",
             "END": END,
         },
     )
+
+    # HITL 承認ゲート → END
+    workflow.add_edge("phase0_human_gate", END)
 
     return workflow
 
