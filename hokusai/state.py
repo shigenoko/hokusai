@@ -878,3 +878,76 @@ def all_repositories_completed(
         ):
             return False
     return True
+
+
+# =====================================================================
+# Phase 0 doc-mode（Multi-LLM ドキュメント・オーケストレーション）
+# Issue #176 / 設計書「Phase 0 doc-mode ワークフロー」§4 に対応（M1）
+# =====================================================================
+
+
+class DocWorkflowState(TypedDict):
+    """doc-mode ワークフロー状態（要件定義書 / 設計書の生成）
+
+    実装フロー（WorkflowState / phase1-10）とは独立した別グラフ用の状態。
+    M1 では draft → crosscheck → finalize の最小パスで使用する。
+    """
+
+    # === 識別情報 ===
+    workflow_id: str
+    doc_type: str  # "requirements" | "design"
+    topic: str
+    feature_page_id: str  # 出力先 Notion 機能ページ ID（M5 で使用）
+
+    # === 実行制御 ===
+    run_mode: str  # "step" | "auto"
+    current_step: str
+
+    # === 各ステップ成果 ===
+    ideation_result: str
+    draft: str
+    review_notes: list  # round ごとの指摘（list[str]）
+    round: int
+    max_rounds: int
+    finalize_attempts: int  # 型NG で draft に戻った回数
+    max_finalize_rounds: int  # 型NG ループの上限（無限ループ防止）
+    template_check: dict  # {"ok": bool, "missing": list[str]}
+    final_doc: str
+    approved: bool
+
+    # === 監査 ===
+    audit_log: list  # List[AuditLogEntry]（add_audit_log と互換）
+    updated_at: str
+
+
+def create_doc_workflow_state(
+    workflow_id: str,
+    doc_type: str,
+    topic: str,
+    feature_page_id: str = "",
+    run_mode: str = "auto",
+    max_rounds: int = 1,
+    max_finalize_rounds: int = 2,
+) -> DocWorkflowState:
+    """doc-mode 用の初期状態を生成する。"""
+    now = datetime.now().isoformat()
+    return DocWorkflowState(
+        workflow_id=workflow_id,
+        doc_type=doc_type,
+        topic=topic,
+        feature_page_id=feature_page_id,
+        run_mode=run_mode,
+        current_step="",
+        ideation_result="",
+        draft="",
+        review_notes=[],
+        round=0,
+        max_rounds=max_rounds,
+        finalize_attempts=0,
+        max_finalize_rounds=max_finalize_rounds,
+        template_check={},
+        final_doc="",
+        approved=False,
+        audit_log=[],
+        updated_at=now,
+    )

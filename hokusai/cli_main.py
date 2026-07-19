@@ -536,6 +536,67 @@ def _build_parser():
         ),
     )
 
+    # doc コマンド: doc-mode（要件/設計の Multi-LLM 生成）。Issue #176 / Phase 0
+    doc_parser = subparsers.add_parser(
+        "doc",
+        help="doc-mode（要件定義/設計書の Multi-LLM 生成）",
+        parents=[shared_options],
+    )
+    doc_subparsers = doc_parser.add_subparsers(
+        dest="doc_subcommand",
+        help="doc サブコマンド",
+    )
+    doc_start_parser = doc_subparsers.add_parser(
+        "start",
+        help="doc-mode を開始する",
+        parents=[shared_options],
+    )
+    doc_start_parser.add_argument(
+        "--type",
+        required=True,
+        choices=["requirements", "design"],
+        help="生成する文書種別",
+    )
+    doc_start_parser.add_argument(
+        "--topic",
+        required=True,
+        help="トピック/ブリーフ",
+    )
+    doc_start_parser.add_argument(
+        "--feature-page",
+        dest="feature_page",
+        default="",
+        help="出力先 Notion 機能ページ ID（任意）",
+    )
+    doc_start_parser.add_argument(
+        "--max-rounds",
+        dest="max_rounds",
+        type=int,
+        default=None,
+        help="crosscheck の周回数（未指定時は doc_orchestration.rounds、既定 1）",
+    )
+    doc_start_parser.add_argument(
+        "--mode",
+        choices=["step", "auto"],
+        default="auto",
+        help="実行モード（既定 auto）。step は HITL 承認ゲートで停止する",
+    )
+
+    # doc continue: HITL 承認で doc-mode（step）を再開
+    doc_continue_parser = doc_subparsers.add_parser(
+        "continue",
+        help="HITL 承認で doc-mode（step）を再開する",
+        parents=[shared_options],
+    )
+    doc_continue_parser.add_argument("workflow_id", help="再開する doc workflow ID")
+    doc_continue_group = doc_continue_parser.add_mutually_exclusive_group()
+    doc_continue_group.add_argument(
+        "--approve", action="store_true", help="確定稿を承認する（既定）"
+    )
+    doc_continue_group.add_argument(
+        "--reject", action="store_true", help="確定稿を却下する"
+    )
+
     # audit コマンド: SQLite `audit_logs` を CLI から覗く（F3 / PR #123）
     audit_parser = subparsers.add_parser(
         "audit",
@@ -885,6 +946,61 @@ def _build_parser():
              "（`hokusai --dry-run backfill`）",
     )
 
+    # backup コマンド: state DB（workflow.db / checkpoint.db）の整合スナップ
+    # ショット作成（T1 / Production Readiness）。
+    backup_parser = subparsers.add_parser(
+        "backup",
+        help="state DB(workflow.db / checkpoint.db)の整合スナップショットを作成",
+        parents=[shared_options],
+    )
+    backup_parser.add_argument(
+        "--out", default=None,
+        help="スナップショット格納先ディレクトリ（既定 <data_dir>/backups）",
+    )
+    backup_parser.add_argument(
+        "--label", default=None,
+        help="manifest に残す任意のメモ",
+    )
+    backup_parser.add_argument(
+        "--keep", type=int, default=None,
+        help="作成後に新しい N 世代だけ残して古いスナップショットを削除",
+    )
+    backup_parser.add_argument(
+        "--list", action="store_true",
+        help="作成せず既存スナップショット一覧を表示",
+    )
+    backup_parser.add_argument(
+        "--output", choices=("text", "json"), default="text",
+        help="出力形式（既定 text）",
+    )
+
+    # restore コマンド: スナップショットから state DB を復元（T1）。
+    restore_parser = subparsers.add_parser(
+        "restore",
+        help="スナップショットから state DB を復元（現 DB は .pre-restore に退避）",
+        parents=[shared_options],
+    )
+    restore_parser.add_argument(
+        "--from", dest="from_ref", required=True,
+        help="復元元スナップショット（snapshot_id / パス / 'latest'）",
+    )
+    restore_parser.add_argument(
+        "--out", default=None,
+        help="スナップショット探索ディレクトリ（既定 <data_dir>/backups）",
+    )
+    restore_parser.add_argument(
+        "--yes", action="store_true",
+        help="確認プロンプトを省略して実行",
+    )
+    restore_parser.add_argument(
+        "--no-verify", action="store_true",
+        help="適用前の integrity_check を省略（非推奨）",
+    )
+    restore_parser.add_argument(
+        "--output", choices=("text", "json"), default="text",
+        help="出力形式（既定 text）",
+    )
+
     return parser, profile_parser, connect_parser
 
 
@@ -1214,10 +1330,22 @@ def main():
     if args.command == "backfill":
         sys.exit(_handle_backfill(args, config))
 
+    # backup / restore コマンド: state DB の整合スナップショット（T1）
+    if args.command == "backup":
+        sys.exit(_handle_backup(args, config))
+    if args.command == "restore":
+        sys.exit(_handle_restore(args, config))
+
     # llm-gateway-setup コマンド: 現 LLM Gateway 設定を診断 + 推奨設定提示
     # （F2 / PR #125）。
     if args.command == "llm-gateway-setup":
         sys.exit(_handle_llm_gateway_setup(args, config))
+
+    # doc コマンド: doc-mode（Phase 0 / Issue #176）
+    if args.command == "doc":
+        from .doc_cli import handle_doc
+
+        sys.exit(handle_doc(args))
 
     # 環境設定チェック（start/continueコマンドの場合）
     if args.command in ("start", "continue"):
@@ -1911,7 +2039,12 @@ def _load_baseline_fixtures(path: str) -> list:
     """
     import json
 
-    with open(path, encoding="utf-8") as f:
+    # 構築されたパスをファイルアクセス前に検証する（path traversal 防止 / SonarQube）。
+    resolved = Path(path).expanduser().resolve()
+    if not resolved.is_file():
+        raise ValueError(f"baseline ファイルが存在しません: {path!r}")
+
+    with open(resolved, encoding="utf-8") as f:
         data = json.load(f)
     if isinstance(data, dict) and isinstance(data.get("fixtures"), list):
         return data["fixtures"]
@@ -1985,6 +2118,223 @@ def _handle_backfill(args, config) -> int:
             f"  合計: review_issues {totals['review_issues']} / "
             f"work_items {totals['work_items']} / edges {totals['edges']}"
         )
+    return 0
+
+
+def _resolve_backup_dir(args, config) -> Path:
+    """backup / restore のスナップショット親ディレクトリを解決する。
+
+    `--out` 指定があればそれを、無ければ `<data_dir>/backups`。
+    `--out` はユーザー入力なので `expanduser()` で `~/...` を展開する。
+    """
+    out = getattr(args, "out", None)
+    if out:
+        return Path(out).expanduser()
+    return Path(config.data_dir) / "backups"
+
+
+def _handle_backup(args, config) -> int:
+    """`hokusai backup ...` のハンドラ（T1 / Production Readiness）。
+
+    state DB（workflow.db / checkpoint.db）の整合スナップショットを SQLite の
+    online backup API で作成する。`--list` で既存一覧、`--keep N` で世代刈り込み。
+
+    Returns:
+        0: 正常 / 1: 退避対象 DB なし等の操作的失敗
+    """
+    import json
+
+    from . import __version__
+    from .persistence import (
+        BackupError,
+        create_backup,
+        list_backups,
+        prune_backups,
+    )
+
+    out_dir = _resolve_backup_dir(args, config)
+    output = getattr(args, "output", "text")
+    profile = getattr(args, "profile", None)
+
+    # --list: 作成せず一覧表示
+    if getattr(args, "list", False):
+        backups = list_backups(out_dir)
+        if output == "json":
+            print(json.dumps(
+                {"out_dir": str(out_dir), "backups": backups},
+                ensure_ascii=False, indent=2, default=str,
+            ))
+        else:
+            if not backups:
+                print(f"スナップショットはありません: {out_dir}")
+            else:
+                print(f"スナップショット一覧（{out_dir}）:")
+                for m in backups:
+                    # manifest.json は手動編集 / 破損し得るのでキー欠落でも
+                    # 落ちないよう .get() ベースで表示する。
+                    sid = m.get("snapshot_id", "(unknown)")
+                    comp_map = m.get("components") or {}
+                    comps = ", ".join(comp_map.keys()) if isinstance(comp_map, dict) else ""
+                    label = f" [{m['label']}]" if m.get("label") else ""
+                    print(f"  {sid}  ({comps}){label}")
+        return 0
+
+    keep = getattr(args, "keep", None)
+
+    # --keep は作成「前」に検証する。作成後に prune_backups で弾くと、失敗
+    # （exit 1）したのにスナップショットだけ増える非原子的な状態になるため
+    # （PR #174 Copilot 5 巡目指摘）。
+    if keep is not None and keep < 0:
+        print("✗ --keep は 0 以上である必要があります", file=sys.stderr)
+        return 1
+
+    # トップレベル --dry-run: 作成・刈り込みを行わず予定内容のみ出力（backfill /
+    # cleanup と同じ規約）。
+    if getattr(args, "dry_run", False):
+        targets = {
+            "workflow": Path(config.database_path),
+            "checkpoint": Path(config.checkpoint_db_path),
+        }
+        present = {n: p for n, p in targets.items() if p.exists()}
+        if output == "json":
+            print(json.dumps(
+                {
+                    "dry_run": True,
+                    "out_dir": str(out_dir),
+                    "would_backup": {n: str(p) for n, p in present.items()},
+                    "keep": keep,
+                },
+                ensure_ascii=False, indent=2, default=str,
+            ))
+        else:
+            print(f"[dry-run] スナップショットを作成します（実行なし）: {out_dir}")
+            if present:
+                for n, p in present.items():
+                    print(f"  - {n}: {p}")
+            else:
+                print("  対象 DB が見つかりません")
+            if keep is not None:
+                print(f"  作成後に新しい {keep} 世代を残して刈り込み")
+        return 0
+
+    try:
+        manifest = create_backup(
+            database_path=config.database_path,
+            checkpoint_db_path=config.checkpoint_db_path,
+            out_dir=out_dir,
+            label=getattr(args, "label", None),
+            version=__version__,
+            profile=profile,
+        )
+        removed: list[str] = []
+        if keep is not None:
+            removed = prune_backups(out_dir, keep)
+    except BackupError as e:
+        print(f"✗ {e}", file=sys.stderr)
+        return 1
+
+    if output == "json":
+        print(json.dumps(
+            {"created": manifest, "pruned": removed},
+            ensure_ascii=False, indent=2, default=str,
+        ))
+    else:
+        comps = manifest.get("components", {})
+        print(f"✓ スナップショットを作成しました: {manifest['snapshot_id']}")
+        print(f"  保存先: {manifest['path']}")
+        for name, info in comps.items():
+            ok = "ok" if info.get("integrity_ok") else "NG"
+            size_kb = info.get("size_bytes", 0) / 1024
+            print(f"  - {name}: {size_kb:.1f} KB (integrity {ok})")
+        if removed:
+            print(f"  刈り込み: {len(removed)} 世代削除 ({', '.join(removed)})")
+    return 0
+
+
+def _handle_restore(args, config) -> int:
+    """`hokusai restore --from <snapshot> ...` のハンドラ（T1）。
+
+    スナップショットから state DB を復元する。適用前に integrity_check を行い、
+    現 DB を `<db>.pre-restore` に退避してから差し替える。
+
+    Returns:
+        0: 正常 / 1: スナップショット不在・integrity NG・確認中断等
+    """
+    import json
+
+    from .persistence import (
+        BackupError,
+        resolve_snapshot,
+        restore_backup,
+    )
+
+    out_dir = _resolve_backup_dir(args, config)
+    output = getattr(args, "output", "text")
+    ref = getattr(args, "from_ref", None)
+
+    snapshot_dir = resolve_snapshot(out_dir, ref)
+    if snapshot_dir is None:
+        print(
+            f"✗ スナップショットが見つかりません: {ref}（探索先: {out_dir}）",
+            file=sys.stderr,
+        )
+        return 1
+
+    # トップレベル --dry-run: 破壊的操作のため、解決したスナップショットと
+    # 復元先パスを表示するだけで実行しない（確認プロンプトもスキップ）。
+    if getattr(args, "dry_run", False):
+        if output == "json":
+            print(json.dumps(
+                {
+                    "dry_run": True,
+                    "snapshot_dir": str(snapshot_dir),
+                    "targets": {
+                        "workflow": str(config.database_path),
+                        "checkpoint": str(config.checkpoint_db_path),
+                    },
+                },
+                ensure_ascii=False, indent=2, default=str,
+            ))
+        else:
+            print(f"[dry-run] 復元します（実行なし）: {snapshot_dir}")
+            print(f"  workflow.db   → {config.database_path}")
+            print(f"  checkpoint.db → {config.checkpoint_db_path}")
+        return 0
+
+    # 確認プロンプト（--yes で省略）。現 DB を上書きする破壊的操作のため。
+    if not getattr(args, "yes", False):
+        print(f"スナップショット {snapshot_dir} から state DB を復元します。")
+        print(f"  workflow.db   → {config.database_path}")
+        print(f"  checkpoint.db → {config.checkpoint_db_path}")
+        print("現在の DB は .pre-restore に退避されます。")
+        try:
+            answer = input("続行しますか？ [y/N]: ").strip().lower()
+        except EOFError:
+            answer = ""
+        if answer not in ("y", "yes"):
+            print("中断しました。", file=sys.stderr)
+            return 1
+
+    try:
+        result = restore_backup(
+            snapshot_dir=snapshot_dir,
+            database_path=config.database_path,
+            checkpoint_db_path=config.checkpoint_db_path,
+            verify=not getattr(args, "no_verify", False),
+        )
+    except BackupError as e:
+        print(f"✗ {e}", file=sys.stderr)
+        return 1
+
+    if output == "json":
+        print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+    else:
+        print(f"✓ 復元しました（snapshot {result['snapshot_id']}）")
+        for r in result["restored"]:
+            line = f"  - {r['component']} → {r['target']}"
+            if r.get("pre_restore"):
+                line += f"（退避: {r['pre_restore']}）"
+            print(line)
     return 0
 
 

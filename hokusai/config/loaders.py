@@ -15,6 +15,7 @@ from .models import (
     CrossReviewConfig,
     DesignRateLimitConfig,
     DesignRetryConfig,
+    DocOrchestrationConfig,
     FigmaIntegrationConfig,
     GitHostingConfig,
     LLMGatewayConfig,
@@ -181,6 +182,55 @@ def _parse_cross_review_config(config_dict: dict) -> CrossReviewConfig:
         timeout=cr_config.get("timeout", 300),
         on_failure=on_failure,
         max_correction_rounds=max_correction_rounds,
+    )
+
+
+def _parse_doc_orchestration_config(config_dict: dict) -> DocOrchestrationConfig:
+    """doc_orchestration（Phase 0 doc-mode）設定をパースする。
+
+    未指定 / 不正値は既定にフォールバックする。roles は role ごとに
+    provider を検証し、未知 provider のエントリは既定にフォールバックする。
+    """
+    raw = config_dict.get("doc_orchestration", {})
+    if not isinstance(raw, dict):
+        return DocOrchestrationConfig()
+
+    enabled = bool(raw.get("enabled", False))
+
+    rounds = raw.get("rounds", 1)
+    if not isinstance(rounds, int) or isinstance(rounds, bool) or rounds < 1:
+        rounds = 1
+
+    valid_providers = {"claude_code", "codex", "gemini"}
+    default_roles = DocOrchestrationConfig().roles
+    raw_roles = raw.get("roles")
+    if not isinstance(raw_roles, dict):
+        raw_roles = {}
+
+    parsed_roles: dict = {}
+    for role, default in default_roles.items():
+        entry = raw_roles.get(role, default)
+        if isinstance(entry, dict) and entry.get("provider") in valid_providers:
+            parsed_roles[role] = {"provider": entry["provider"]}
+        else:
+            if isinstance(entry, dict) and entry.get("provider") is not None:
+                _logger.warning(
+                    "doc_orchestration.roles.%s.provider=%r は未対応です"
+                    "（claude_code / codex / gemini）。既定にフォールバックします。",
+                    role,
+                    entry.get("provider"),
+                )
+            parsed_roles[role] = dict(default)
+
+    model = raw.get("model", "")
+    if not isinstance(model, str):
+        model = ""
+
+    return DocOrchestrationConfig(
+        enabled=enabled,
+        rounds=rounds,
+        roles=parsed_roles,
+        model=model,
     )
 
 

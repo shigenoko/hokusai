@@ -242,6 +242,78 @@ mcp__notion__notion-search ツールを使って "test" で検索し、
         """
         return self.insert_after_existing(page_url, markdown_content, after_marker=None)
 
+    def create_subpage(
+        self, parent_page_url: str, title: str, markdown_content: str
+    ) -> str | None:
+        """親ページ配下に新規子ページを作成する（Claude Code 経由で MCP）。
+
+        doc-mode の確定稿を IA に従って機能ページ配下へ保存する用途。
+        HOKUSAI の唯一書き込み経路（agent 経由の統制された MCP 呼び出し）を踏襲する。
+
+        Args:
+            parent_page_url: 親ページの URL または ID（出力先機能ページ）
+            title: 新規子ページのタイトル
+            markdown_content: ページ本文（Markdown）
+
+        Returns:
+            成功時は作成ページの URL（抽出できなければ空文字）、失敗時は None。
+        """
+        try:
+            parent_id = self._extract_page_id(parent_page_url)
+            escaped_content = markdown_content.replace('"""', '\\"\\"\\"')
+            escaped_title = title.replace('"', "'")
+
+            prompt = f"""以下の Notion 親ページの配下に、新規子ページを1つ作成してください。
+
+親ページID: {parent_id}
+新規ページタイトル: {escaped_title}
+
+ページ本文（Markdown）:
+\"\"\"
+{escaped_content}
+\"\"\"
+
+手順:
+1. mcp__notion__notion-create-pages を使用する
+2. parent は page_id={parent_id}（親ページ直下の子ページ）とする
+3. properties.title に上記タイトル、content に上記本文（Markdown）を設定する
+
+成功したら「作成完了: <作成したページのURL>」、
+失敗したら「作成失敗: <理由>」と出力してください。
+"""
+
+            result = self.claude.execute_prompt(
+                prompt, timeout=180, allow_mcp_tools=True
+            )
+
+            import re
+
+            lowered = result.lower()
+            # 失敗キーワードを先に判定（"not created" 等で success 誤判定しないため）
+            failure_markers_ja = ("作成失敗", "失敗")
+            failure_markers_en = ("error", "failed", "not created")
+            if any(m in result for m in failure_markers_ja) or any(
+                m in lowered for m in failure_markers_en
+            ):
+                logger.warning(f"Notion 子ページ作成失敗: {result[:300]}")
+                return None
+
+            # 成功扱いには URL 抽出を必須とする（曖昧な出力を成功にしない）
+            match = re.search(r"https?://[^\s)\"']+", result)
+            if match and ("作成完了" in result or "created" in lowered):
+                url = match.group(0)
+                logger.info(f"Notion 子ページ作成成功（親: {parent_id}）: {url}")
+                return url
+
+            logger.warning(
+                f"Notion 子ページ作成の結果が不明確（失敗扱い）: {result[:300]}"
+            )
+            return None
+
+        except Exception:
+            logger.exception("Notion 子ページ作成に失敗")
+            raise
+
     def replace_content_block(self, page_url: str, old_str: str, new_str: str) -> bool:
         """ページ内の既存 Markdown 断片を search-and-replace で置換する。"""
         try:
